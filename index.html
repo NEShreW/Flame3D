@@ -29,7 +29,7 @@
       --danger:   #f85149;
       --success:  #3fb950;
       --topH:     46px;
-      --sideW:    188px;
+      --sideW:    200px;
     }
 
     body {
@@ -73,11 +73,41 @@
       flex-shrink: 0;
     }
     .tb-group { display: flex; align-items: center; gap: 3px; }
+    .top-panel {
+      display: none;
+      align-items: center;
+      gap: 4px;
+    }
+    .top-panel.active { display: flex; }
     .tb-label {
       color: var(--muted);
       font-size: 11px;
       padding: 0 3px;
       white-space: nowrap;
+    }
+    .tb-mini {
+      color: var(--muted);
+      font-size: 10px;
+      letter-spacing: .06em;
+      padding-left: 4px;
+      white-space: nowrap;
+    }
+    .axis-side-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      margin-left: 2px;
+    }
+    .axis-side-lbl {
+      color: var(--muted);
+      font-size: 9px;
+      letter-spacing: .04em;
+    }
+    .axis-side-select {
+      font-size: 10px;
+      padding: 2px 4px;
+      border-radius: 4px;
+      min-width: 42px;
     }
 
     /* ── Buttons ──────────────────────────────────────────── */
@@ -139,6 +169,42 @@
     }
     select:hover { border-color: var(--accentHi); }
 
+    input[type="number"] {
+      width: 68px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      padding: 4px 7px;
+      font-family: inherit;
+      font-size: 12px;
+    }
+    input[type="number"]:hover,
+    input[type="number"]:focus {
+      border-color: var(--accentHi);
+      outline: none;
+    }
+
+    input[type="range"] {
+      accent-color: var(--accentHi);
+      width: 100%;
+    }
+
+    input[type="color"] {
+      width: 34px;
+      height: 24px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface2);
+      padding: 2px;
+      cursor: pointer;
+    }
+    input[type="color"]:hover,
+    input[type="color"]:focus {
+      border-color: var(--accentHi);
+      outline: none;
+    }
+
     /* ── Workspace ────────────────────────────────────────── */
     #workspace {
       flex: 1;
@@ -155,7 +221,65 @@
       display: flex;
       flex-direction: column;
       flex-shrink: 0;
+      min-height: 0;
+      min-width: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      overscroll-behavior: contain;
+      transition: width .16s ease, border-color .16s ease;
+    }
+    #sidebar-resizer {
+      width: 14px;
+      flex: 0 0 14px;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(180deg, #121820, #0f141b);
+      border-right: 1px solid var(--border);
+      cursor: col-resize;
+      transition: background .16s ease, border-color .16s ease;
+    }
+    #sidebar-resizer::before {
+      content: '';
+      width: 4px;
+      height: 42px;
+      border-radius: 999px;
+      background: linear-gradient(180deg, #30363d, #5b6572, #30363d);
+      opacity: .72;
+    }
+    #sidebar-resizer:hover {
+      background: #19202a;
+      border-color: var(--accentHi);
+    }
+    #sidebar-toggle {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border-radius: 999px;
+      font-size: 11px;
+      line-height: 1;
+      z-index: 2;
+    }
+    #workspace.sidebar-collapsed #sidebar {
+      width: 0;
+      border-right-color: transparent;
       overflow: hidden;
+    }
+    #workspace.sidebar-collapsed #sidebar-resizer {
+      cursor: default;
+    }
+    #workspace.sidebar-collapsed #sidebar-resizer::before {
+      height: 28px;
+      opacity: .55;
+    }
+    #workspace.sidebar-resizing #sidebar,
+    #workspace.sidebar-resizing #sidebar-resizer {
+      transition: none;
     }
     .panel-hdr {
       padding: 7px 11px;
@@ -173,6 +297,18 @@
       gap: 5px;
       padding: 9px;
     }
+    .lib-category {
+      border-bottom: 1px solid #1a1f26;
+    }
+    .lib-category:last-child { border-bottom: none; }
+    .lib-category-title {
+      padding: 8px 11px 0;
+      color: var(--muted);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
     .lib-btn {
       flex-direction: column;
       gap: 2px;
@@ -182,7 +318,32 @@
     }
     .lib-btn .icon { font-size: 18px; }
 
-    #props-panel { flex: 1; overflow-y: auto; border-top: 1px solid var(--border); }
+    /* Sidebar sections */
+    .sidebar-section { display: none; flex: 0 0 auto; }
+    .sidebar-section.active { display: block; }
+    .sidebar-form { padding: 9px; display: flex; flex-direction: column; gap: 6px; }
+    .sf-row { display: flex; align-items: center; gap: 6px; }
+    .sf-label { color: var(--muted); font-size: 10px; min-width: 62px; letter-spacing: .04em; }
+    .sf-row input[type="number"] { width: 62px; flex-shrink: 0; }
+    .sf-row input[type="checkbox"] { margin: 0; }
+    .sf-row select { flex: 1; min-width: 0; }
+    .sf-sub {
+      color: var(--muted); font-size: 9px; padding: 6px 0 2px;
+      letter-spacing: .08em; text-transform: uppercase; font-weight: 700;
+      border-bottom: 1px solid var(--border); margin-bottom: 2px;
+    }
+
+    /* Conditional trigger entries */
+    .ct-entry {
+      display: flex; flex-wrap: wrap; gap: 3px; align-items: center;
+      padding: 4px 0; border-bottom: 1px solid #1a1f26; font-size: 10px;
+    }
+    .ct-entry select { font-size: 10px; padding: 2px 3px; }
+    .ct-entry input[type="number"] { width: 44px; font-size: 10px; padding: 2px 4px; }
+    .ct-entry .ct-arrow { color: var(--accentHi); font-weight: 700; }
+    .ct-del { background: none; border: none; color: var(--danger); cursor: pointer; font-size: 12px; padding: 0 3px; }
+
+    #props-panel { flex: 0 0 auto; overflow: visible; border-top: 1px solid var(--border); }
     .prop-row {
       display: flex;
       align-items: flex-start;
@@ -198,6 +359,24 @@
       letter-spacing: .04em;
     }
     .prop-val { color: var(--text); font-size: 11px; word-break: break-all; }
+    .prop-controls {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .prop-controls input[type="number"] {
+      width: 56px;
+      flex-shrink: 0;
+    }
+    .prop-code {
+      color: var(--muted);
+      font-size: 10px;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+      white-space: nowrap;
+      padding-top: 5px;
+    }
 
     /* ── Canvas container ─────────────────────────────────── */
     #canvas-container { flex: 1; position: relative; overflow: hidden; }
@@ -258,9 +437,98 @@
     .s-play  { color: var(--success);  font-weight: 600; }
     .s-sep   { opacity: .4; margin: 0 5px; }
     .s-hit   { color: #f0c060; }
+
+    /* ── Main menu ────────────────────────────────────────── */
+    #main-menu {
+      position: fixed; inset: 0; z-index: 9999;
+      background: var(--bg);
+      display: flex; flex-direction: column; align-items: center;
+      overflow-y: auto;
+    }
+    #main-menu.hidden { display: none; }
+    .mm-header {
+      text-align: center; padding: 60px 20px 30px; flex-shrink: 0;
+    }
+    .mm-logo {
+      font-size: 52px; font-weight: 800; letter-spacing: .04em;
+      background: linear-gradient(135deg, #f97316, #fb923c, #fbbf24);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .mm-sub {
+      color: var(--muted); font-size: 13px; margin-top: 6px; letter-spacing: .06em;
+    }
+    .mm-actions {
+      display: flex; gap: 10px; margin: 24px 0 32px; flex-wrap: wrap; justify-content: center;
+    }
+    .mm-btn {
+      padding: 10px 22px; font-size: 14px; font-weight: 600; border-radius: 8px;
+      transition: background .15s, border-color .15s, transform .1s;
+    }
+    .mm-btn:hover { transform: translateY(-1px); }
+    .mm-btn-primary {
+      background: linear-gradient(135deg, #1f6feb, #388bfd);
+      border-color: #388bfd; color: #fff;
+    }
+    .mm-btn-primary:hover { background: linear-gradient(135deg, #2878f0, #58a6ff); border-color: #58a6ff; }
+    .mm-btn-import {
+      background: var(--surface2); border-color: var(--border); color: var(--text);
+    }
+    .mm-projects {
+      width: 100%; max-width: 600px; padding: 0 20px 40px;
+    }
+    .mm-projects-hdr {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .08em; color: var(--muted); padding-bottom: 8px;
+      border-bottom: 1px solid var(--border); margin-bottom: 10px;
+    }
+    .mm-empty {
+      text-align: center; color: var(--muted); font-size: 12px; padding: 28px 0;
+    }
+    .mm-project {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--surface); margin-bottom: 6px; cursor: pointer;
+      transition: background .12s, border-color .12s;
+    }
+    .mm-project:hover { background: var(--surface2); border-color: var(--accentHi); }
+    .mm-project-icon { font-size: 22px; flex-shrink: 0; }
+    .mm-project-info { flex: 1; min-width: 0; }
+    .mm-project-name {
+      font-size: 13px; font-weight: 600; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .mm-project-date { font-size: 10px; color: var(--muted); margin-top: 2px; }
+    .mm-project-objs { font-size: 10px; color: var(--muted); }
+    .mm-project-actions { display: flex; gap: 4px; flex-shrink: 0; }
+    .mm-project-del {
+      background: none; border: 1px solid transparent; color: var(--muted);
+      font-size: 14px; padding: 2px 6px; border-radius: 4px; cursor: pointer;
+    }
+    .mm-project-del:hover { color: var(--danger); border-color: var(--danger); }
+
+    /* Studio hidden state */
+    #topbar.studio-hidden, #workspace.studio-hidden { display: none !important; }
   </style>
 </head>
 <body>
+
+<!-- ── Main Menu ───────────────────────────────────────────── -->
+<div id="main-menu">
+  <div class="mm-header">
+    <div class="mm-logo">🔥 Flame3D</div>
+    <div class="mm-sub">FPS Level Editor</div>
+  </div>
+  <div class="mm-actions">
+    <button class="mm-btn mm-btn-primary" id="mm-new">✦ New Project</button>
+    <button class="mm-btn mm-btn-import" id="mm-import">📂 Import JSON</button>
+    <input id="mm-import-input" type="file" accept=".json" style="display:none"/>
+  </div>
+  <div class="mm-projects">
+    <div class="mm-projects-hdr">Saved Projects</div>
+    <div id="mm-project-list"></div>
+  </div>
+</div>
 
 <!-- ── Top bar ─────────────────────────────────────────────── -->
 <div id="topbar">
@@ -268,34 +536,80 @@
   <span class="tb-sep"></span>
 
   <div class="tb-group">
-    <span class="tb-label">Mode</span>
-    <button id="btn-place"  class="active" title="Place objects">⊕ Place</button>
-    <button id="btn-select"               title="Select &amp; transform (W/E/R)">↗ Select</button>
-    <button id="btn-delete"               title="Delete objects">✕ Delete</button>
-  </div>
-
-  <span class="tb-sep"></span>
-
-  <div class="tb-group" id="transform-group" style="opacity:.4;pointer-events:none">
-    <span class="tb-label">Gizmo</span>
-    <button id="btn-translate" class="active" title="Move (W)">↔ Move</button>
-    <button id="btn-rotate"                   title="Rotate (E)">↻ Rot</button>
-    <button id="btn-scale"                    title="Scale (R)">⤡ Scale</button>
-  </div>
-
-  <span class="tb-sep"></span>
-
-  <div class="tb-group">
-    <span class="tb-label">Snap</span>
-    <select id="snap-select">
-      <option value="0">None</option>
-      <option value="0.25">0.25</option>
-      <option value="0.5">0.5</option>
-      <option value="1" selected>1</option>
-      <option value="2">2</option>
-      <option value="4">4</option>
+    <span class="tb-label">Menu</span>
+    <select id="top-menu-select" title="Switch toolbar controls">
+      <option value="block" selected>Block</option>
+      <option value="light">Light</option>
+      <option value="grid">Grid</option>
+      <option value="player">Player</option>
     </select>
   </div>
+
+  <span class="tb-sep"></span>
+
+  <!-- Block panel stays in top bar (mode/gizmo/snap) -->
+  <div class="top-panel active" data-panel="block">
+    <div class="tb-group">
+      <span class="tb-label">Mode</span>
+      <button id="btn-place"  class="active" title="Place objects">⊕ Place</button>
+      <button id="btn-select"               title="Select &amp; transform (1/2/3)">↗ Select</button>
+      <button id="btn-delete"               title="Delete objects">✕ Delete</button>
+    </div>
+
+    <span class="tb-sep"></span>
+
+    <div class="tb-group" id="transform-group" style="opacity:.4;pointer-events:none">
+      <span class="tb-label">Gizmo</span>
+      <button id="btn-translate" class="active" title="Move (1)">↔ Move</button>
+      <button id="btn-rotate"                   title="Rotate (2)">↻ Rot</button>
+      <button id="btn-scale"                    title="Scale (3)">⤡ Scale</button>
+      <button id="btn-select-all"              title="Select all objects (Ctrl+A)">☷ All</button>
+      <span class="tb-mini">Sides</span>
+      <label class="axis-side-wrap" title="Scale side for X axis (X hotkey)">
+        <span class="axis-side-lbl">X</span>
+        <select id="scale-side-x" class="axis-side-select">
+          <option value="pos" selected>+X</option>
+          <option value="neg">-X</option>
+        </select>
+      </label>
+      <label class="axis-side-wrap" title="Scale side for Y axis (Y hotkey)">
+        <span class="axis-side-lbl">Y</span>
+        <select id="scale-side-y" class="axis-side-select">
+          <option value="pos" selected>+Y</option>
+          <option value="neg">-Y</option>
+        </select>
+      </label>
+      <label class="axis-side-wrap" title="Scale side for Z axis (Z hotkey)">
+        <span class="axis-side-lbl">Z</span>
+        <select id="scale-side-z" class="axis-side-select">
+          <option value="pos" selected>+Z</option>
+          <option value="neg">-Z</option>
+        </select>
+      </label>
+      <span class="tb-sep" style="margin:0 2px"></span>
+      <button id="btn-group"   title="Group selection (Ctrl+G)">⊞ Group</button>
+      <button id="btn-ungroup" title="Ungroup selection (Ctrl+Shift+G)">⊟ Ungroup</button>
+    </div>
+
+    <span class="tb-sep"></span>
+
+    <div class="tb-group">
+      <span class="tb-label">Snap</span>
+      <select id="snap-select">
+        <option value="0">None</option>
+        <option value="0.25">0.25</option>
+        <option value="0.5">0.5</option>
+        <option value="1" selected>1</option>
+        <option value="2">2</option>
+        <option value="4">4</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Light/Grid/Player panels empty in topbar (content moved to sidebar) -->
+  <div class="top-panel" data-panel="light"></div>
+  <div class="top-panel" data-panel="grid"></div>
+  <div class="top-panel" data-panel="player"></div>
 
   <span class="tb-sep"></span>
 
@@ -311,7 +625,10 @@
   <span class="tb-sep"></span>
 
   <div class="tb-group">
-    <button id="btn-save" title="Save level as JSON">💾 Save</button>
+    <button id="btn-save-project" title="Save project">💾 Save</button>
+    <button id="btn-save-json" title="Export level as JSON file">📤 Export</button>
+    <button id="btn-export-game" title="Export standalone game HTML">🎮 Game HTML</button>
+    <button id="btn-export-loader" title="Export runtime JSON loader HTML">🧩 Loader HTML</button>
     <button id="btn-load" title="Load level from JSON">📂 Load</button>
     <input  id="load-input" type="file" accept=".json" style="display:none"/>
   </div>
@@ -320,6 +637,9 @@
 
   <button id="btn-playtest" class="play-btn"              title="Start playtest (P)">▶ Play</button>
   <button id="btn-stop"     class="stop-btn" style="display:none" title="Stop playtest (Esc)">⏹ Stop</button>
+
+  <span class="tb-sep"></span>
+  <button id="btn-back-menu" title="Back to main menu">⬅ Menu</button>
 </div>
 
 <!-- ── Workspace ──────────────────────────────────────────── -->
@@ -327,32 +647,227 @@
 
   <!-- Sidebar -->
   <div id="sidebar">
-    <div class="panel-hdr">📚 Library</div>
-    <div class="lib-grid">
-      <button class="lib-btn active" data-type="wall">
-        <span class="icon">🧱</span>Wall
-      </button>
-      <button class="lib-btn" data-type="floor">
-        <span class="icon">⬜</span>Floor
-      </button>
-      <button class="lib-btn" data-type="target">
-        <span class="icon">🎯</span>Target
-      </button>
-      <button class="lib-btn" data-type="light">
-        <span class="icon">💡</span>Light
-      </button>
+
+    <!-- BLOCK: Library -->
+    <div id="sidebar-block" class="sidebar-section active">
+      <div class="panel-hdr">📚 Library</div>
+      <div class="lib-category">
+        <div class="lib-category-title">Objects / Blocks</div>
+        <div class="lib-grid">
+          <button class="lib-btn active" data-type="wall">
+            <span class="icon">🧱</span>Wall
+          </button>
+          <button class="lib-btn" data-type="floor">
+            <span class="icon">⬜</span>Floor
+          </button>
+        </div>
+      </div>
+      <div class="lib-category">
+        <div class="lib-category-title">Lighting</div>
+        <div class="lib-grid">
+          <button class="lib-btn" data-type="light">
+            <span class="icon">💡</span>Light
+          </button>
+        </div>
+      </div>
+      <div class="lib-category">
+        <div class="lib-category-title">Gameplay</div>
+        <div class="lib-grid">
+          <button class="lib-btn" data-type="target">
+            <span class="icon">🎯</span>Target
+          </button>
+          <button class="lib-btn" data-type="spawn">
+            <span class="icon">🚩</span>Spawn
+          </button>
+        </div>
+      </div>
+      <div class="lib-category">
+        <div class="lib-category-title">Control</div>
+        <div class="lib-grid">
+          <button class="lib-btn" data-type="trigger">
+            <span class="icon">🎛</span>Control
+          </button>
+        </div>
+      </div>
     </div>
 
+    <!-- LIGHT: Settings -->
+    <div id="sidebar-light" class="sidebar-section">
+      <div class="panel-hdr">💡 Light Settings</div>
+      <div class="sidebar-form">
+        <div class="sf-sub">Default Light Block</div>
+        <div class="sf-row">
+          <span class="sf-label">Brightness</span>
+          <input id="light-intensity" type="number" min="0" max="100" step="0.1" value="3" title="Default brightness for new light blocks"/>
+        </div>
+        <div class="sf-sub">Sun</div>
+        <div class="sf-row">
+          <span class="sf-label">Time</span>
+          <input id="sun-time" type="number" min="0" max="24" step="0.001" value="14" title="Time of day (0-24, 12=noon)"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">North</span>
+          <input id="sun-north" type="number" min="0" max="360" step="5" value="0" title="North offset"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Intensity</span>
+          <input id="sun-intensity" type="number" min="0" max="100" step="0.5" value="20" title="Sun brightness"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Haze</span>
+          <input id="sun-turbidity" type="number" min="1" max="20" step="0.5" value="2" title="Atmospheric haze"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Shadow</span>
+          <input id="sun-shadow-range" type="number" min="20" max="500" step="5" value="100" title="Shadow range"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Day (s)</span>
+          <input id="sun-day-duration" type="number" min="1" max="3600" step="1" value="120" title="Day cycle duration in seconds"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Cycle</span>
+          <input id="sun-day-cycle-enabled" type="checkbox" title="Enable automatic day/night cycle during playtest"/>
+        </div>
+        <div class="sf-sub">Quality</div>
+        <div class="sf-row">
+          <span class="sf-label">Shadows</span>
+          <select id="quality-shadows" title="Shadow quality">
+            <option value="off">Off</option>
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+          </select>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Light Dist</span>
+          <input id="quality-light-dist" type="number" min="10" max="200" step="5" value="60" title="Point light render distance"/>
+        </div>
+      </div>
+    </div>
+
+    <!-- GRID: Settings -->
+    <div id="sidebar-grid" class="sidebar-section">
+      <div class="panel-hdr">🔲 Grid Settings</div>
+      <div class="sidebar-form">
+        <div class="sf-row">
+          <span class="sf-label">Range</span>
+          <select id="chunk-range-select" title="Grid chunk render distance">
+            <option value="1">3×3</option>
+            <option value="2" selected>5×5</option>
+            <option value="3">7×7</option>
+            <option value="4">9×9</option>
+            <option value="5">11×11</option>
+          </select>
+        </div>
+        <div class="sf-sub">Floor Fill</div>
+        <div class="sf-row">
+          <span class="sf-label">Color</span>
+          <input id="grid-fill-color" type="color" value="#1a2636" title="Grid fill color"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Enabled</span>
+          <input id="grid-fill-enabled" type="checkbox" title="Toggle grid floor fill"/>
+        </div>
+        <div class="sf-sub">Quality</div>
+        <div class="sf-row">
+          <span class="sf-label">Render Dist</span>
+          <input id="quality-render-dist" type="number" min="20" max="500" step="10" value="150" title="Block render distance"/>
+        </div>
+      </div>
+    </div>
+
+    <!-- PLAYER: Gamerules -->
+    <div id="sidebar-player" class="sidebar-section">
+      <div class="panel-hdr">🎮 Gamerules</div>
+      <div class="sidebar-form">
+        <div class="sf-sub">Movement</div>
+        <div class="sf-row">
+          <span class="sf-label">Jump</span>
+          <input id="gr-jump" type="number" min="0" max="50" step="0.5" value="8.5" title="Jump speed"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Gravity</span>
+          <input id="gr-gravity" type="number" min="0" max="100" step="0.5" value="24" title="Gravity strength"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Height</span>
+          <input id="gr-height" type="number" min="0.5" max="5" step="0.1" value="1.75" title="Player height"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Sprint</span>
+          <input id="gr-sprint" type="number" min="1" max="30" step="0.5" value="12" title="Sprint speed"/>
+        </div>
+
+        <div class="sf-sub">Health</div>
+        <div class="sf-row">
+          <span class="sf-label">Max HP</span>
+          <input id="gr-maxhp" type="number" min="1" max="1000" step="1" value="100" title="Maximum health" style="width:54px"/>
+        </div>
+
+        <div class="sf-sub">Fall Damage</div>
+        <div class="sf-row">
+          <span class="sf-label">Enabled</span>
+          <input id="gr-falldmg" type="checkbox" title="Enable fall damage"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Min Height</span>
+          <input id="gr-falldmg-minht" type="number" min="0" max="100" step="0.5" value="4" title="Minimum fall height to take damage"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Vel. Mult.</span>
+          <input id="gr-falldmg-mult" type="number" min="0" max="10" step="0.1" value="1" title="Fall damage velocity multiplier"/>
+        </div>
+
+        <div class="sf-sub">Spawn Protection</div>
+        <div class="sf-row">
+          <span class="sf-label">Timer (s)</span>
+          <input id="gr-spawnprot-time" type="number" min="0" max="60" step="0.5" value="0" title="Spawn protection duration in seconds"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Conditions</span>
+          <select id="gr-spawnprot-cond" title="What spawn protection blocks">
+            <option value="all" selected>All Damage</option>
+            <option value="fall">Fall Only</option>
+            <option value="untilLanded">Until Landed</option>
+            <option value="none">None</option>
+          </select>
+        </div>
+
+        <div class="sf-sub">Conditional Triggers</div>
+        <div id="cond-triggers-list"></div>
+        <button id="btn-add-cond-trigger" style="margin-top:4px;width:100%;font-size:10px;padding:3px 6px">+ Add Trigger</button>
+
+        <div class="sf-sub">Functions</div>
+        <div id="control-functions-list"></div>
+        <button id="btn-add-control-fn" style="margin-top:4px;width:100%;font-size:10px;padding:3px 6px">+ Add Function</button>
+      </div>
+    </div>
+
+    <!-- Properties panel -->
     <div id="props-panel" style="display:none">
       <div class="panel-hdr">⚙ Properties</div>
       <div id="props-content"></div>
     </div>
   </div>
 
+  <div id="sidebar-resizer" title="Drag to resize sidebar">
+    <button id="sidebar-toggle" type="button" title="Collapse sidebar" aria-label="Collapse sidebar" aria-pressed="false">❮</button>
+  </div>
+
   <!-- 3-D viewport -->
   <div id="canvas-container">
     <div id="crosshair"></div>
-    <div id="play-hint">WASD · Move &nbsp;│&nbsp; Mouse · Look &nbsp;│&nbsp; LMB · Shoot &nbsp;│&nbsp; Esc · Exit</div>
+    <div id="play-hint">WASD · Move &nbsp;│&nbsp; R · Sprint &nbsp;│&nbsp; Space · Jump &nbsp;│&nbsp; Mouse · Look &nbsp;│&nbsp; LMB · Shoot &nbsp;│&nbsp; Esc · Exit</div>
+    <div id="health-hud" style="display:none;position:absolute;top:12px;left:12px;z-index:20;pointer-events:none">
+      <div style="display:flex;align-items:center;gap:6px">
+        <span style="color:#f04040;font-size:14px;font-weight:700">♥</span>
+        <div style="width:140px;height:10px;background:rgba(255,255,255,.12);border-radius:5px;overflow:hidden;border:1px solid rgba(255,255,255,.15)">
+          <div id="health-bar-fill" style="width:100%;height:100%;background:linear-gradient(90deg,#e04040,#f06060);border-radius:4px;transition:width .2s"></div>
+        </div>
+        <span id="health-text" style="font-size:11px;color:#e6edf3;min-width:36px">100</span>
+      </div>
+    </div>
     <div id="status-bar"><span id="status-text">Edit Mode</span></div>
   </div>
 
