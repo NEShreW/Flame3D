@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls }    from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { Sky }              from 'three/addons/objects/Sky.js';
+import { CSG }              from 'https://esm.sh/three-csg-ts@3.2.0?external=three';
 
 // ─── DOM refs ────────────────────────────────────────────────────────────────
 const canvasContainer = document.getElementById('canvas-container');
@@ -30,6 +31,21 @@ const workspaceEl     = document.getElementById('workspace');
 const sidebarEl       = document.getElementById('sidebar');
 const sidebarResizerEl = document.getElementById('sidebar-resizer');
 const sidebarToggleBtn = document.getElementById('sidebar-toggle');
+const functionsResizerEl = document.getElementById('functions-resizer');
+const functionsToggleBtn = document.getElementById('functions-toggle');
+const shapeSidesInput  = document.getElementById('shape-sides');
+const shapeDepthInput  = document.getElementById('shape-depth');
+const placeOpacityInput = document.getElementById('place-opacity');
+const paintColorInput  = document.getElementById('paint-color');
+const pickColorBtn     = document.getElementById('btn-pick-color');
+const eraserShapeInput = document.getElementById('eraser-shape');
+const eraserSizeInput  = document.getElementById('eraser-size');
+const libraryPaneButtons = Array.from(document.querySelectorAll('[data-lib-pane]'));
+const libraryPaneObjectsEl = document.getElementById('library-pane-objects');
+const libraryPaneAudioEl = document.getElementById('library-pane-audio');
+const audioImportBtn = document.getElementById('btn-audio-import');
+const audioImportInput = document.getElementById('audio-import-input');
+const audioLibListEl = document.getElementById('audio-lib-list');
 
 // Main menu / project library
 const mainMenuEl          = document.getElementById('main-menu');
@@ -41,10 +57,13 @@ const btnSaveProject      = document.getElementById('btn-save-project');
 const btnBackMenu         = document.getElementById('btn-back-menu');
 const btnExportGame       = document.getElementById('btn-export-game');
 const btnExportLoader     = document.getElementById('btn-export-loader');
+const btnResetCheckpoints = document.getElementById('btn-reset-checkpoints');
+const btnResetValues      = document.getElementById('btn-reset-values');
 
 // Player gamerule inputs
 const grJumpInput    = document.getElementById('gr-jump');
 const grGravityInput = document.getElementById('gr-gravity');
+const grGravityEnabledInput = document.getElementById('gr-gravity-enabled');
 const grHeightInput  = document.getElementById('gr-height');
 const grSprintInput  = document.getElementById('gr-sprint');
 const grMaxHpInput   = document.getElementById('gr-maxhp');
@@ -71,11 +90,27 @@ const grSpawnProtCondInput = document.getElementById('gr-spawnprot-cond');
 // Conditional triggers
 const condTriggersListEl    = document.getElementById('cond-triggers-list');
 const btnAddCondTrigger     = document.getElementById('btn-add-cond-trigger');
+const playerNameInput       = document.getElementById('player-name');
+const playerGroupsInput     = document.getElementById('player-groups');
+const playerGroupsOptionsEl = document.getElementById('player-groups-options');
+const varsListEl            = document.getElementById('vars-list');
+const boolsListEl           = document.getElementById('bools-list');
+const btnAddVar             = document.getElementById('btn-add-var');
+const btnAddBool            = document.getElementById('btn-add-bool');
+
+const functionsPanelEl      = document.getElementById('functions-panel');
+const controlFunctionsListEl = document.getElementById('control-functions-list');
+const btnAddControlFn       = document.getElementById('btn-add-control-fn');
+const controlFnSearchInput  = document.getElementById('control-fn-search');
+const controlFnNewGroupInput = document.getElementById('control-fn-new-group');
+const btnAddControlGroup    = document.getElementById('btn-add-control-group');
 
 const modeButtons = {
   place:  document.getElementById('btn-place'),
   select: document.getElementById('btn-select'),
   delete: document.getElementById('btn-delete'),
+  paint:  document.getElementById('btn-paint'),
+  erase:  document.getElementById('btn-erase'),
 };
 const transformButtons = {
   translate: document.getElementById('btn-translate'),
@@ -89,7 +124,7 @@ const scaleSideZSelect = document.getElementById('scale-side-z');
 
 // ─── Editor state ────────────────────────────────────────────────────────────
 const state = {
-  mode:          'place',      // place | select | delete
+  mode:          'place',      // place | select | delete | paint | erase
   placingType:   'wall',       // wall | floor | target | light
   transformMode: 'translate',  // translate | rotate | scale
   snapSize:      1,
@@ -99,6 +134,14 @@ const state = {
   extraSelected:  [],
   isPlaytest:    false,
   cloneScale:    null,
+  cloneShapeParams: null,
+  placeSides: 12,
+  place2DDepth: 0.2,
+  placeOpacity: 1,
+  brushColor: 0x4a5568,
+  colorPickArmed: false,
+  eraserShape: 'box',
+  eraserSize: 1,
   scaleSides: {
     x: 'pos',
     y: 'pos',
@@ -117,6 +160,8 @@ const PROJECTS_STORAGE_KEY    = 'flame3d_projects_v1';
 const EDITOR_SETTINGS_KEY     = 'flame3d_editor_settings_v1';
 const SIDEBAR_MIN_WIDTH       = 160;
 const SIDEBAR_MAX_WIDTH       = 420;
+const FUNCTIONS_PANEL_MIN_WIDTH = 220;
+const FUNCTIONS_PANEL_MAX_WIDTH = 560;
 
 const runtimeMode = !!globalThis.__FLAME3D_RUNTIME_MODE__;
 const runtimeLoaderMode = !!globalThis.__FLAME3D_RUNTIME_LOADER__;
@@ -155,6 +200,54 @@ const sidebarState = {
   collapsed: false,
   resizing: false,
 };
+
+const functionsPanelState = {
+  width: 340,
+  collapsed: false,
+  resizing: false,
+};
+
+const audioLibrary = [];
+let activeLibraryPane = 'objects';
+let libraryPreviewAudio = null;
+let libraryPreviewAudioId = null;
+
+const CUSTOM_SKIN_GRID_DEFAULT = Object.freeze({ x: 8, y: 6, z: 8 });
+const CUSTOM_SKIN_GRID_LIMITS = Object.freeze({
+  x: { min: 1, max: 32 },
+  y: { min: 1, max: 24 },
+  z: { min: 1, max: 32 },
+});
+const CUSTOM_SKIN_MAX_VOXELS = 2048;
+const customBlockSkins = {};
+let libraryContextMenuEl = null;
+let keypadContextMenuEl = null;
+let skinEditorOverlayEl = null;
+let skinEditorDragActive = false;
+let suppressPointerUnlockStop = false;
+let activeKeypadConfigMesh = null;
+const skinEditorState = {
+  type: 'wall',
+  layer: 0,
+  eraseMode: false,
+  brushColor: 0x7f8ea0,
+  gridSize: { ...CUSTOM_SKIN_GRID_DEFAULT },
+  voxelMap: new Map(),
+  undoStack: [],
+  redoStack: [],
+};
+let skin3DState = null; // { renderer, scene, camera, controls, voxelGroup, floorMesh, sharedGeo, animId, roSub }
+const _skinTempVec = new THREE.Vector3();
+const _skinTempVecB = new THREE.Vector3();
+const _skinTempMatrix = new THREE.Matrix4();
+const _keypadPickNdc = new THREE.Vector2();
+const _hitboxLocalCenter = new THREE.Vector3();
+const _hitboxLocalSize = new THREE.Vector3();
+const _hitboxCorner = new THREE.Vector3();
+const _hitboxWorldPoint = new THREE.Vector3();
+const _runtimeNumericOverrides = new Map();
+let runtimeKeypadOverlayEl = null;
+let activeRuntimeKeypadMesh = null;
 
 // ─── Quality settings ────────────────────────────────────────────────────────
 const quality = {
@@ -390,10 +483,12 @@ const editKeys = new Set();
 
 const PLAYER_RADIUS = 0.35;
 const STEP_HEIGHT = 0.55;
+const COLLISION_SUBSTEP = 0.05;
 
 const gameRules = {
   jumpHeight: 8.5,
   gravity: 24,
+  gravityEnabled: true,
   height: 1.75,
   eyeHeight: 1.6,
   fallDamage: false,
@@ -403,6 +498,10 @@ const gameRules = {
   maxHealth: 100,
   spawnProtectTime: 0,
   spawnProtectCondition: 'all',
+};
+const playerProfile = {
+  name: 'Player',
+  groups: ['default'],
 };
 const BASE_FPS_SPEED = 7;
 
@@ -464,6 +563,39 @@ function updateGridChunks(wx, wz) {
 }
 
 // ─── Object definitions ──────────────────────────────────────────────────────
+function clampShapeSides(value) {
+  return THREE.MathUtils.clamp(parseInt(value, 10) || 12, 3, 64);
+}
+
+function clampShapeDepth(value) {
+  return THREE.MathUtils.clamp(parseFloat(value) || 0.2, 0.05, 8);
+}
+
+function makeRegularShape2D(sides, radius = 1) {
+  const count = clampShapeSides(sides);
+  const shape = new THREE.Shape();
+  for (let i = 0; i < count; i++) {
+    const a = (i / count) * Math.PI * 2 + Math.PI * 0.5;
+    const x = Math.cos(a) * radius;
+    const y = Math.sin(a) * radius;
+    if (i === 0) shape.moveTo(x, y);
+    else shape.lineTo(x, y);
+  }
+  shape.closePath();
+  return shape;
+}
+
+function makeExtrudedShapeGeometry(sides, depth, radius = 1) {
+  const shape = makeRegularShape2D(sides, radius);
+  const geo = new THREE.ExtrudeGeometry(shape, {
+    depth: clampShapeDepth(depth),
+    bevelEnabled: false,
+    curveSegments: Math.max(6, clampShapeSides(sides)),
+  });
+  geo.center();
+  return geo;
+}
+
 const DEFS = {
   wall: {
     label: 'Wall',
@@ -495,17 +627,1364 @@ const DEFS = {
     makeMat: () => new THREE.MeshStandardMaterial({ color: 0x30d050, emissive: 0x30d050, emissiveIntensity: 0.5, transparent: true, opacity: 0.7 }),
     placedY: 0.875,
   },
+  checkpoint: {
+    label: 'Checkpoint',
+    makeGeo: () => new THREE.CylinderGeometry(0.4, 0.4, 1.2, 18),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x3cb8ff, emissive: 0x3cb8ff, emissiveIntensity: 0.55, transparent: true, opacity: 0.75 }),
+    placedY: 0.6,
+  },
   trigger: {
     label: 'Control',
     makeGeo: () => new THREE.BoxGeometry(2, 2, 2),
     makeMat: () => new THREE.MeshStandardMaterial({ color: 0xf0a020, emissive: 0xf0a020, emissiveIntensity: 0.3, transparent: true, opacity: 0.35 }),
     placedY: 1,
   },
+  keypad: {
+    label: 'Keypad',
+    makeGeo: () => new THREE.BoxGeometry(1.6, 2.2, 0.45),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x8ca4b8, roughness: 0.45, metalness: 0.25, emissive: 0x0f141b, emissiveIntensity: 0.45 }),
+    placedY: 1.1,
+  },
+  cube: {
+    label: 'Cube',
+    makeGeo: () => new THREE.BoxGeometry(1.6, 1.6, 1.6),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x607d9c, roughness: 0.7, metalness: 0.1 }),
+    placedY: 0.8,
+  },
+  sphere: {
+    label: 'Sphere',
+    usesSides: true,
+    defaultSides: 12,
+    makeGeo: params => {
+      const sides = clampShapeSides(params?.sides ?? 12);
+      return new THREE.SphereGeometry(0.9, sides, Math.max(3, Math.round(sides * 0.75)));
+    },
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x5c91c7, roughness: 0.6, metalness: 0.1 }),
+  },
+  cylinder: {
+    label: 'Cylinder',
+    usesSides: true,
+    defaultSides: 16,
+    makeGeo: params => new THREE.CylinderGeometry(0.75, 0.75, 1.6, clampShapeSides(params?.sides ?? 16)),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x5f8a92, roughness: 0.7 }),
+  },
+  cone: {
+    label: 'Cone',
+    usesSides: true,
+    defaultSides: 12,
+    makeGeo: params => new THREE.ConeGeometry(0.85, 1.7, clampShapeSides(params?.sides ?? 12)),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x8b6b53, roughness: 0.8 }),
+  },
+  pyramid: {
+    label: 'Pyramid',
+    usesSides: true,
+    defaultSides: 4,
+    makeGeo: params => new THREE.CylinderGeometry(0, 0.95, 1.8, clampShapeSides(params?.sides ?? 4), 1),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0xa27d52, roughness: 0.82 }),
+  },
+  prism: {
+    label: 'Prism',
+    usesSides: true,
+    defaultSides: 6,
+    makeGeo: params => new THREE.CylinderGeometry(0.82, 0.82, 1.55, clampShapeSides(params?.sides ?? 6), 1),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x6a8f75, roughness: 0.75 }),
+  },
+  torus: {
+    label: 'Torus',
+    usesSides: true,
+    defaultSides: 16,
+    makeGeo: params => {
+      const sides = clampShapeSides(params?.sides ?? 16);
+      return new THREE.TorusGeometry(0.85, 0.24, Math.max(6, Math.floor(sides * 0.75)), sides);
+    },
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x8673b8, roughness: 0.55, metalness: 0.2 }),
+  },
+  plane2d: {
+    label: 'Square 2D',
+    is2D: true,
+    makeGeo: params => {
+      const d = clampShapeDepth(params?.depth ?? 0.2);
+      return new THREE.BoxGeometry(1.8, 1.8, d);
+    },
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x4e8b7a, roughness: 0.85, side: THREE.DoubleSide }),
+  },
+  triangle2d: {
+    label: 'Triangle 2D',
+    is2D: true,
+    makeGeo: params => makeExtrudedShapeGeometry(3, params?.depth ?? 0.2, 1),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x3f7b9f, roughness: 0.86, side: THREE.DoubleSide }),
+  },
+  circle2d: {
+    label: 'Circle 2D',
+    is2D: true,
+    usesSides: true,
+    defaultSides: 20,
+    makeGeo: params => makeExtrudedShapeGeometry(Math.max(8, clampShapeSides(params?.sides ?? 20)), params?.depth ?? 0.2, 1),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x657b45, roughness: 0.85, side: THREE.DoubleSide }),
+  },
+  polygon2d: {
+    label: 'Polygon 2D',
+    is2D: true,
+    usesSides: true,
+    defaultSides: 6,
+    makeGeo: params => makeExtrudedShapeGeometry(clampShapeSides(params?.sides ?? 6), params?.depth ?? 0.2, 1),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x7a5f8f, roughness: 0.85, side: THREE.DoubleSide }),
+  },
 };
 
-const CONTROL_ACTION_TYPES = ['move', 'light'];
+function normalizeSkinGridSize(gridSize = {}) {
+  return {
+    x: THREE.MathUtils.clamp(parseInt(gridSize.x, 10) || CUSTOM_SKIN_GRID_DEFAULT.x, CUSTOM_SKIN_GRID_LIMITS.x.min, CUSTOM_SKIN_GRID_LIMITS.x.max),
+    y: THREE.MathUtils.clamp(parseInt(gridSize.y, 10) || CUSTOM_SKIN_GRID_DEFAULT.y, CUSTOM_SKIN_GRID_LIMITS.y.min, CUSTOM_SKIN_GRID_LIMITS.y.max),
+    z: THREE.MathUtils.clamp(parseInt(gridSize.z, 10) || CUSTOM_SKIN_GRID_DEFAULT.z, CUSTOM_SKIN_GRID_LIMITS.z.min, CUSTOM_SKIN_GRID_LIMITS.z.max),
+  };
+}
+
+function normalizeCustomBlockSkin(def = {}) {
+  const gridSize = normalizeSkinGridSize(def.gridSize || CUSTOM_SKIN_GRID_DEFAULT);
+  const voxelsIn = Array.isArray(def.voxels) ? def.voxels : [];
+  const voxels = [];
+  const seen = new Set();
+  for (const raw of voxelsIn) {
+    const x = THREE.MathUtils.clamp(parseInt(raw?.x, 10) || 0, 0, gridSize.x - 1);
+    const y = THREE.MathUtils.clamp(parseInt(raw?.y, 10) || 0, 0, gridSize.y - 1);
+    const z = THREE.MathUtils.clamp(parseInt(raw?.z, 10) || 0, 0, gridSize.z - 1);
+    const key = `${x}|${y}|${z}`;
+    if (seen.has(key)) continue;
+    const rawColor = typeof raw?.color === 'string'
+      ? Number.parseInt(raw.color.replace('#', ''), 16)
+      : Number(raw?.color);
+    const color = THREE.MathUtils.clamp(Number.isFinite(rawColor) ? rawColor : 0x7f8ea0, 0, 0xffffff);
+    seen.add(key);
+    voxels.push({ x, y, z, color: Math.round(color) });
+    if (voxels.length >= CUSTOM_SKIN_MAX_VOXELS) break;
+  }
+  return {
+    version: 1,
+    gridSize,
+    voxels,
+  };
+}
+
+function buildSkinLayout(mesh, skin) {
+  if (!mesh?.geometry) return null;
+  mesh.geometry.computeBoundingBox();
+  const bbox = mesh.geometry.boundingBox;
+  if (!bbox) return null;
+
+  const hostSize = bbox.getSize(_skinTempVec).clone();
+  hostSize.x = Math.max(hostSize.x, 0.15);
+  hostSize.y = Math.max(hostSize.y, 0.15);
+  hostSize.z = Math.max(hostSize.z, 0.15);
+
+  const grid = normalizeSkinGridSize(skin?.gridSize);
+  const cellSize = Math.max(0.02, Math.min(hostSize.x / grid.x, hostSize.y / grid.y, hostSize.z / grid.z) * 0.92);
+  return {
+    grid,
+    cellSize,
+    xStart: -((grid.x - 1) * cellSize) * 0.5,
+    yStart: -((grid.y - 1) * cellSize) * 0.5,
+    zStart: -((grid.z - 1) * cellSize) * 0.5,
+  };
+}
+
+function createDefaultHitboxConfig() {
+  return {
+    mode: 'auto',
+    offset: [0, 0, 0],
+    size: [1, 1, 1],
+  };
+}
+
+function normalizeHitboxConfig(config = {}) {
+  const base = createDefaultHitboxConfig();
+  const offsetIn = Array.isArray(config.offset) ? config.offset : base.offset;
+  const sizeIn = Array.isArray(config.size) ? config.size : base.size;
+  return {
+    mode: config.mode === 'manual' ? 'manual' : 'auto',
+    offset: [0, 1, 2].map(index => {
+      const value = Number.parseFloat(offsetIn[index]);
+      return Number.isFinite(value) ? THREE.MathUtils.clamp(value, -128, 128) : base.offset[index];
+    }),
+    size: [0, 1, 2].map(index => {
+      const value = Number.parseFloat(sizeIn[index]);
+      return Number.isFinite(value) ? THREE.MathUtils.clamp(Math.abs(value), 0.05, 256) : base.size[index];
+    }),
+  };
+}
+
+function getMeshHitboxConfig(mesh) {
+  const config = normalizeHitboxConfig(mesh?.userData?.hitboxConfig);
+  if (mesh?.userData) mesh.userData.hitboxConfig = config;
+  return config;
+}
+
+function createDefaultKeypadConfig() {
+  return {
+    title: 'Keypad',
+    maxDigits: 6,
+    offsetX: 0,
+    offsetY: 0,
+  };
+}
+
+function normalizeKeypadConfig(config = {}) {
+  const base = createDefaultKeypadConfig();
+  const title = String(config.title ?? base.title).trim() || base.title;
+  const maxDigits = THREE.MathUtils.clamp(parseInt(config.maxDigits, 10) || base.maxDigits, 1, 12);
+  const offsetX = THREE.MathUtils.clamp(parseFloat(config.offsetX) || 0, -600, 600);
+  const offsetY = THREE.MathUtils.clamp(parseFloat(config.offsetY) || 0, -400, 400);
+  return { title, maxDigits, offsetX, offsetY };
+}
+
+function getMeshKeypadConfig(mesh) {
+  const config = normalizeKeypadConfig(mesh?.userData?.keypadConfig);
+  if (mesh?.userData) mesh.userData.keypadConfig = config;
+  return config;
+}
+
+function serializeCustomBlockSkins() {
+  const out = {};
+  for (const [type, skinRaw] of Object.entries(customBlockSkins)) {
+    if (!DEFS[type]) continue;
+    const skin = normalizeCustomBlockSkin(skinRaw);
+    if (!skin.voxels.length) continue;
+    out[type] = skin;
+  }
+  return out;
+}
+
+function setCustomBlockSkinsMap(map = {}) {
+  for (const key of Object.keys(customBlockSkins)) delete customBlockSkins[key];
+  if (map && typeof map === 'object') {
+    for (const [type, skinRaw] of Object.entries(map)) {
+      if (!DEFS[type]) continue;
+      const skin = normalizeCustomBlockSkin(skinRaw);
+      if (!skin.voxels.length) continue;
+      customBlockSkins[type] = skin;
+    }
+  }
+  refreshCustomSkinsOnScene();
+}
+
+function hasCustomSkinForType(type) {
+  return !!customBlockSkins[type]?.voxels?.length;
+}
+
+function shouldHideMeshDisplay(mesh) {
+  return !!(state.isPlaytest && mesh?.userData?._playtestHidden && !fpsDevView);
+}
+
+function disposeObjectTree(root) {
+  if (!root) return;
+  root.traverse(obj => {
+    if (obj.geometry?.dispose) obj.geometry.dispose();
+    if (Array.isArray(obj.material)) {
+      for (const mat of obj.material) {
+        if (mat?.dispose) mat.dispose();
+      }
+    } else if (obj.material?.dispose) {
+      obj.material.dispose();
+    }
+  });
+}
+
+function clearCustomSkinVisual(mesh) {
+  if (!mesh?.userData) return;
+  const prev = mesh.userData.customSkinGroup;
+  if (prev) {
+    mesh.remove(prev);
+    disposeObjectTree(prev);
+  }
+  delete mesh.userData.customSkinGroup;
+}
+
+function buildCustomSkinVisual(mesh, skin) {
+  if (!mesh?.geometry || !skin?.voxels?.length) return null;
+  const layout = buildSkinLayout(mesh, skin);
+  if (!layout) return null;
+
+  const byColor = new Map();
+  for (const voxel of skin.voxels) {
+    const color = Math.round(THREE.MathUtils.clamp(voxel.color, 0, 0xffffff));
+    if (!byColor.has(color)) byColor.set(color, []);
+    byColor.get(color).push(voxel);
+  }
+
+  const group = new THREE.Group();
+  group.name = 'customSkinVisual';
+  group.userData.customSkinVisual = true;
+
+  for (const [color, voxels] of byColor.entries()) {
+    const geom = new THREE.BoxGeometry(cellSize, cellSize, cellSize);
+    const mat = new THREE.MeshStandardMaterial({
+      color,
+      roughness: 0.7,
+      metalness: 0.08,
+    });
+    const inst = new THREE.InstancedMesh(geom, mat, voxels.length);
+    inst.castShadow = true;
+    inst.receiveShadow = true;
+    for (let i = 0; i < voxels.length; i++) {
+      const voxel = voxels[i];
+      _skinTempVecB.set(
+        layout.xStart + voxel.x * layout.cellSize,
+        layout.yStart + voxel.y * layout.cellSize,
+        layout.zStart + voxel.z * layout.cellSize,
+      );
+      _skinTempMatrix.makeTranslation(_skinTempVecB.x, _skinTempVecB.y, _skinTempVecB.z);
+      inst.setMatrixAt(i, _skinTempMatrix);
+    }
+    inst.instanceMatrix.needsUpdate = true;
+    group.add(inst);
+  }
+
+  return group;
+}
+
+function computeAutoHitboxBox(mesh, outCenter = _hitboxLocalCenter, outSize = _hitboxLocalSize) {
+  const skinRaw = customBlockSkins[mesh?.userData?.type];
+  const skin = skinRaw ? normalizeCustomBlockSkin(skinRaw) : null;
+  if (skin?.voxels?.length) {
+    const layout = buildSkinLayout(mesh, skin);
+    if (layout) {
+      let minX = Infinity;
+      let minY = Infinity;
+      let minZ = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      let maxZ = -Infinity;
+      for (const voxel of skin.voxels) {
+        minX = Math.min(minX, voxel.x);
+        minY = Math.min(minY, voxel.y);
+        minZ = Math.min(minZ, voxel.z);
+        maxX = Math.max(maxX, voxel.x);
+        maxY = Math.max(maxY, voxel.y);
+        maxZ = Math.max(maxZ, voxel.z);
+      }
+      const half = layout.cellSize * 0.5;
+      const min = new THREE.Vector3(
+        layout.xStart + minX * layout.cellSize - half,
+        layout.yStart + minY * layout.cellSize - half,
+        layout.zStart + minZ * layout.cellSize - half,
+      );
+      const max = new THREE.Vector3(
+        layout.xStart + maxX * layout.cellSize + half,
+        layout.yStart + maxY * layout.cellSize + half,
+        layout.zStart + maxZ * layout.cellSize + half,
+      );
+      outCenter.copy(min).add(max).multiplyScalar(0.5);
+      outSize.copy(max).sub(min);
+      return { center: outCenter, size: outSize };
+    }
+  }
+
+  mesh.geometry.computeBoundingBox();
+  const bbox = mesh.geometry.boundingBox;
+  if (!bbox) {
+    outCenter.set(0, 0, 0);
+    outSize.set(1, 1, 1);
+    return { center: outCenter, size: outSize };
+  }
+  bbox.getCenter(outCenter);
+  bbox.getSize(outSize);
+  outSize.set(Math.max(outSize.x, 0.05), Math.max(outSize.y, 0.05), Math.max(outSize.z, 0.05));
+  return { center: outCenter, size: outSize };
+}
+
+function getMeshLocalHitboxBox(mesh, outCenter = _hitboxLocalCenter, outSize = _hitboxLocalSize) {
+  const cfg = getMeshHitboxConfig(mesh);
+  if (cfg.mode === 'manual') {
+    outCenter.fromArray(cfg.offset);
+    outSize.fromArray(cfg.size);
+    return { center: outCenter, size: outSize };
+  }
+  return computeAutoHitboxBox(mesh, outCenter, outSize);
+}
+
+function computeMeshCollisionAABB(mesh, out) {
+  if (getMeshCollisionMode(mesh) === 'geometry') {
+    return out.setFromObject(mesh);
+  }
+
+  const { center, size } = getMeshLocalHitboxBox(mesh);
+  out.makeEmpty();
+  const hx = size.x * 0.5;
+  const hy = size.y * 0.5;
+  const hz = size.z * 0.5;
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) {
+      for (const sz of [-1, 1]) {
+        _hitboxCorner.set(center.x + sx * hx, center.y + sy * hy, center.z + sz * hz);
+        _hitboxWorldPoint.copy(_hitboxCorner).applyMatrix4(mesh.matrixWorld);
+        out.expandByPoint(_hitboxWorldPoint);
+      }
+    }
+  }
+  return out;
+}
+
+function applyCustomSkinToMesh(mesh) {
+  if (!mesh?.userData) return;
+  clearCustomSkinVisual(mesh);
+
+  const skinRaw = customBlockSkins[mesh.userData.type];
+  if (!skinRaw?.voxels?.length) {
+    mesh.userData._customSkinActive = false;
+    if (mesh.material) mesh.material.visible = !shouldHideMeshDisplay(mesh);
+    return;
+  }
+
+  const skin = normalizeCustomBlockSkin(skinRaw);
+  if (!skin.voxels.length) {
+    mesh.userData._customSkinActive = false;
+    if (mesh.material) mesh.material.visible = !shouldHideMeshDisplay(mesh);
+    return;
+  }
+
+  const visual = buildCustomSkinVisual(mesh, skin);
+  if (!visual) {
+    mesh.userData._customSkinActive = false;
+    if (mesh.material) mesh.material.visible = !shouldHideMeshDisplay(mesh);
+    return;
+  }
+
+  mesh.add(visual);
+  mesh.userData.customSkinGroup = visual;
+  mesh.userData._customSkinActive = true;
+  visual.visible = !shouldHideMeshDisplay(mesh);
+  if (mesh.material) mesh.material.visible = false;
+}
+
+function refreshCustomSkinsOnScene() {
+  for (const mesh of sceneObjects) applyCustomSkinToMesh(mesh);
+  if (state.selectedObject) refreshProps();
+  refreshStatus();
+}
+
+function clampFloatingPanelPosition(el, x, y, pad = 8) {
+  const rect = el.getBoundingClientRect();
+  const maxX = window.innerWidth - rect.width - pad;
+  const maxY = window.innerHeight - rect.height - pad;
+  el.style.left = `${THREE.MathUtils.clamp(x, pad, Math.max(pad, maxX))}px`;
+  el.style.top = `${THREE.MathUtils.clamp(y, pad, Math.max(pad, maxY))}px`;
+}
+
+function closeLibraryContextMenu() {
+  if (!libraryContextMenuEl) return;
+  libraryContextMenuEl.remove();
+  libraryContextMenuEl = null;
+}
+
+function closeKeypadContextMenu() {
+  if (!keypadContextMenuEl) return;
+  keypadContextMenuEl.remove();
+  keypadContextMenuEl = null;
+  activeKeypadConfigMesh = null;
+}
+
+function disposeSkin3DScene() {
+  if (!skin3DState) return;
+  cancelAnimationFrame(skin3DState.animId);
+  skin3DState.controls.dispose();
+  skin3DState.sharedGeo.dispose();
+  skin3DState.renderer.dispose();
+  skin3DState = null;
+}
+
+function closeSkinEditorOverlay() {
+  if (!skinEditorOverlayEl) return;
+  skinEditorOverlayEl.remove();
+  skinEditorOverlayEl = null;
+  skinEditorDragActive = false;
+  disposeSkin3DScene();
+}
+
+function closeTransientMenus() {
+  closeLibraryContextMenu();
+  closeKeypadContextMenu();
+  closeRuntimeKeypadOverlay();
+}
+
+function skinEditorCellKey(x, y, z) {
+  return `${x}|${y}|${z}`;
+}
+
+function buildSkinEditorHtml() {
+  return '';
+}
+
+function saveSkinEditorToType() {
+  const voxels = [];
+  for (const [key, color] of skinEditorState.voxelMap.entries()) {
+    const [x, y, z] = key.split('|').map(v => parseInt(v, 10));
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    voxels.push({ x, y, z, color: Math.round(THREE.MathUtils.clamp(color, 0, 0xffffff)) });
+  }
+  const normalized = normalizeCustomBlockSkin({ voxels });
+  if (normalized.voxels.length) customBlockSkins[skinEditorState.type] = normalized;
+  else delete customBlockSkins[skinEditorState.type];
+  refreshCustomSkinsOnScene();
+  removeGhost();
+}
+
+function captureSkinEditorSnapshot() {
+  const voxels = [];
+  for (const [key, color] of skinEditorState.voxelMap.entries()) {
+    const [x, y, z] = key.split('|').map(v => parseInt(v, 10));
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    voxels.push({ x, y, z, color: Math.round(THREE.MathUtils.clamp(color, 0, 0xffffff)) });
+  }
+  voxels.sort((a, b) => (a.x - b.x) || (a.y - b.y) || (a.z - b.z) || (a.color - b.color));
+  return {
+    gridSize: normalizeSkinGridSize(skinEditorState.gridSize),
+    layer: THREE.MathUtils.clamp(parseInt(skinEditorState.layer, 10) || 0, 0, Math.max(0, skinEditorState.gridSize.y - 1)),
+    voxels,
+  };
+}
+
+function skinEditorSnapshotSignature(snapshot) {
+  if (!snapshot) return '';
+  const grid = normalizeSkinGridSize(snapshot.gridSize || {});
+  const layer = THREE.MathUtils.clamp(parseInt(snapshot.layer, 10) || 0, 0, Math.max(0, grid.y - 1));
+  const voxels = Array.isArray(snapshot.voxels) ? snapshot.voxels : [];
+  const parts = voxels.map(v => `${v.x}|${v.y}|${v.z}|${Math.round(v.color)}`);
+  return `${grid.x}x${grid.y}x${grid.z}@${layer};${parts.join(';')}`;
+}
+
+function restoreSkinEditorSnapshot(snapshot) {
+  if (!snapshot) return;
+  const gridSize = normalizeSkinGridSize(snapshot.gridSize || {});
+  skinEditorState.gridSize = { ...gridSize };
+  skinEditorState.layer = THREE.MathUtils.clamp(parseInt(snapshot.layer, 10) || 0, 0, Math.max(0, gridSize.y - 1));
+  skinEditorState.voxelMap = new Map();
+  const voxels = Array.isArray(snapshot.voxels) ? snapshot.voxels : [];
+  for (const voxel of voxels) {
+    const x = parseInt(voxel?.x, 10);
+    const y = parseInt(voxel?.y, 10);
+    const z = parseInt(voxel?.z, 10);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    if (x < 0 || x >= gridSize.x || y < 0 || y >= gridSize.y || z < 0 || z >= gridSize.z) continue;
+    const color = Math.round(THREE.MathUtils.clamp(Number(voxel?.color), 0, 0xffffff));
+    skinEditorState.voxelMap.set(skinEditorCellKey(x, y, z), Number.isFinite(color) ? color : skinEditorState.brushColor);
+  }
+  skin3DState?.syncFromState?.();
+  syncSkinEditorHistoryUi();
+}
+
+function syncSkinEditorHistoryUi() {
+  if (!skinEditorOverlayEl) return;
+  const undoBtn = skinEditorOverlayEl.querySelector('#skin-undo');
+  const redoBtn = skinEditorOverlayEl.querySelector('#skin-redo');
+  if (undoBtn) undoBtn.disabled = skinEditorState.undoStack.length === 0;
+  if (redoBtn) redoBtn.disabled = skinEditorState.redoStack.length === 0;
+}
+
+function commitSkinEditorChange(beforeSnapshot) {
+  if (!beforeSnapshot) return;
+  const afterSnapshot = captureSkinEditorSnapshot();
+  if (skinEditorSnapshotSignature(beforeSnapshot) === skinEditorSnapshotSignature(afterSnapshot)) return;
+  skinEditorState.undoStack.push(beforeSnapshot);
+  if (skinEditorState.undoStack.length > 80) skinEditorState.undoStack.shift();
+  skinEditorState.redoStack.length = 0;
+  syncSkinEditorHistoryUi();
+}
+
+function undoSkinEditorChange() {
+  if (!skinEditorState.undoStack.length) return;
+  const current = captureSkinEditorSnapshot();
+  const snapshot = skinEditorState.undoStack.pop();
+  skinEditorState.redoStack.push(current);
+  restoreSkinEditorSnapshot(snapshot);
+}
+
+function redoSkinEditorChange() {
+  if (!skinEditorState.redoStack.length) return;
+  const current = captureSkinEditorSnapshot();
+  const snapshot = skinEditorState.redoStack.pop();
+  skinEditorState.undoStack.push(current);
+  restoreSkinEditorSnapshot(snapshot);
+}
+
+function resizeSkinEditorGrid(nextGridLike = {}) {
+  const before = captureSkinEditorSnapshot();
+  const nextGrid = normalizeSkinGridSize(nextGridLike);
+  const prev = normalizeSkinGridSize(skinEditorState.gridSize);
+  if (nextGrid.x === prev.x && nextGrid.y === prev.y && nextGrid.z === prev.z) {
+    skin3DState?.syncFromState?.();
+    syncSkinEditorHistoryUi();
+    return;
+  }
+
+  const nextMap = new Map();
+  for (const [key, color] of skinEditorState.voxelMap.entries()) {
+    const [x, y, z] = key.split('|').map(v => parseInt(v, 10));
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+    if (x < 0 || x >= nextGrid.x || y < 0 || y >= nextGrid.y || z < 0 || z >= nextGrid.z) continue;
+    nextMap.set(key, color);
+  }
+
+  skinEditorState.gridSize = { ...nextGrid };
+  skinEditorState.layer = THREE.MathUtils.clamp(parseInt(skinEditorState.layer, 10) || 0, 0, Math.max(0, nextGrid.y - 1));
+  skinEditorState.voxelMap = nextMap;
+  skin3DState?.syncFromState?.();
+  commitSkinEditorChange(before);
+}
+
+function openSkinEditorForType(type) {
+  if (!DEFS[type]) return;
+  closeTransientMenus();
+  closeSkinEditorOverlay();
+
+  skinEditorState.type = type;
+  skinEditorState.layer = 0;
+  skinEditorState.eraseMode = false;
+  skinEditorState.brushColor = 0x7f8ea0;
+  skinEditorState.gridSize = { ...CUSTOM_SKIN_GRID_DEFAULT };
+  skinEditorState.voxelMap = new Map();
+  skinEditorState.undoStack = [];
+  skinEditorState.redoStack = [];
+
+  const existing = normalizeCustomBlockSkin(customBlockSkins[type] || {});
+  skinEditorState.gridSize = { ...existing.gridSize };
+  for (const voxel of existing.voxels) {
+    skinEditorState.voxelMap.set(skinEditorCellKey(voxel.x, voxel.y, voxel.z), voxel.color);
+    skinEditorState.brushColor = voxel.color;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.id = 'skin-editor-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:20010;display:flex;background:#080c10';
+  overlay.innerHTML = `
+    <div id="skin-3d-sidebar" style="width:260px;min-width:220px;display:flex;flex-direction:column;gap:10px;padding:16px;background:#0b1118;border-right:1px solid #1d2430;overflow-y:auto;box-sizing:border-box">
+      <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#8b949e">Custom Block Skin</div>
+      <div id="skin-editor-title" style="font-size:20px;font-weight:700;color:#e6edf3">Edit Skin</div>
+      <div style="display:flex;gap:6px">
+        <button id="skin-undo" type="button" style="flex:1;font-size:11px;padding:5px 8px" disabled>Undo</button>
+        <button id="skin-redo" type="button" style="flex:1;font-size:11px;padding:5px 8px" disabled>Redo</button>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button id="skin-mode-paint" type="button" style="flex:1;font-size:11px;padding:5px 8px;background:#1e3a24;border-color:#2f7a3f;color:#8be9a8">Paint</button>
+        <button id="skin-mode-view" type="button" style="flex:1;font-size:11px;padding:5px 8px">View</button>
+      </div>
+      <div style="font-size:10px;color:#444d56;line-height:1.5">Paint: left-click place, right-click erase.<br>View: drag to orbit, scroll to zoom.</div>
+      <div style="display:flex;flex-direction:column;gap:6px;background:#111821;border:1px solid #1d2430;border-radius:8px;padding:10px">
+        <label style="font-size:10px;color:#8b949e;letter-spacing:.06em">BRUSH COLOR</label>
+        <input id="skin-color-input" type="color" value="#7f8ea0" style="width:100%;height:32px;cursor:pointer"/>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;background:#111821;border:1px solid #1d2430;border-radius:8px;padding:10px">
+        <label style="font-size:10px;color:#8b949e;letter-spacing:.06em">PAINT PLANE Y = <span id="skin-layer-val">0</span></label>
+        <input id="skin-layer-input" type="range" min="0" max="${skinEditorState.gridSize.y - 1}" step="1" value="0" style="width:100%"/>
+        <div style="font-size:10px;color:#444d56">Slide to pick height for placing on empty space</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;background:#111821;border:1px solid #1d2430;border-radius:8px;padding:10px">
+        <label style="font-size:10px;color:#8b949e;letter-spacing:.06em">MODELING AREA</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span style="font-size:10px;color:#8b949e">X</span>
+          <input id="skin-grid-x" type="number" min="${CUSTOM_SKIN_GRID_LIMITS.x.min}" max="${CUSTOM_SKIN_GRID_LIMITS.x.max}" step="1" value="${skinEditorState.gridSize.x}" style="width:56px"/>
+          <span style="font-size:10px;color:#8b949e">Y</span>
+          <input id="skin-grid-y" type="number" min="${CUSTOM_SKIN_GRID_LIMITS.y.min}" max="${CUSTOM_SKIN_GRID_LIMITS.y.max}" step="1" value="${skinEditorState.gridSize.y}" style="width:56px"/>
+          <span style="font-size:10px;color:#8b949e">Z</span>
+          <input id="skin-grid-z" type="number" min="${CUSTOM_SKIN_GRID_LIMITS.z.min}" max="${CUSTOM_SKIN_GRID_LIMITS.z.max}" step="1" value="${skinEditorState.gridSize.z}" style="width:56px"/>
+        </div>
+        <div style="font-size:10px;color:#444d56">Expand or crop the voxel work area per block type.</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;background:#111821;border:1px solid #1d2430;border-radius:8px;padding:10px">
+        <span style="font-size:10px;color:#8b949e;flex:1;letter-spacing:.06em">VOXELS</span>
+        <span id="skin-voxel-count" style="font-size:12px;font-weight:600;color:#e6edf3">0</span>
+        <span style="font-size:10px;color:#444d56">/ ${CUSTOM_SKIN_MAX_VOXELS}</span>
+      </div>
+      <button id="skin-clear-all" type="button" style="font-size:11px;padding:6px 10px">Clear All</button>
+      <div id="skin-grid-summary" style="font-size:10px;color:#444d56;line-height:1.5">Grid: ${skinEditorState.gridSize.x}x${skinEditorState.gridSize.y}x${skinEditorState.gridSize.z}<br>Skin applies to all "${typeLabel(type)}" blocks.</div>
+      <div style="margin-top:auto;display:flex;flex-direction:column;gap:8px">
+        <button id="skin-save" type="button" style="font-size:12px;padding:8px 12px;background:#1e3a24;border-color:#2f7a3f;color:#8be9a8">Save Skin</button>
+        <button id="skin-reset" type="button" style="font-size:12px;padding:8px 12px">Reset To Default</button>
+        <button id="skin-cancel" type="button" style="font-size:12px;padding:8px 12px">Close</button>
+      </div>
+    </div>
+    <canvas id="skin-3d-canvas" style="flex:1;display:block;outline:none;cursor:crosshair"></canvas>
+  `;
+  document.body.appendChild(overlay);
+  skinEditorOverlayEl = overlay;
+
+  const titleEl = overlay.querySelector('#skin-editor-title');
+  if (titleEl) titleEl.textContent = `Edit ${typeLabel(type)} Skin`;
+
+  const canvas3d = overlay.querySelector('#skin-3d-canvas');
+  const w0 = Math.max(canvas3d.clientWidth || 0, window.innerWidth - 260);
+  const h0 = Math.max(canvas3d.clientHeight || 0, window.innerHeight);
+
+  const r3d = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true });
+  r3d.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  r3d.setSize(w0, h0, false);
+  r3d.shadowMap.enabled = true;
+  r3d.shadowMap.type = THREE.PCFSoftShadowMap;
+  r3d.setClearColor(0x080c10);
+
+  const s3d = new THREE.Scene();
+  const gridSize0 = normalizeSkinGridSize(skinEditorState.gridSize);
+  const gx2 = gridSize0.x / 2;
+  const gy2 = gridSize0.y / 2;
+  const gz2 = gridSize0.z / 2;
+
+  const cam3d = new THREE.PerspectiveCamera(55, w0 / h0, 0.1, 200);
+  cam3d.position.set(gx2 + 10, gy2 + 9, gz2 + 13);
+  cam3d.lookAt(gx2, gy2, gz2);
+
+  s3d.add(new THREE.AmbientLight(0xd0e8ff, 0.75));
+  const sun3d = new THREE.DirectionalLight(0xfff4e0, 1.2);
+  sun3d.position.set(14, 22, 10);
+  sun3d.castShadow = true;
+  sun3d.shadow.mapSize.set(1024, 1024);
+  s3d.add(sun3d);
+  const fill3d = new THREE.DirectionalLight(0xc0d8ff, 0.4);
+  fill3d.position.set(-8, 6, -6);
+  s3d.add(fill3d);
+
+  let gridH = null;
+  let bboxLine = null;
+  const bboxLineMat = new THREE.LineBasicMaterial({ color: 0x2d3f50, transparent: true, opacity: 0.6 });
+  const ppMat = new THREE.MeshBasicMaterial({ color: 0x58a6ff, transparent: true, opacity: 0.07, side: THREE.DoubleSide, depthWrite: false });
+  let ppMesh = null;
+  const ppEdgesMat = new THREE.LineBasicMaterial({ color: 0x58a6ff, transparent: true, opacity: 0.5 });
+  let ppEdges = null;
+  const floorMesh3d = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide }));
+  floorMesh3d.userData.isFloor = true;
+  s3d.add(floorMesh3d);
+
+  const ghostCubeMat = new THREE.MeshBasicMaterial({ color: 0x58a6ff, transparent: true, opacity: 0.35, depthWrite: false });
+  const ghostCube = new THREE.Mesh(new THREE.BoxGeometry(1.04, 1.04, 1.04), ghostCubeMat);
+  ghostCube.visible = false;
+  s3d.add(ghostCube);
+
+  const ghostEdgesLine = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.BoxGeometry(1.06, 1.06, 1.06)),
+    new THREE.LineBasicMaterial({ color: 0x79c0ff })
+  );
+  ghostEdgesLine.visible = false;
+  s3d.add(ghostEdgesLine);
+
+  const voxelGroup3d = new THREE.Group();
+  s3d.add(voxelGroup3d);
+  const sharedGeo3d = new THREE.BoxGeometry(1, 1, 1);
+
+  const oc3d = new OrbitControls(cam3d, canvas3d);
+  oc3d.target.set(gx2, gy2, gz2);
+  oc3d.enableDamping = true;
+  oc3d.dampingFactor = 0.1;
+  oc3d.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+  oc3d.enabled = false;
+  oc3d.update();
+
+  function syncBounds3D() {
+    const gridSize = normalizeSkinGridSize(skinEditorState.gridSize);
+    const cx = gridSize.x / 2;
+    const cy = gridSize.y / 2;
+    const cz = gridSize.z / 2;
+    const nextTarget = new THREE.Vector3(cx, cy, cz);
+    const delta = nextTarget.clone().sub(oc3d.target);
+    cam3d.position.add(delta);
+    oc3d.target.copy(nextTarget);
+
+    if (gridH) {
+      s3d.remove(gridH);
+      disposeObjectTree(gridH);
+    }
+    const gridSpan = Math.max(gridSize.x, gridSize.z, 12) + 12;
+    gridH = new THREE.GridHelper(gridSpan, gridSpan, 0x1a2230, 0x1a2230);
+    gridH.position.set(cx, 0, cz);
+    s3d.add(gridH);
+
+    if (bboxLine) {
+      s3d.remove(bboxLine);
+      disposeObjectTree(bboxLine);
+    }
+    bboxLine = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(gridSize.x, gridSize.y, gridSize.z)), bboxLineMat);
+    bboxLine.position.set(cx, cy, cz);
+    s3d.add(bboxLine);
+
+    if (ppMesh) {
+      s3d.remove(ppMesh);
+      disposeObjectTree(ppMesh);
+    }
+    const planeGeo = new THREE.PlaneGeometry(gridSize.x, gridSize.z);
+    planeGeo.rotateX(-Math.PI / 2);
+    ppMesh = new THREE.Mesh(planeGeo, ppMat);
+    ppMesh.position.set(cx, skinEditorState.layer + 0.01, cz);
+    s3d.add(ppMesh);
+
+    if (ppEdges) {
+      s3d.remove(ppEdges);
+      disposeObjectTree(ppEdges);
+    }
+    ppEdges = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(gridSize.x, gridSize.z)), ppEdgesMat);
+    ppEdges.rotation.x = -Math.PI / 2;
+    ppEdges.position.set(cx, skinEditorState.layer + 0.01, cz);
+    s3d.add(ppEdges);
+
+    const floorGeo = new THREE.PlaneGeometry(gridSize.x, gridSize.z);
+    floorGeo.rotateX(-Math.PI / 2);
+    floorMesh3d.geometry.dispose();
+    floorMesh3d.geometry = floorGeo;
+    floorMesh3d.position.set(cx, skinEditorState.layer, cz);
+
+    const layerInputEl = overlay.querySelector('#skin-layer-input');
+    const layerValEl = overlay.querySelector('#skin-layer-val');
+    if (layerInputEl) {
+      layerInputEl.max = String(gridSize.y - 1);
+      layerInputEl.value = String(skinEditorState.layer);
+    }
+    if (layerValEl) layerValEl.textContent = String(skinEditorState.layer);
+    const summaryEl = overlay.querySelector('#skin-grid-summary');
+    if (summaryEl) summaryEl.innerHTML = `Grid: ${gridSize.x}x${gridSize.y}x${gridSize.z}<br>Skin applies to all "${typeLabel(type)}" blocks.`;
+  }
+
+  function syncVoxels3D() {
+    while (voxelGroup3d.children.length) {
+      const child = voxelGroup3d.children[0];
+      child.material.dispose();
+      voxelGroup3d.remove(child);
+    }
+    for (const [key, color] of skinEditorState.voxelMap.entries()) {
+      const [vx, vy, vz] = key.split('|').map(Number);
+      const vm = new THREE.Mesh(sharedGeo3d, new THREE.MeshLambertMaterial({ color }));
+      vm.castShadow = true;
+      vm.receiveShadow = true;
+      vm.position.set(vx + 0.5, vy + 0.5, vz + 0.5);
+      vm.userData.gx = vx;
+      vm.userData.gy = vy;
+      vm.userData.gz = vz;
+      voxelGroup3d.add(vm);
+    }
+  }
+
+  function syncAllFromState() {
+    syncBounds3D();
+    syncVoxels3D();
+    const countElInner = overlay.querySelector('#skin-voxel-count');
+    if (countElInner) countElInner.textContent = String(skinEditorState.voxelMap.size);
+    const gridX = overlay.querySelector('#skin-grid-x');
+    const gridY = overlay.querySelector('#skin-grid-y');
+    const gridZ = overlay.querySelector('#skin-grid-z');
+    if (gridX) gridX.value = String(skinEditorState.gridSize.x);
+    if (gridY) gridY.value = String(skinEditorState.gridSize.y);
+    if (gridZ) gridZ.value = String(skinEditorState.gridSize.z);
+  }
+
+  skin3DState = {
+    renderer: r3d,
+    scene: s3d,
+    camera: cam3d,
+    controls: oc3d,
+    voxelGroup: voxelGroup3d,
+    floorMesh: floorMesh3d,
+    ghostCube,
+    ghostEdgesLine,
+    sharedGeo: sharedGeo3d,
+    ppMesh,
+    ppEdges,
+    animId: null,
+    isPainting: false,
+    lastPaintKey: null,
+    paintSnapshot: null,
+    syncFromState: syncAllFromState,
+  };
+  syncAllFromState();
+
+  function animLoop3D() {
+    if (!skin3DState) return;
+    skin3DState.animId = requestAnimationFrame(animLoop3D);
+    oc3d.update();
+    const cw = canvas3d.clientWidth;
+    const ch = canvas3d.clientHeight;
+    if (cw > 0 && ch > 0 && (r3d.domElement.width !== cw * r3d.getPixelRatio() || r3d.domElement.height !== ch * r3d.getPixelRatio())) {
+      r3d.setSize(cw, ch, false);
+      cam3d.aspect = cw / ch;
+      cam3d.updateProjectionMatrix();
+    }
+    r3d.render(s3d, cam3d);
+  }
+  animLoop3D();
+
+  const rc3d = new THREE.Raycaster();
+  const rcNdc = new THREE.Vector2();
+  function getHitTarget3D(e, eraseOnly) {
+    const rect = canvas3d.getBoundingClientRect();
+    rcNdc.set(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1
+    );
+    rc3d.setFromCamera(rcNdc, cam3d);
+    const targets = eraseOnly ? voxelGroup3d.children : [...voxelGroup3d.children, floorMesh3d];
+    const hits = rc3d.intersectObjects(targets, false);
+    if (!hits.length) return null;
+
+    const hit = hits[0];
+    if (hit.object.userData.isFloor) {
+      const px = THREE.MathUtils.clamp(Math.floor(hit.point.x), 0, skinEditorState.gridSize.x - 1);
+      const pz = THREE.MathUtils.clamp(Math.floor(hit.point.z), 0, skinEditorState.gridSize.z - 1);
+      return { mode: 'place', gx: px, gy: skinEditorState.layer, gz: pz };
+    }
+
+    const { gx: hx, gy: hy, gz: hz } = hit.object.userData;
+    if (eraseOnly) return { mode: 'erase', gx: hx, gy: hy, gz: hz };
+    const n = hit.face.normal;
+    const nx = hx + Math.round(n.x);
+    const ny = hy + Math.round(n.y);
+    const nz = hz + Math.round(n.z);
+    if (nx < 0 || nx >= skinEditorState.gridSize.x || ny < 0 || ny >= skinEditorState.gridSize.y || nz < 0 || nz >= skinEditorState.gridSize.z) return null;
+    return { mode: 'place', gx: nx, gy: ny, gz: nz };
+  }
+
+  function updateGhost3D(target) {
+    if (!target) {
+      ghostCube.visible = false;
+      ghostEdgesLine.visible = false;
+      return;
+    }
+    const isErase = target.mode === 'erase';
+    const pos = new THREE.Vector3(target.gx + 0.5, target.gy + 0.5, target.gz + 0.5);
+    ghostCube.position.copy(pos);
+    ghostEdgesLine.position.copy(pos);
+    ghostCubeMat.color.setHex(isErase ? 0xff4c4c : 0x58a6ff);
+    ghostEdgesLine.material.color.setHex(isErase ? 0xff8080 : 0x79c0ff);
+    ghostCube.visible = true;
+    ghostEdgesLine.visible = true;
+  }
+
+  function applyPaint3D(target) {
+    if (!target) return;
+    const key = skinEditorCellKey(target.gx, target.gy, target.gz);
+    if (skin3DState.lastPaintKey === key) return;
+    skin3DState.lastPaintKey = key;
+    if (target.mode === 'erase') {
+      skinEditorState.voxelMap.delete(key);
+    } else {
+      if (!skinEditorState.voxelMap.has(key) && skinEditorState.voxelMap.size >= CUSTOM_SKIN_MAX_VOXELS) return;
+      skinEditorState.voxelMap.set(key, skinEditorState.brushColor);
+    }
+    skin3DState.syncFromState();
+  }
+
+  canvas3d.addEventListener('pointerdown', e => {
+    if (oc3d.enabled) return;
+    if (e.button !== 0 && e.button !== 2) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    skin3DState.paintSnapshot = captureSkinEditorSnapshot();
+    skin3DState.isPainting = true;
+    skin3DState.lastPaintKey = null;
+    canvas3d.setPointerCapture(e.pointerId);
+    const target = getHitTarget3D(e, e.button === 2);
+    applyPaint3D(target);
+    updateGhost3D(target);
+  }, true);
+
+  canvas3d.addEventListener('pointermove', e => {
+    if (!skin3DState.isPainting) {
+      if (!oc3d.enabled) updateGhost3D(getHitTarget3D(e, false));
+      return;
+    }
+    const target = getHitTarget3D(e, e.buttons === 2);
+    applyPaint3D(target);
+    updateGhost3D(target);
+  });
+
+  canvas3d.addEventListener('pointerup', () => {
+    skin3DState.isPainting = false;
+    skin3DState.lastPaintKey = null;
+    if (skin3DState.paintSnapshot) {
+      commitSkinEditorChange(skin3DState.paintSnapshot);
+      skin3DState.paintSnapshot = null;
+    }
+  });
+
+  canvas3d.addEventListener('pointerleave', () => {
+    skin3DState.isPainting = false;
+    if (skin3DState.paintSnapshot) {
+      commitSkinEditorChange(skin3DState.paintSnapshot);
+      skin3DState.paintSnapshot = null;
+    }
+    ghostCube.visible = false;
+    ghostEdgesLine.visible = false;
+  });
+
+  canvas3d.addEventListener('contextmenu', e => e.preventDefault());
+
+  const btnPaint = overlay.querySelector('#skin-mode-paint');
+  const btnView = overlay.querySelector('#skin-mode-view');
+  function setPaintMode(paint) {
+    oc3d.enabled = !paint;
+    canvas3d.style.cursor = paint ? 'crosshair' : 'grab';
+    btnPaint.style.background = paint ? '#1e3a24' : '';
+    btnPaint.style.borderColor = paint ? '#2f7a3f' : '';
+    btnPaint.style.color = paint ? '#8be9a8' : '';
+    btnView.style.background = paint ? '' : '#1e2a3a';
+    btnView.style.borderColor = paint ? '' : '#2f5a7a';
+    btnView.style.color = paint ? '' : '#79c0ff';
+  }
+  btnPaint.addEventListener('click', () => setPaintMode(true));
+  btnView.addEventListener('click', () => setPaintMode(false));
+  overlay.querySelector('#skin-undo')?.addEventListener('click', () => undoSkinEditorChange());
+  overlay.querySelector('#skin-redo')?.addEventListener('click', () => redoSkinEditorChange());
+
+  const layerInput = overlay.querySelector('#skin-layer-input');
+  const layerValEl = overlay.querySelector('#skin-layer-val');
+  layerInput.addEventListener('input', () => {
+    skinEditorState.layer = parseInt(layerInput.value, 10);
+    if (layerValEl) layerValEl.textContent = String(skinEditorState.layer);
+    if (skin3DState?.floorMesh) skin3DState.floorMesh.position.y = skinEditorState.layer;
+    if (skin3DState?.ppMesh) skin3DState.ppMesh.position.y = skinEditorState.layer + 0.01;
+    if (skin3DState?.ppEdges) skin3DState.ppEdges.position.y = skinEditorState.layer + 0.01;
+  });
+
+  ['x', 'y', 'z'].forEach(axis => {
+    overlay.querySelector(`#skin-grid-${axis}`)?.addEventListener('change', () => {
+      resizeSkinEditorGrid({
+        x: overlay.querySelector('#skin-grid-x')?.value,
+        y: overlay.querySelector('#skin-grid-y')?.value,
+        z: overlay.querySelector('#skin-grid-z')?.value,
+      });
+    });
+  });
+
+  const colorInput = overlay.querySelector('#skin-color-input');
+  if (colorInput) {
+    colorInput.value = colorHexToCss(skinEditorState.brushColor);
+    colorInput.addEventListener('input', () => {
+      skinEditorState.brushColor = parseCssColor(colorInput.value, skinEditorState.brushColor);
+    });
+  }
+
+  overlay.querySelector('#skin-clear-all')?.addEventListener('click', () => {
+    const before = captureSkinEditorSnapshot();
+    skinEditorState.voxelMap.clear();
+    skin3DState?.syncFromState?.();
+    commitSkinEditorChange(before);
+  });
+
+  overlay.querySelector('#skin-save')?.addEventListener('click', () => {
+    saveSkinEditorToType();
+    closeSkinEditorOverlay();
+    saveEditorSettings();
+  });
+
+  overlay.querySelector('#skin-reset')?.addEventListener('click', () => {
+    delete customBlockSkins[skinEditorState.type];
+    refreshCustomSkinsOnScene();
+    removeGhost();
+    closeSkinEditorOverlay();
+    saveEditorSettings();
+  });
+
+  overlay.querySelector('#skin-cancel')?.addEventListener('click', () => {
+    closeSkinEditorOverlay();
+  });
+
+  overlay.addEventListener('keydown', e => {
+    const key = e.key.toLowerCase();
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && key === 'z') {
+      e.preventDefault();
+      undoSkinEditorChange();
+      return;
+    }
+    if (((e.ctrlKey || e.metaKey) && key === 'y') || ((e.ctrlKey || e.metaKey) && e.shiftKey && key === 'z')) {
+      e.preventDefault();
+      redoSkinEditorChange();
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeSkinEditorOverlay();
+    }
+    if (key === 'v') setPaintMode(false);
+    if (key === 'p') setPaintMode(true);
+  });
+  overlay.tabIndex = 0;
+  overlay.focus();
+  syncSkinEditorHistoryUi();
+}
+
+function showLibraryContextMenu(type, x, y) {
+  if (!DEFS[type]) return;
+  closeLibraryContextMenu();
+  closeKeypadContextMenu();
+
+  const menu = document.createElement('div');
+  menu.style.position = 'fixed';
+  menu.style.zIndex = '20020';
+  menu.style.minWidth = '190px';
+  menu.style.padding = '8px';
+  menu.style.borderRadius = '8px';
+  menu.style.border = '1px solid var(--border)';
+  menu.style.background = 'rgba(15,20,27,0.97)';
+  menu.style.boxShadow = '0 10px 28px rgba(0,0,0,0.4)';
+  menu.innerHTML = `
+    <div style="font-size:10px;color:var(--muted);padding:2px 4px 8px 4px;letter-spacing:.06em;text-transform:uppercase">${escapeHtml(typeLabel(type))}</div>
+    <button type="button" data-skin-edit="1" style="width:100%;justify-content:flex-start;font-size:11px;padding:5px 8px">Edit Block Skin</button>
+    <button type="button" data-skin-reset="1" style="width:100%;justify-content:flex-start;font-size:11px;padding:5px 8px;margin-top:4px" ${hasCustomSkinForType(type) ? '' : 'disabled'}>Reset To Default</button>
+  `;
+
+  document.body.appendChild(menu);
+  clampFloatingPanelPosition(menu, x + 4, y + 4);
+
+  menu.querySelector('[data-skin-edit]')?.addEventListener('click', () => {
+    closeLibraryContextMenu();
+    openSkinEditorForType(type);
+  });
+
+  menu.querySelector('[data-skin-reset]')?.addEventListener('click', () => {
+    delete customBlockSkins[type];
+    refreshCustomSkinsOnScene();
+    removeGhost();
+    closeLibraryContextMenu();
+    saveEditorSettings();
+  });
+
+  menu.addEventListener('pointerdown', e => e.stopPropagation());
+  libraryContextMenuEl = menu;
+}
+
+function pickKeypadMeshFromPointerEvent(e) {
+  if (!state.isPlaytest) return null;
+  if (fpsLocked) {
+    _keypadPickNdc.set(0, 0);
+  } else {
+    _keypadPickNdc.copy(toNDC(e));
+  }
+  raycaster.setFromCamera(_keypadPickNdc, fpsCam);
+  const hits = raycaster.intersectObjects(sceneObjects, false);
+  for (const hit of hits) {
+    if (hit.object?.userData?.type === 'keypad') return hit.object;
+  }
+  return null;
+}
+
+function closeRuntimeKeypadOverlay(options = {}) {
+  if (!runtimeKeypadOverlayEl) return;
+  runtimeKeypadOverlayEl.remove();
+  runtimeKeypadOverlayEl = null;
+  activeRuntimeKeypadMesh = null;
+  if (options.restorePointerLock && state.isPlaytest && !runtimePauseActive && document.pointerLockElement !== renderer.domElement) {
+    renderer.domElement.requestPointerLock();
+  }
+}
+
+function openRuntimeKeypadOverlay(mesh) {
+  if (!mesh || !state.isPlaytest) return false;
+  closeRuntimeKeypadOverlay();
+  closeKeypadContextMenu();
+
+  const keypadConfig = getMeshKeypadConfig(mesh);
+  const switchConfig = getMeshSwitchConfig(mesh);
+  activeRuntimeKeypadMesh = mesh;
+
+  const overlay = document.createElement('div');
+  overlay.id = 'runtime-keypad-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:20040;background:rgba(6,10,14,0.42);backdrop-filter:blur(4px)';
+  overlay.innerHTML = `
+    <div id="runtime-keypad-panel" style="position:absolute;left:calc(50% + ${keypadConfig.offsetX}px);top:calc(50% + ${keypadConfig.offsetY}px);transform:translate(-50%,-50%);width:min(320px,calc(100vw - 28px));padding:16px;border-radius:18px;border:1px solid rgba(143,180,215,0.22);background:linear-gradient(180deg,rgba(10,16,22,0.98),rgba(13,20,28,0.96));box-shadow:0 24px 70px rgba(0,0,0,0.45);display:flex;flex-direction:column;gap:12px;color:#e6edf3">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+        <div>
+          <div style="font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:#89a1b5">Keypad</div>
+          <div style="font-size:20px;font-weight:700">${escapeHtml(keypadConfig.title)}</div>
+        </div>
+        <button id="runtime-keypad-close" type="button" style="font-size:12px;padding:6px 10px">Close</button>
+      </div>
+      <div id="runtime-keypad-display" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:28px;letter-spacing:.14em;padding:14px 16px;border-radius:12px;border:1px solid rgba(143,180,215,0.16);background:rgba(3,8,12,0.9);text-align:right;min-height:32px">0</div>
+      <div style="font-size:10px;color:#89a1b5;line-height:1.5">Variable: ${escapeHtml(switchConfig.varKey)}<br>Accepts when value is between ${r3(Math.min(switchConfig.min, switchConfig.max), 1)} and ${r3(Math.max(switchConfig.min, switchConfig.max), 1)}.</div>
+      <div id="runtime-keypad-status" style="font-size:11px;color:#89a1b5;min-height:16px"></div>
+      <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px">
+        ${['1','2','3','4','5','6','7','8','9','C','0','<-'].map(value => `<button type="button" data-keypad-key="${value}" style="font-size:18px;padding:12px 0;border-radius:12px;background:#162130;border:1px solid rgba(143,180,215,0.12);color:#e6edf3">${value}</button>`).join('')}
+      </div>
+      <div style="display:flex;gap:8px">
+        <button id="runtime-keypad-enter" type="button" style="flex:1;font-size:14px;padding:10px 12px;border-radius:12px;background:#1d4d36;border:1px solid #2a7b57;color:#d4ffe8">Enter</button>
+      </div>
+    </div>
+  `;
+
+  const panel = overlay.querySelector('#runtime-keypad-panel');
+  const display = overlay.querySelector('#runtime-keypad-display');
+  const status = overlay.querySelector('#runtime-keypad-status');
+  let value = '';
+
+  const syncDisplay = () => {
+    display.textContent = value || '0';
+  };
+
+  const setStatus = (text, color = '#89a1b5') => {
+    status.textContent = text;
+    status.style.color = color;
+  };
+
+  const submitValue = () => {
+    if (!switchConfig.varKey) {
+      setStatus('Assign a variable in Properties first.', '#ffb86b');
+      return;
+    }
+    const nextValue = Math.trunc(Number.parseInt(value || '0', 10) || 0);
+    setGameVar(switchConfig.varKey, nextValue);
+    const accepted = pressSwitch(mesh);
+    setStatus(accepted ? `Accepted ${nextValue}` : `Stored ${nextValue}`, accepted ? '#8be9a8' : '#ffb86b');
+    if (accepted) {
+      window.setTimeout(() => {
+        if (activeRuntimeKeypadMesh === mesh) closeRuntimeKeypadOverlay({ restorePointerLock: true });
+      }, 120);
+    }
+  };
+
+  overlay.querySelectorAll('[data-keypad-key]').forEach(button => {
+    button.addEventListener('click', () => {
+      const key = button.dataset.keypadKey;
+      if (key === 'C') {
+        value = '';
+      } else if (key === '<-') {
+        value = value.slice(0, -1);
+      } else if (value.length < keypadConfig.maxDigits) {
+        value += key;
+      }
+      syncDisplay();
+      setStatus('');
+    });
+  });
+
+  overlay.querySelector('#runtime-keypad-enter')?.addEventListener('click', submitValue);
+  overlay.querySelector('#runtime-keypad-close')?.addEventListener('click', () => closeRuntimeKeypadOverlay({ restorePointerLock: true }));
+  overlay.addEventListener('pointerdown', e => {
+    if (!panel.contains(e.target)) closeRuntimeKeypadOverlay({ restorePointerLock: true });
+  });
+  panel.addEventListener('pointerdown', e => e.stopPropagation());
+  overlay.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeRuntimeKeypadOverlay({ restorePointerLock: true });
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submitValue();
+      return;
+    }
+    if (e.key === 'Backspace') {
+      e.preventDefault();
+      value = value.slice(0, -1);
+      syncDisplay();
+      return;
+    }
+    if (/^[0-9]$/.test(e.key) && value.length < keypadConfig.maxDigits) {
+      e.preventDefault();
+      value += e.key;
+      syncDisplay();
+    }
+  });
+
+  document.body.appendChild(overlay);
+  runtimeKeypadOverlayEl = overlay;
+  syncDisplay();
+  overlay.tabIndex = 0;
+  overlay.focus();
+  return true;
+}
+
+function tryOpenRuntimeKeypadFromPointerEvent(e) {
+  if (!state.isPlaytest) return false;
+  const keypadMesh = pickKeypadMeshFromPointerEvent(e);
+  if (!keypadMesh) return false;
+  e?.preventDefault?.();
+  if (document.pointerLockElement === renderer.domElement) {
+    suppressPointerUnlockStop = true;
+    document.exitPointerLock();
+  }
+  return openRuntimeKeypadOverlay(keypadMesh);
+}
+
+function showKeypadContextMenu(mesh, x, y) {
+  if (!mesh) return;
+  closeKeypadContextMenu();
+  closeLibraryContextMenu();
+
+  const config = getMeshSwitchConfig(mesh);
+  activeKeypadConfigMesh = mesh;
+
+  const menu = document.createElement('div');
+  menu.style.position = 'fixed';
+  menu.style.zIndex = '20030';
+  menu.style.minWidth = '230px';
+  menu.style.padding = '10px';
+  menu.style.borderRadius = '10px';
+  menu.style.border = '1px solid var(--border)';
+  menu.style.background = 'rgba(15,20,27,0.98)';
+  menu.style.boxShadow = '0 12px 30px rgba(0,0,0,0.45)';
+  menu.innerHTML = `
+    <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px">Keypad Setup</div>
+    <label style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;font-size:10px;color:var(--muted)">
+      Var
+      <select id="keypad-var" style="font-size:11px;padding:2px 4px;min-width:130px">${SWITCH_VAR_KEYS.map(key => `<option value="${key}" ${config.varKey === key ? 'selected' : ''}>${key}</option>`).join('')}</select>
+    </label>
+    <label style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;font-size:10px;color:var(--muted)">
+      Min
+      <input id="keypad-min" type="number" step="0.1" value="${config.min}" style="width:130px;font-size:11px;padding:2px 4px"/>
+    </label>
+    <label style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;font-size:10px;color:var(--muted)">
+      Max
+      <input id="keypad-max" type="number" step="0.1" value="${config.max}" style="width:130px;font-size:11px;padding:2px 4px"/>
+    </label>
+    <div style="display:flex;gap:6px;justify-content:flex-end">
+      <button type="button" id="keypad-apply" style="font-size:11px;padding:4px 8px">Apply</button>
+      <button type="button" id="keypad-close" style="font-size:11px;padding:4px 8px">Close</button>
+    </div>
+  `;
+
+  document.body.appendChild(menu);
+  clampFloatingPanelPosition(menu, x + 6, y + 6);
+
+  menu.querySelector('#keypad-apply')?.addEventListener('click', () => {
+    if (!activeKeypadConfigMesh) return;
+    const cfg = getMeshSwitchConfig(activeKeypadConfigMesh);
+    const varSelect = menu.querySelector('#keypad-var');
+    const minInput = menu.querySelector('#keypad-min');
+    const maxInput = menu.querySelector('#keypad-max');
+    cfg.enabled = true;
+    cfg.varKey = SWITCH_VAR_KEYS.includes(varSelect?.value) ? varSelect.value : cfg.varKey;
+    const nextMin = parseFloat(minInput?.value);
+    const nextMax = parseFloat(maxInput?.value);
+    if (Number.isFinite(nextMin)) cfg.min = nextMin;
+    if (Number.isFinite(nextMax)) cfg.max = nextMax;
+    activeKeypadConfigMesh.userData.switchConfig = normalizeSwitchConfig(cfg);
+    if (state.selectedObject === activeKeypadConfigMesh) refreshProps();
+    refreshStatus();
+    closeKeypadContextMenu();
+  });
+
+  menu.querySelector('#keypad-close')?.addEventListener('click', () => {
+    closeKeypadContextMenu();
+  });
+
+  menu.addEventListener('pointerdown', e => e.stopPropagation());
+  keypadContextMenuEl = menu;
+}
+
+function normalizeShapeParams(type, params = {}) {
+  const def = DEFS[type] || {};
+  const next = {};
+  if (def.usesSides) next.sides = clampShapeSides(params.sides ?? def.defaultSides ?? state.placeSides);
+  if (def.is2D) next.depth = clampShapeDepth(params.depth ?? state.place2DDepth);
+  return next;
+}
+
+function buildTypeGeometry(type, shapeParams = {}) {
+  const def = DEFS[type];
+  return def.makeGeo(normalizeShapeParams(type, shapeParams));
+}
+
+const CONTROL_ACTION_TYPES = ['move', 'rotate', 'light', 'audio', 'path', 'functionControl', 'playerGroup', 'setVar', 'setBool'];
 const CONTROL_LIGHT_OPS = ['toggle', 'enable', 'disable', 'intensity', 'distance'];
-const CONDITION_TYPES = ['none', 'fnDone', 'touching', 'position', 'distance', 'timer', 'key', 'grounded'];
+const CONTROL_PLAYER_GROUP_MODES = ['set', 'add', 'remove', 'random'];
+const AUDIO_PLAY_MODES = ['global', 'proximity'];
+const AUDIO_UNTIL_EVENTS = ['deactivate', 'audioDone', 'functionDone', 'manual'];
+const PATH_CONTROL_COMMANDS = ['start', 'pause', 'resume', 'stop', 'reset'];
+const FUNCTION_CONTROL_COMMANDS = ['pause', 'resume', 'stop', 'reset', 'restart'];
+const CONDITION_TYPES = ['none', 'fnDone', 'touching', 'touchingPlayer', 'position', 'distance', 'timer', 'key', 'grounded', 'varCmp', 'bool'];
 const CONDITION_OPS = ['=', '!=', '>', '<', '>=', '<='];
 const CONDITION_POS_AXES = ['x', 'y', 'z'];
 const CONDITION_KEY_CODES = ['Space', 'KeyE', 'KeyF', 'KeyQ', 'KeyR', 'ShiftLeft', 'ControlLeft', 'Digit1', 'Digit2', 'Digit3'];
@@ -526,11 +2005,109 @@ const SWITCH_VAR_KEYS = [
   'fallDamageMinHeight',
   'fallDamageMultiplier',
 ];
+const SWITCH_RUN_MODES = ['oneShot', 'repeat'];
 const _controlFunctionStates = new Map();
+
+const CONTROL_FUNCTION_STOP_MODES = ['none', 'momentary', 'permanent'];
+const CHECKPOINT_INTERACTIONS = ['touch', 'shoot', 'switch'];
 
 // ─── Global control functions (project-level) ────────────────────────────────
 const controlFunctions = [];
+const controlFunctionGroups = [];
+let _nextControlFunctionGroupId = 1;
 const _activeTriggerCalls = new Map(); // meshUuid -> [{functionName, condition, started, activatedAt}]
+const _momentaryFunctionStopCounts = new Map();
+const _permanentFunctionStops = new Set();
+
+function normalizeFunctionNameList(value) {
+  const source = Array.isArray(value) ? value : String(value ?? '').split(',');
+  const seen = new Set();
+  const names = [];
+  for (const raw of source) {
+    const name = String(raw ?? '').trim();
+    if (!name) continue;
+    const key = normalizeControlFunctionKey(name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    names.push(name);
+  }
+  return names;
+}
+
+function createDefaultCheckpointConfig() {
+  return {
+    interaction: 'touch',
+  };
+}
+
+function createDefaultMovementPathConfig() {
+  return {
+    enabled: false,
+    speed: 2,
+    loop: true,
+    checkpoints: [],
+  };
+}
+
+function normalizeMovementPathCheckpoint(checkpoint = {}) {
+  const pos = Array.isArray(checkpoint.pos) ? checkpoint.pos : [0, 0, 0];
+  return {
+    pos: [0, 1, 2].map(i => Number.isFinite(parseFloat(pos[i])) ? parseFloat(pos[i]) : 0),
+    functionName: String(checkpoint.functionName ?? '').trim(),
+  };
+}
+
+function normalizeMovementPathConfig(config = {}) {
+  const base = createDefaultMovementPathConfig();
+  const checkpoints = Array.isArray(config.checkpoints)
+    ? config.checkpoints.map(normalizeMovementPathCheckpoint)
+    : [];
+  return {
+    enabled: config.enabled === true,
+    speed: Math.max(0.01, Number.isFinite(parseFloat(config.speed)) ? parseFloat(config.speed) : base.speed),
+    loop: config.loop !== false,
+    checkpoints,
+  };
+}
+
+function getMeshMovementPathConfig(mesh) {
+  const cfg = normalizeMovementPathConfig(mesh?.userData?.movementPath);
+  if (mesh?.userData) mesh.userData.movementPath = cfg;
+  return cfg;
+}
+
+function normalizeCheckpointConfig(config = {}) {
+  const base = createDefaultCheckpointConfig();
+  return {
+    interaction: CHECKPOINT_INTERACTIONS.includes(config.interaction) ? config.interaction : base.interaction,
+  };
+}
+
+function getMeshCheckpointConfig(mesh) {
+  const config = normalizeCheckpointConfig(mesh?.userData?.checkpointConfig);
+  if (mesh?.userData) mesh.userData.checkpointConfig = config;
+  return config;
+}
+
+function createDefaultTriggerStopConfig() {
+  return {
+    mode: 'none',
+    functionNames: [],
+  };
+}
+
+function normalizeTriggerStopConfig(config = {}) {
+  const base = createDefaultTriggerStopConfig();
+  const mode = CONTROL_FUNCTION_STOP_MODES.includes(config.mode) ? config.mode : base.mode;
+  const functionNames = normalizeFunctionNameList(config.functionNames ?? config.functions ?? base.functionNames);
+  return { mode, functionNames };
+}
+
+function getMeshTriggerStopConfig(mesh) {
+  const config = normalizeTriggerStopConfig(mesh?.userData?.triggerStopConfig);
+  if (mesh?.userData) mesh.userData.triggerStopConfig = config;
+  return config;
+}
 
 function createDefaultSwitchConfig() {
   return {
@@ -538,19 +2115,23 @@ function createDefaultSwitchConfig() {
     varKey: 'hits',
     min: 0,
     max: 999999,
+    runMode: 'oneShot',
   };
 }
 
 function normalizeSwitchConfig(config = {}) {
   const base = createDefaultSwitchConfig();
-  const varKey = SWITCH_VAR_KEYS.includes(config.varKey) ? config.varKey : base.varKey;
+  const rawVarKey = String(config.varKey ?? '').trim();
+  const varKey = rawVarKey || base.varKey;
   const min = Number.isFinite(parseFloat(config.min)) ? parseFloat(config.min) : base.min;
   const max = Number.isFinite(parseFloat(config.max)) ? parseFloat(config.max) : base.max;
+  const runMode = SWITCH_RUN_MODES.includes(config.runMode) ? config.runMode : base.runMode;
   return {
     enabled: !!config.enabled,
     varKey,
     min,
     max,
+    runMode,
   };
 }
 
@@ -584,6 +2165,50 @@ function markControlFunctionMet(name, mesh = null) {
   });
 }
 
+function getControlFunctionState(name) {
+  const key = normalizeControlFunctionKey(name);
+  if (!key) return null;
+  return _controlFunctionStates.get(key) || null;
+}
+
+function hasFunctionRunCompletedForCaller(functionName, callerUuid, runStartedAt) {
+  const fnKey = normalizeControlFunctionKey(functionName);
+  if (!fnKey) return false;
+
+  let foundTransformState = false;
+  for (const stateMap of [_triggerMoveStates, _triggerRotateStates]) {
+    for (const [, st] of stateMap) {
+      if ((st.callerUuid ?? null) !== (callerUuid ?? null)) continue;
+      if (normalizeControlFunctionKey(st.functionName) !== fnKey) continue;
+      if (Number.isFinite(runStartedAt) && Number.isFinite(st.startedAt) && st.startedAt + 0.0001 < runStartedAt) continue;
+      foundTransformState = true;
+      if (!st.functionMarked) return false;
+    }
+  }
+  if (foundTransformState) return true;
+
+  // Light-only or no-move function: completion is tracked in function state.
+  const fnState = getControlFunctionState(functionName);
+  return !!fnState?.met && Number.isFinite(fnState?.lastAt) && (!Number.isFinite(runStartedAt) || fnState.lastAt >= runStartedAt);
+}
+
+function clearConflictingMoveStates(stateKey, targets, options = {}) {
+  if (!Array.isArray(targets) || !targets.length) return;
+  const stateMap = options.stateMap instanceof Map ? options.stateMap : _triggerMoveStates;
+  const includeSim = options.includeSim === true;
+  const targetUuids = new Set(targets.map(m => m?.uuid).filter(Boolean));
+  if (!targetUuids.size) return;
+
+  for (const [key, st] of [...stateMap]) {
+    if (key === stateKey) continue;
+    if (!includeSim && key.startsWith('sim:')) continue;
+    const stTargets = Array.isArray(st?.targets) ? st.targets : [];
+    if (!stTargets.length) continue;
+    const intersects = stTargets.some(m => targetUuids.has(m?.uuid));
+    if (intersects) stateMap.delete(key);
+  }
+}
+
 function getKnownControlFunctionNames(extraValues = []) {
   const seen = new Set();
   const values = [];
@@ -608,6 +2233,198 @@ function getKnownControlFunctionNames(extraValues = []) {
   for (const value of extraValues) addValue(value);
 
   return values.sort((a, b) => a.localeCompare(b));
+}
+
+function clampAudioDistance(value) {
+  return THREE.MathUtils.clamp(Number.isFinite(parseFloat(value)) ? parseFloat(value) : 22, 1, 800);
+}
+
+function normalizeAudioEntry(entry = {}) {
+  const id = String(entry.id ?? makeProjectId()).trim() || makeProjectId();
+  const name = String(entry.name ?? '').trim();
+  const mime = String(entry.mime ?? '').trim() || 'audio/mpeg';
+  const dataUrl = String(entry.dataUrl ?? '').trim();
+  if (!name || !dataUrl.startsWith('data:audio')) return null;
+  return { id, name, mime, dataUrl };
+}
+
+function getKnownAudioNames(extraValues = []) {
+  const seen = new Set();
+  const values = [];
+
+  const addValue = value => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return;
+    const key = raw.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    values.push(raw);
+  };
+
+  for (const item of audioLibrary) addValue(item.name);
+  for (const value of extraValues) addValue(value);
+  return values.sort((a, b) => a.localeCompare(b));
+}
+
+function getAudioLibraryEntryByName(name) {
+  const needle = String(name ?? '').trim().toLowerCase();
+  if (!needle) return null;
+  return audioLibrary.find(item => String(item.name).trim().toLowerCase() === needle) || null;
+}
+
+function makeUniqueAudioName(baseName) {
+  const base = String(baseName ?? '').trim() || 'audio';
+  const existing = new Set(audioLibrary.map(item => item.name.toLowerCase()));
+  if (!existing.has(base.toLowerCase())) return base;
+  let idx = 2;
+  while (existing.has(`${base} ${idx}`.toLowerCase())) idx++;
+  return `${base} ${idx}`;
+}
+
+function refreshAudioLibraryUI() {
+  if (!audioLibListEl) return;
+  if (!audioLibrary.length) {
+    stopLibraryPreviewAudio();
+    audioLibListEl.innerHTML = '<div style="font-size:10px;color:var(--muted)">No audio imported yet.</div>';
+    return;
+  }
+
+  audioLibListEl.innerHTML = audioLibrary.map(item => `
+    <div class="audio-lib-item" data-audio-id="${escapeHtml(item.id)}">
+      <span class="audio-lib-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
+      <button type="button" data-audio-preview="${escapeHtml(item.id)}" style="padding:1px 6px;font-size:10px">▶</button>
+      <button type="button" data-audio-preview-pause="${escapeHtml(item.id)}" style="padding:1px 6px;font-size:10px">⏸</button>
+      <button type="button" data-audio-preview-stop="${escapeHtml(item.id)}" style="padding:1px 6px;font-size:10px">⏹</button>
+      <button type="button" data-audio-remove="${escapeHtml(item.id)}" class="ct-del" style="padding:0 4px">✕</button>
+    </div>
+  `).join('');
+
+  audioLibListEl.querySelectorAll('[data-audio-preview]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.audioPreview;
+      const entry = audioLibrary.find(a => a.id === id);
+      if (!entry) return;
+      playLibraryPreviewAudio(entry);
+    });
+  });
+
+  audioLibListEl.querySelectorAll('[data-audio-preview-pause]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.audioPreviewPause !== libraryPreviewAudioId) return;
+      pauseLibraryPreviewAudio();
+    });
+  });
+
+  audioLibListEl.querySelectorAll('[data-audio-preview-stop]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.audioPreviewStop !== libraryPreviewAudioId) return;
+      stopLibraryPreviewAudio();
+    });
+  });
+
+  audioLibListEl.querySelectorAll('[data-audio-remove]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.audioRemove;
+      const idx = audioLibrary.findIndex(a => a.id === id);
+      if (idx < 0) return;
+      if (libraryPreviewAudioId === id) stopLibraryPreviewAudio();
+      audioLibrary.splice(idx, 1);
+      refreshAudioLibraryUI();
+      refreshControlFunctionsUI();
+      refreshProps();
+    });
+  });
+}
+
+function stopLibraryPreviewAudio() {
+  if (!libraryPreviewAudio) {
+    libraryPreviewAudioId = null;
+    return;
+  }
+  try {
+    libraryPreviewAudio.pause();
+    libraryPreviewAudio.currentTime = 0;
+  } catch {
+    // ignore preview media cleanup errors
+  }
+  libraryPreviewAudio = null;
+  libraryPreviewAudioId = null;
+}
+
+function pauseLibraryPreviewAudio() {
+  if (!libraryPreviewAudio) return;
+  try {
+    libraryPreviewAudio.pause();
+  } catch {
+    // ignore preview pause errors
+  }
+}
+
+function playLibraryPreviewAudio(entry) {
+  if (!entry) return;
+
+  if (libraryPreviewAudio && libraryPreviewAudioId === entry.id) {
+    if (libraryPreviewAudio.paused) {
+      libraryPreviewAudio.play().catch(() => {});
+    }
+    return;
+  }
+
+  stopLibraryPreviewAudio();
+
+  const audio = new Audio(entry.dataUrl);
+  audio.volume = 0.9;
+  audio.preload = 'auto';
+  audio.addEventListener('ended', () => {
+    if (libraryPreviewAudio === audio) stopLibraryPreviewAudio();
+  });
+  libraryPreviewAudio = audio;
+  libraryPreviewAudioId = entry.id;
+  audio.play().catch(() => {});
+}
+
+async function importAudioFiles(files) {
+  const list = Array.from(files || []);
+  if (!list.length) return;
+
+  const readDataUrl = file => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+
+  for (const file of list) {
+    if (!String(file.type || '').startsWith('audio/')) continue;
+    let dataUrl = '';
+    try {
+      dataUrl = await readDataUrl(file);
+    } catch {
+      continue;
+    }
+    const baseName = String(file.name || 'audio').replace(/\.[^.]+$/, '').trim() || 'audio';
+    const normalized = normalizeAudioEntry({
+      id: makeProjectId(),
+      name: makeUniqueAudioName(baseName),
+      mime: file.type,
+      dataUrl,
+    });
+    if (normalized) audioLibrary.push(normalized);
+  }
+
+  refreshAudioLibraryUI();
+  refreshControlFunctionsUI();
+  refreshProps();
+}
+
+function setLibraryPane(name) {
+  const pane = name === 'audio' ? 'audio' : 'objects';
+  activeLibraryPane = pane;
+  if (libraryPaneObjectsEl) libraryPaneObjectsEl.classList.toggle('active', pane === 'objects');
+  if (libraryPaneAudioEl) libraryPaneAudioEl.classList.toggle('active', pane === 'audio');
+  for (const btn of libraryPaneButtons) {
+    btn.classList.toggle('active', btn.dataset.libPane === pane);
+  }
 }
 
 function clampLightIntensity(value) {
@@ -685,23 +2502,75 @@ function setMeshLightDistance(mesh, distance) {
   mesh.userData.lightDistance = d;
 }
 
+function clampMeshOpacity(value) {
+  return THREE.MathUtils.clamp(Number.isFinite(value) ? value : 1, 0.02, 1);
+}
+
+function clampMeshSolidness(value) {
+  return THREE.MathUtils.clamp(Number.isFinite(value) ? value : 1, 0, 1);
+}
+
+function isDefaultSolidType(type) {
+  return !['light', 'spawn', 'checkpoint', 'trigger', 'target'].includes(type);
+}
+
+function getPlacementShapeParams(type) {
+  if (state.cloneShapeParams && state.placingType === type) {
+    return normalizeShapeParams(type, state.cloneShapeParams);
+  }
+  return normalizeShapeParams(type, {
+    sides: state.placeSides,
+    depth: state.place2DDepth,
+  });
+}
+
+function setMeshOpacity(mesh, value) {
+  if (!mesh?.material) return;
+  const opacity = clampMeshOpacity(value);
+  const baseTransparent = mesh.userData._baseMaterialTransparent === true;
+  mesh.material.opacity = opacity;
+  mesh.material.transparent = baseTransparent || opacity < 0.999;
+  mesh.material.needsUpdate = true;
+  mesh.userData.opacity = opacity;
+}
+
 function createMesh(type, ghost = false, options = {}) {
   const def = DEFS[type];
   const mat = def.makeMat();
+  const shapeParams = normalizeShapeParams(type, options.shapeParams ?? getPlacementShapeParams(type));
+  const defaultOpacity = clampMeshOpacity(Number.isFinite(options.opacity) ? options.opacity : (mat.opacity ?? 1));
   if (ghost) { mat.transparent = true; mat.opacity = .42; mat.depthWrite = false; }
-  const mesh = new THREE.Mesh(def.makeGeo(), mat);
+  const mesh = new THREE.Mesh(buildTypeGeometry(type, shapeParams), mat);
   mesh.castShadow    = !ghost;
   mesh.receiveShadow = !ghost;
   mesh.userData.type = type;
-  mesh.userData.solid = type === 'wall' || type === 'floor';
+  mesh.userData.shapeParams = shapeParams;
+  mesh.userData.solid = isDefaultSolidType(type);
+  mesh.userData.collisionMode = 'aabb';
+  mesh.userData.hitboxConfig = createDefaultHitboxConfig();
+  mesh.userData.solidness = 1;
+  mesh.userData._baseMaterialTransparent = !!mat.transparent;
+  mesh.userData.opacity = defaultOpacity;
   mesh.userData.traction = false;
   mesh.userData.groups = ['default'];
   mesh.userData.group = 'default';
+  mesh.userData.movementPath = createDefaultMovementPathConfig();
   mesh.userData.switchConfig = createDefaultSwitchConfig();
+  if (type === 'keypad') {
+    const keypadSwitch = createDefaultSwitchConfig();
+    keypadSwitch.enabled = true;
+    mesh.userData.switchConfig = keypadSwitch;
+    mesh.userData.keypadConfig = createDefaultKeypadConfig();
+  }
+  if (type === 'checkpoint') {
+    mesh.userData.checkpointConfig = createDefaultCheckpointConfig();
+  }
+  if (!ghost) setMeshOpacity(mesh, defaultOpacity);
   if (type === 'trigger') {
     mesh.userData.triggerRules = {};
     mesh.userData.triggerMoveActions = [];
     mesh.userData.triggerCalls = [];
+    mesh.userData.triggerStopConfig = createDefaultTriggerStopConfig();
   }
   if (type === 'target') mesh.userData.targetMaxHealth = 0;
   if (type === 'light' && !ghost) {
@@ -714,6 +2583,7 @@ function createMesh(type, ghost = false, options = {}) {
     mesh.userData.lightDistance = pl.distance;
     setMeshLightIntensity(mesh, options.lightIntensity);
   }
+  if (!ghost) applyCustomSkinToMesh(mesh);
   return mesh;
 }
 
@@ -801,29 +2671,20 @@ transformControls.addEventListener('objectChange', () => {
     const m = state.selectedObject;
     if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
     const bb = m.geometry.boundingBox;
-    const bS = transformBefore.sca;
-    const cS = m.scale;
     const axis = transformControls.axis; // 'X','Y','Z','XY','XZ','YZ','XYZ' etc.
+    if (axis) {
+      const center = bb.getCenter(new THREE.Vector3());
+      const localAnchor = center.clone();
+      if (axis.includes('X')) localAnchor.x = state.scaleSides.x === 'pos' ? bb.min.x : bb.max.x;
+      if (axis.includes('Y')) localAnchor.y = state.scaleSides.y === 'pos' ? bb.min.y : bb.max.y;
+      if (axis.includes('Z')) localAnchor.z = state.scaleSides.z === 'pos' ? bb.min.z : bb.max.z;
 
-    // + side edit anchors min face; - side edit anchors max face.
-    let px = transformBefore.pos.x;
-    let py = transformBefore.pos.y;
-    let pz = transformBefore.pos.z;
-
-    if (axis && axis.includes('Y')) {
-      const ay = state.scaleSides.y === 'pos' ? bb.min.y : bb.max.y;
-      py -= (cS.y - bS.y) * ay;
+      const beforeM = new THREE.Matrix4().compose(transformBefore.pos, transformBefore.quat, transformBefore.sca);
+      const afterM = new THREE.Matrix4().compose(m.position, m.quaternion, m.scale);
+      const worldBefore = localAnchor.clone().applyMatrix4(beforeM);
+      const worldAfter = localAnchor.clone().applyMatrix4(afterM);
+      m.position.add(worldBefore.sub(worldAfter));
     }
-    if (axis && axis.includes('X')) {
-      const ax = state.scaleSides.x === 'pos' ? bb.min.x : bb.max.x;
-      px -= (cS.x - bS.x) * ax;
-    }
-    if (axis && axis.includes('Z')) {
-      const az = state.scaleSides.z === 'pos' ? bb.min.z : bb.max.z;
-      pz -= (cS.z - bS.z) * az;
-    }
-
-    m.position.set(px, py, pz);
   }
 
   selBox.setFromObject(state.selectedObject);
@@ -894,6 +2755,125 @@ scene.add(selBox);
 
 const extraSelBoxes = [];
 
+function clearPathCheckpointViewportPick() {
+  _pendingPathCheckpointPick = null;
+}
+
+function armPathCheckpointViewportPick(meshes, index) {
+  const meshUuids = meshes
+    .filter(m => m && sceneObjects.includes(m))
+    .map(m => m.uuid);
+  if (!meshUuids.length || !Number.isFinite(index) || index < 0) {
+    clearPathCheckpointViewportPick();
+    return;
+  }
+  _pendingPathCheckpointPick = { meshUuids, index };
+}
+
+function tryApplyPathCheckpointViewportPick(ndc) {
+  if (!_pendingPathCheckpointPick) return false;
+  const selected = state.selectedObject;
+  if (!selected || !_pendingPathCheckpointPick.meshUuids.includes(selected.uuid)) {
+    clearPathCheckpointViewportPick();
+    return false;
+  }
+
+  const hit = surfaceHit(ndc);
+  const pt = hit?.point ?? groundPoint(ndc);
+  if (!pt) return true;
+
+  const index = _pendingPathCheckpointPick.index;
+  const targets = getPropertyTargets(selected).filter(m => !['spawn', 'checkpoint', 'trigger'].includes(m.userData.type));
+  for (const target of targets) {
+    const cfg = getMeshMovementPathConfig(target);
+    while (cfg.checkpoints.length <= index) cfg.checkpoints.push(normalizeMovementPathCheckpoint({ pos: target.position.toArray() }));
+    cfg.checkpoints[index] = normalizeMovementPathCheckpoint({
+      ...cfg.checkpoints[index],
+      pos: [pt.x, pt.y, pt.z],
+    });
+    target.userData.movementPath = normalizeMovementPathConfig(cfg);
+  }
+
+  clearPathCheckpointViewportPick();
+  refreshProps();
+  refreshSelectedPathPreview();
+  return true;
+}
+
+function clearSelectedPathPreview() {
+  if (_selectedPathPreviewLine) {
+    scene.remove(_selectedPathPreviewLine);
+    _selectedPathPreviewLine.geometry?.dispose?.();
+    _selectedPathPreviewLine.material?.dispose?.();
+    _selectedPathPreviewLine = null;
+  }
+  while (_selectedPathPreviewMarkers.length) {
+    const marker = _selectedPathPreviewMarkers.pop();
+    scene.remove(marker);
+    marker.geometry?.dispose?.();
+    marker.material?.dispose?.();
+  }
+}
+
+function refreshSelectedPathPreview() {
+  clearSelectedPathPreview();
+
+  const mesh = state.selectedObject;
+  if (!mesh || !sceneObjects.includes(mesh)) {
+    clearPathCheckpointViewportPick();
+    return;
+  }
+  if (['spawn', 'checkpoint', 'trigger'].includes(mesh.userData.type)) {
+    clearPathCheckpointViewportPick();
+    return;
+  }
+
+  const cfg = getMeshMovementPathConfig(mesh);
+  if (!cfg.checkpoints.length) {
+    clearPathCheckpointViewportPick();
+    return;
+  }
+
+  if (_pendingPathCheckpointPick && !_pendingPathCheckpointPick.meshUuids.includes(mesh.uuid)) {
+    clearPathCheckpointViewportPick();
+  }
+
+  const points = [mesh.position.clone()];
+  for (const cp of cfg.checkpoints) {
+    const ncp = normalizeMovementPathCheckpoint(cp);
+    points.push(new THREE.Vector3(ncp.pos[0], ncp.pos[1], ncp.pos[2]));
+  }
+
+  const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+  const lineMat = new THREE.LineBasicMaterial({
+    color: 0x3f9bff,
+    transparent: true,
+    opacity: 0.95,
+    depthTest: false,
+  });
+  _selectedPathPreviewLine = new THREE.Line(lineGeo, lineMat);
+  _selectedPathPreviewLine.renderOrder = 40;
+  scene.add(_selectedPathPreviewLine);
+
+  for (let i = 0; i < cfg.checkpoints.length; i++) {
+    const cp = normalizeMovementPathCheckpoint(cfg.checkpoints[i]);
+    const armed = !!(_pendingPathCheckpointPick && _pendingPathCheckpointPick.index === i);
+    const marker = new THREE.Mesh(
+      new THREE.SphereGeometry(0.14, 14, 12),
+      new THREE.MeshBasicMaterial({
+        color: armed ? 0xffc857 : 0x65d46e,
+        transparent: true,
+        opacity: armed ? 1 : 0.9,
+        depthTest: false,
+      })
+    );
+    marker.position.set(cp.pos[0], cp.pos[1], cp.pos[2]);
+    marker.renderOrder = 41;
+    _selectedPathPreviewMarkers.push(marker);
+    scene.add(marker);
+  }
+}
+
 function selectObject(obj) {
   // Clear all extras
   for (const h of state.extraSelected) unhighlight(h);
@@ -910,8 +2890,10 @@ function selectObject(obj) {
   } else {
     selBox.visible = false;
     transformControls.detach(); transformControls.visible = false;
+    clearPathCheckpointViewportPick();
     hideProps();
   }
+  refreshSelectedPathPreview();
   refreshStatus();
 }
 
@@ -1095,6 +3077,15 @@ function removeFromScene(mesh) {
   scene.remove(mesh);
 }
 
+function setMeshGeometry(mesh, geometry) {
+  if (!mesh || !geometry) return;
+  mesh.geometry = geometry;
+  mesh.geometry.computeBoundingBox();
+  mesh.geometry.computeBoundingSphere();
+  applyCustomSkinToMesh(mesh);
+  refreshSelectionHelpers(mesh);
+}
+
 function applyAction(a) {
   if (a.type === 'add')       { addToScene(a.mesh); }
   else if (a.type === 'delete')    { removeFromScene(a.mesh); }
@@ -1125,6 +3116,23 @@ function applyAction(a) {
   }
   else if (a.type === 'solid') {
     a.mesh.userData.solid = a.after;
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'solidness') {
+    a.mesh.userData.solidness = clampMeshSolidness(a.after);
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'opacity') {
+    setMeshOpacity(a.mesh, a.after);
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'geometry') {
+    setMeshGeometry(a.mesh, a.after.clone());
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'shape') {
+    a.mesh.userData.shapeParams = normalizeShapeParams(a.mesh.userData.type, a.afterParams);
+    setMeshGeometry(a.mesh, a.afterGeo.clone());
     if (state.selectedObject === a.mesh) refreshProps();
   }
   else if (a.type === 'traction') {
@@ -1174,6 +3182,23 @@ function applyInverse(a) {
     a.mesh.userData.solid = a.before;
     if (state.selectedObject === a.mesh) refreshProps();
   }
+  else if (a.type === 'solidness') {
+    a.mesh.userData.solidness = clampMeshSolidness(a.before);
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'opacity') {
+    setMeshOpacity(a.mesh, a.before);
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'geometry') {
+    setMeshGeometry(a.mesh, a.before.clone());
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'shape') {
+    a.mesh.userData.shapeParams = normalizeShapeParams(a.mesh.userData.type, a.beforeParams);
+    setMeshGeometry(a.mesh, a.beforeGeo.clone());
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
   else if (a.type === 'traction') {
     a.mesh.userData.traction = a.before;
     if (state.selectedObject === a.mesh) refreshProps();
@@ -1208,10 +3233,61 @@ let ghost = null;
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const raycaster   = new THREE.Raycaster();
 
+function buildEraserGeometry() {
+  const size = THREE.MathUtils.clamp(parseFloat(state.eraserSize) || 1, 0.1, 12);
+  const sides = clampShapeSides(state.placeSides);
+  switch (state.eraserShape) {
+    case 'sphere':
+      return new THREE.SphereGeometry(size * 0.5, Math.max(8, sides), Math.max(6, Math.round(sides * 0.75)));
+    case 'cylinder':
+      return new THREE.CylinderGeometry(size * 0.45, size * 0.45, size, Math.max(6, sides));
+    case 'prism':
+      return new THREE.CylinderGeometry(size * 0.5, size * 0.5, size, Math.max(3, sides), 1);
+    case 'square2d':
+      return new THREE.BoxGeometry(size, size, Math.max(0.08, size * 0.2));
+    case 'triangle2d':
+      return makeExtrudedShapeGeometry(3, Math.max(0.08, size * 0.2), size * 0.6);
+    case 'circle2d':
+      return makeExtrudedShapeGeometry(Math.max(8, sides), Math.max(0.08, size * 0.2), size * 0.6);
+    case 'polygon2d':
+      return makeExtrudedShapeGeometry(Math.max(3, sides), Math.max(0.08, size * 0.2), size * 0.6);
+    case 'box':
+    default:
+      return new THREE.BoxGeometry(size, size, size);
+  }
+}
+
+function ensureEraserGhost() {
+  const expectedType = `eraser:${state.eraserShape}`;
+  if (!ghost || ghost.userData.type !== expectedType) {
+    if (ghost) { scene.remove(ghost); ghost = null; }
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xff6a4a,
+      emissive: 0xff3300,
+      emissiveIntensity: 0.35,
+      transparent: true,
+      opacity: 0.28,
+      depthWrite: false,
+    });
+    ghost = new THREE.Mesh(buildEraserGeometry(), mat);
+    ghost.userData.type = expectedType;
+    scene.add(ghost);
+  } else {
+    const nextGeo = buildEraserGeometry();
+    ghost.geometry.dispose();
+    ghost.geometry = nextGeo;
+  }
+  ghost.scale.set(1, 1, 1);
+}
+
 function ensureGhost(type) {
+  if (state.mode === 'erase') {
+    ensureEraserGhost();
+    return;
+  }
   if (!ghost || ghost.userData.type !== type) {
     if (ghost) { scene.remove(ghost); ghost = null; }
-    ghost = createMesh(type, true);
+    ghost = createMesh(type, true, { shapeParams: getPlacementShapeParams(type), opacity: state.placeOpacity });
     scene.add(ghost);
   }
   if (state.cloneScale) ghost.scale.copy(state.cloneScale);
@@ -1251,14 +3327,30 @@ function hitObject(ndc) {
 let lastPlaceNDC = new THREE.Vector2();
 
 const _geoSizeCache = {};
-function getGeoSize(type) {
-  if (!_geoSizeCache[type]) {
-    const geo = DEFS[type].makeGeo();
+function shapeParamCacheKey(type, shapeParams = {}) {
+  const norm = normalizeShapeParams(type, shapeParams);
+  return `${type}:${norm.sides ?? '-'}:${norm.depth ?? '-'}`;
+}
+function getGeoSize(type, shapeParams = {}) {
+  const key = shapeParamCacheKey(type, shapeParams);
+  if (!_geoSizeCache[key]) {
+    const geo = buildTypeGeometry(type, shapeParams);
     geo.computeBoundingBox();
-    _geoSizeCache[type] = geo.boundingBox.getSize(new THREE.Vector3());
+    _geoSizeCache[key] = geo.boundingBox.getSize(new THREE.Vector3());
     geo.dispose();
   }
-  return _geoSizeCache[type];
+  return _geoSizeCache[key];
+}
+
+function getPlacedY(type, shapeParams = {}, scale = null) {
+  const def = DEFS[type];
+  if (Number.isFinite(def?.placedY)) {
+    if (!scale) return def.placedY;
+    return def.placedY * scale.y;
+  }
+  const size = getGeoSize(type, shapeParams).clone();
+  if (scale) size.multiply(scale);
+  return size.y * 0.5;
 }
 
 function surfaceHit(ndc) {
@@ -1272,8 +3364,8 @@ function surfaceHit(ndc) {
   return { point: hit.point, normal, object: hit.object };
 }
 
-function computeSurfacePlacement(hitPoint, normal, ghostType, scale) {
-  const size = getGeoSize(ghostType).clone();
+function computeSurfacePlacement(hitPoint, normal, ghostType, scale, shapeParams = {}) {
+  const size = getGeoSize(ghostType, shapeParams).clone();
   if (scale) size.multiply(scale);
   const offset = Math.abs(normal.x) * size.x / 2 +
                  Math.abs(normal.y) * size.y / 2 +
@@ -1292,12 +3384,79 @@ function snapSurface(pos, normal) {
 
 // ─── Editor operations ────────────────────────────────────────────────────────
 function placeObject(pos) {
-  const mesh = createMesh(state.placingType, false, { lightIntensity: state.defaultLightIntensity });
+  const shapeParams = getPlacementShapeParams(state.placingType);
+  const mesh = createMesh(state.placingType, false, {
+    lightIntensity: state.defaultLightIntensity,
+    shapeParams,
+    opacity: state.placeOpacity,
+  });
   mesh.position.copy(pos);
   if (state.cloneScale) mesh.scale.copy(state.cloneScale);
   addToScene(mesh);
   pushUndo({ type: 'add', mesh });
   refreshStatus();
+}
+
+function paintMesh(mesh, colorHex) {
+  if (!mesh?.material?.color) return;
+  const before = mesh.material.color.getHex();
+  const after = colorHex;
+  if (before === after) return;
+  setMeshColor(mesh, after);
+  pushUndo({ type: 'color', mesh, before, after });
+}
+
+function makeEraserCutterMesh(position, normal, depth) {
+  const geo = buildEraserGeometry();
+  const mat = new THREE.MeshBasicMaterial();
+  const cutter = new THREE.Mesh(geo, mat);
+
+  geo.computeBoundingBox();
+  const baseDepth = Math.max(0.001, geo.boundingBox.max.z - geo.boundingBox.min.z);
+  const cutDepth = Math.max(0.1, Number.isFinite(depth) ? depth : state.eraserSize);
+
+  cutter.position.copy(position);
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal.clone().normalize());
+  cutter.quaternion.copy(q);
+  cutter.scale.set(1, 1, cutDepth / baseDepth);
+  cutter.updateMatrix();
+  cutter.updateMatrixWorld(true);
+  return cutter;
+}
+
+function eraseHoleAtHit(hit) {
+  const target = hit?.object;
+  if (!target || !target.geometry || !sceneObjects.includes(target)) return;
+  if (['light', 'spawn', 'checkpoint', 'trigger'].includes(target.userData.type)) return;
+
+  const targetBounds = new THREE.Box3().setFromObject(target);
+  const targetSize = targetBounds.getSize(new THREE.Vector3());
+  const throughDepth = Math.max(
+    state.eraserSize * 2,
+    Math.max(targetSize.x, targetSize.y, targetSize.z) * 2.4
+  );
+
+  const cutterPos = hit.point.clone();
+  const cutter = makeEraserCutterMesh(cutterPos, hit.normal, throughDepth);
+
+  target.updateMatrixWorld(true);
+  cutter.updateMatrixWorld(true);
+
+  try {
+    const result = CSG.subtract(target, cutter);
+    if (!result?.geometry) return;
+    const beforeGeo = target.geometry.clone();
+    const afterGeo = result.geometry.clone();
+    target.userData.collisionMode = 'geometry';
+    setMeshGeometry(target, result.geometry);
+    pushUndo({ type: 'geometry', mesh: target, before: beforeGeo, after: afterGeo });
+    if (state.selectedObject === target) selBox.setFromObject(target);
+  } catch (err) {
+    console.warn('Eraser cut failed:', err);
+  } finally {
+    cutter.geometry.dispose();
+    cutter.material.dispose();
+  }
 }
 
 function deleteObject(mesh) {
@@ -1336,18 +3495,30 @@ function serializeSettings() {
       condOp: ct.condOp ?? ((ct.op === '==' || ct.op === '=') ? '=' : (ct.op || '<')),
       op: ct.op,
       value: ct.value,
+      valueType: ct.valueType ?? 'digits',
+      valueVarName: ct.valueVarName ?? '',
       touchRefType: ct.touchRefType ?? 'group',
       touchRefValue: ct.touchRefValue ?? '',
+      varCondName: ct.varCondName ?? '',
+      boolCondName: ct.boolCondName ?? '',
       ruleKey: ct.ruleKey,
       actionBase: ct.actionBase ?? 'none',
       actionOp: ct.actionOp ?? '+',
       actionValue: ct.actionValue ?? (ct.ruleValue ?? 0),
+      actionValueType: ct.actionValueType ?? 'digits',
+      actionValueVar: ct.actionValueVar ?? '',
       ruleValue: ct.ruleValue,
       ruleValueExpr: ct.ruleValueExpr ?? String(ct.ruleValue),
       elseRuleKey: ct.elseRuleKey || '', elseRuleValue: ct.elseRuleValue ?? 0, elseValueExpr: ct.elseValueExpr ?? String(ct.elseRuleValue ?? 0),
       priority: ct.priority ?? 0, mode: ct.mode || 'if', repeatInterval: ct.repeatInterval ?? 1,
     })),
+    gameVars: gameVars.map(normalizeGameVarEntry),
+    gameBools: gameBools.map(normalizeGameBoolEntry),
+    playerProfile: normalizePlayerProfile(playerProfile),
+    audioLibrary: audioLibrary.map(item => ({ ...item })),
+    controlFunctionGroups: controlFunctionGroups.map(normalizeControlFunctionGroup),
     controlFunctions: controlFunctions.map(normalizeControlFunction),
+    customBlockSkins: serializeCustomBlockSkins(),
   };
 }
 
@@ -1417,14 +3588,53 @@ function applySceneSettings(settings = {}) {
     }
     refreshCondTriggerUI();
   }
+  gameVars.length = 0;
+  if (Array.isArray(settings.gameVars)) {
+    for (const entry of settings.gameVars) gameVars.push(normalizeGameVarEntry(entry));
+  }
+  gameBools.length = 0;
+  if (Array.isArray(settings.gameBools)) {
+    for (const entry of settings.gameBools) gameBools.push(normalizeGameBoolEntry(entry));
+  }
+  if (settings.playerProfile) {
+    const nextProfile = normalizePlayerProfile(settings.playerProfile);
+    playerProfile.name = nextProfile.name;
+    playerProfile.groups = nextProfile.groups;
+  } else {
+    const nextProfile = normalizePlayerProfile({});
+    playerProfile.name = nextProfile.name;
+    playerProfile.groups = nextProfile.groups;
+  }
+  stopLibraryPreviewAudio();
+  audioLibrary.length = 0;
+  if (Array.isArray(settings.audioLibrary)) {
+    for (const entry of settings.audioLibrary) {
+      const normalized = normalizeAudioEntry(entry);
+      if (normalized) audioLibrary.push(normalized);
+    }
+  }
+  refreshAudioLibraryUI();
+  if (settings.controlFunctionGroups) {
+    controlFunctionGroups.length = 0;
+    for (const group of settings.controlFunctionGroups) {
+      controlFunctionGroups.push(normalizeControlFunctionGroup(group));
+    }
+  } else {
+    controlFunctionGroups.length = 0;
+  }
   // Restore control functions
   if (settings.controlFunctions) {
     controlFunctions.length = 0;
     for (const fn of settings.controlFunctions) {
       controlFunctions.push(normalizeControlFunction(fn));
     }
-    refreshControlFunctionsUI();
   }
+  setCustomBlockSkinsMap(settings.customBlockSkins || {});
+  ensureControlFunctionGroups();
+  refreshVarPanel();
+  refreshBoolPanel();
+  refreshPlayerProfileUI();
+  refreshControlFunctionsUI();
 }
 
 function serializeScene() {
@@ -1436,7 +3646,17 @@ function serializeScene() {
       scale:      m.scale.toArray(),
       color:      m.material.color.getHex(),
       solid:      !!m.userData.solid,
+      solidness:  clampMeshSolidness(m.userData.solidness ?? 1),
+      opacity:    clampMeshOpacity(m.userData.opacity ?? m.material.opacity ?? 1),
     };
+    if (m.userData.collisionMode === 'geometry') o.collisionMode = 'geometry';
+    const hitboxConfig = normalizeHitboxConfig(m.userData.hitboxConfig);
+    if (hitboxConfig.mode !== 'auto' || hitboxConfig.offset.some(v => Math.abs(v) > 0.0001) || hitboxConfig.size.some((v, i) => Math.abs(v - createDefaultHitboxConfig().size[i]) > 0.0001)) {
+      o.hitboxConfig = hitboxConfig;
+    }
+    if (m.userData.shapeParams && Object.keys(m.userData.shapeParams).length) {
+      o.shapeParams = { ...m.userData.shapeParams };
+    }
     if (m.userData.pointLight) {
       o.lightColor     = m.userData.pointLight.color.getHex();
       o.lightIntensity = m.userData.pointLight.intensity;
@@ -1448,6 +3668,17 @@ function serializeScene() {
     if (m.userData.group !== undefined) o.group = m.userData.group;
     if (m.userData.editorGroupId) o.editorGroupId = m.userData.editorGroupId;
     if (m.userData.triggerRules) o.triggerRules = { ...m.userData.triggerRules };
+    const movementPath = normalizeMovementPathConfig(m.userData.movementPath);
+    if (movementPath.enabled || movementPath.checkpoints.length) {
+      o.movementPath = movementPath;
+    }
+    if (m.userData.checkpointConfig) {
+      o.checkpointConfig = normalizeCheckpointConfig(m.userData.checkpointConfig);
+    }
+    if (m.userData.triggerStopConfig) {
+      const stopConfig = normalizeTriggerStopConfig(m.userData.triggerStopConfig);
+      if (stopConfig.mode !== 'none' || stopConfig.functionNames.length) o.triggerStopConfig = stopConfig;
+    }
     if (Array.isArray(m.userData.triggerCalls) && m.userData.triggerCalls.length) {
       o.triggerCalls = normalizeTriggerCalls(m.userData.triggerCalls);
     }
@@ -1459,17 +3690,28 @@ function serializeScene() {
     if (m.userData.targetMaxHealth !== undefined) o.targetMaxHealth = m.userData.targetMaxHealth;
     const switchConfig = normalizeSwitchConfig(m.userData.switchConfig);
     if (switchConfig.enabled) o.switchConfig = switchConfig;
+    if (m.userData.type === 'keypad') {
+      o.keypadConfig = normalizeKeypadConfig(m.userData.keypadConfig);
+    }
     return o;
   });
 }
 
 function deserializeObject(d) {
-  const mesh = createMesh(d.type, false, { lightIntensity: d.lightIntensity });
+  const mesh = createMesh(d.type, false, {
+    lightIntensity: d.lightIntensity,
+    shapeParams: d.shapeParams,
+    opacity: d.opacity,
+  });
   mesh.position.fromArray(d.position);
   mesh.quaternion.fromArray(d.quaternion);
   mesh.scale.fromArray(d.scale);
   if (d.color !== undefined) mesh.material.color.setHex(d.color);
   if (d.solid !== undefined) mesh.userData.solid = d.solid;
+  if (d.collisionMode === 'geometry') mesh.userData.collisionMode = 'geometry';
+  if (d.hitboxConfig) mesh.userData.hitboxConfig = normalizeHitboxConfig(d.hitboxConfig);
+  if (d.solidness !== undefined) mesh.userData.solidness = clampMeshSolidness(parseFloat(d.solidness));
+  if (d.opacity !== undefined) setMeshOpacity(mesh, parseFloat(d.opacity));
   if (d.traction !== undefined) mesh.userData.traction = !!d.traction;
   if (d.label) mesh.userData.label = d.label;
   if (d.groups !== undefined || d.group !== undefined) {
@@ -1477,6 +3719,9 @@ function deserializeObject(d) {
   }
   if (d.editorGroupId) mesh.userData.editorGroupId = d.editorGroupId;
   if (d.triggerRules) mesh.userData.triggerRules = { ...d.triggerRules };
+  if (d.movementPath) mesh.userData.movementPath = normalizeMovementPathConfig(d.movementPath);
+  if (d.checkpointConfig) mesh.userData.checkpointConfig = normalizeCheckpointConfig(d.checkpointConfig);
+  if (d.triggerStopConfig) mesh.userData.triggerStopConfig = normalizeTriggerStopConfig(d.triggerStopConfig);
   if (d.triggerCalls) mesh.userData.triggerCalls = normalizeTriggerCalls(d.triggerCalls);
   // Keep legacy data for migration
   if (d.triggerMoveActions) mesh.userData.triggerMoveActions = normalizeTriggerMoveActions(d.triggerMoveActions);
@@ -1488,6 +3733,7 @@ function deserializeObject(d) {
   }
   if (d.targetMaxHealth !== undefined) mesh.userData.targetMaxHealth = d.targetMaxHealth;
   if (d.switchConfig) mesh.userData.switchConfig = normalizeSwitchConfig(d.switchConfig);
+  if (d.keypadConfig && d.type === 'keypad') mesh.userData.keypadConfig = normalizeKeypadConfig(d.keypadConfig);
   if (d.lightColor !== undefined && mesh.userData.pointLight) {
     mesh.userData.pointLight.color.setHex(d.lightColor);
     mesh.userData.pointLight.distance  = d.lightDistance ?? mesh.userData.pointLight.distance;
@@ -1520,6 +3766,10 @@ function downloadTextFile(fileName, content, mimeType = 'text/plain;charset=utf-
 
 function safeJsonForInlineScript(value) {
   return JSON.stringify(value).replace(/<\//g, '<\\/');
+}
+
+function safeModuleSourceForInlineScript(source) {
+  return String(source || '').replace(/<\/script/gi, '<\\/script');
 }
 
 function isLevelPayload(value) {
@@ -1561,14 +3811,26 @@ async function buildStandaloneGameHtml(payload, options = {}) {
     payload && !loaderMode ? `window.__FLAME3D_EMBEDDED_LEVEL__ = ${safeJsonForInlineScript(payload)};` : '',
     '</script>',
   ].filter(Boolean).join('\n');
+  const runtimeBootStyle = [
+    '<style id="flame3d-runtime-boot">',
+    '#main-menu,#topbar,#sidebar,#sidebar-resizer,#functions-panel,#functions-resizer,#props-panel{display:none!important;}',
+    '#workspace{display:flex!important;}',
+    '</style>',
+  ].join('\n');
+  const runtimeMainScriptTag = [
+    '<script type="module">',
+    safeModuleSourceForInlineScript(mainSource),
+    '</script>',
+  ].join('\n');
 
-  const inlineMain = `<script type="module">\n${mainSource.replace(/<\//g, '<\\/')}\n<\/script>`;
-  const scriptTagRe = /<script\s+type=["']module["']\s+src=["']\.\/main\.js["']\s*><\/script>/i;
+  const scriptTagRe = /<script\s+type=["']module["']\s+src=["']\.\/main\.js(?:\?[^"']*)?["']\s*><\/script>/i;
 
   let html = indexSource.replace(scriptTagRe, '').trim();
   html = html.replace(/<title>[^<]*<\/title>/i, `<title>${loaderMode ? 'Flame3D Game Loader' : 'Flame3D Game'}</title>`);
+  if (!/<\/head>/i.test(html)) throw new Error('Invalid HTML template: missing </head>');
+  html = html.replace(/<\/head>/i, `${runtimeBootStyle}\n</head>`);
   if (!/<\/body>/i.test(html)) throw new Error('Invalid HTML template: missing </body>');
-  html = html.replace(/<\/body>/i, `${runtimeFlagsScript}\n${inlineMain}\n</body>`);
+  html = html.replace(/<\/body>/i, `${runtimeFlagsScript}\n${runtimeMainScriptTag}\n</body>`);
   return html.endsWith('\n') ? html : `${html}\n`;
 }
 
@@ -1636,8 +3898,18 @@ function saveEditorSettings() {
     shadows:    quality.shadows,
     lightDist:  quality.lightDist,
     snapSize:   state.snapSize,
+    placeSides: state.placeSides,
+    place2DDepth: state.place2DDepth,
+    placeOpacity: state.placeOpacity,
+    brushColor: state.brushColor,
+    eraserShape: state.eraserShape,
+    eraserSize: state.eraserSize,
     sidebarWidth: sidebarState.width,
     sidebarCollapsed: sidebarState.collapsed,
+    functionsPanelWidth: functionsPanelState.width,
+    functionsPanelCollapsed: functionsPanelState.collapsed,
+    activeLibraryPane,
+    customBlockSkins: serializeCustomBlockSkins(),
   }));
 }
 
@@ -1662,14 +3934,31 @@ function loadEditorSettings() {
       setSnap(s.snapSize);
       snapSelect.value = String(s.snapSize);
     }
+    if (s.placeSides != null) state.placeSides = clampShapeSides(parseInt(s.placeSides, 10));
+    if (s.place2DDepth != null) state.place2DDepth = clampShapeDepth(parseFloat(s.place2DDepth));
+    if (s.placeOpacity != null) state.placeOpacity = clampMeshOpacity(parseFloat(s.placeOpacity));
+    if (s.brushColor != null) state.brushColor = parseInt(s.brushColor, 10) || state.brushColor;
+    if (s.eraserShape) state.eraserShape = String(s.eraserShape);
+    if (s.eraserSize != null) state.eraserSize = THREE.MathUtils.clamp(parseFloat(s.eraserSize) || 1, 0.1, 12);
     if (s.sidebarWidth != null) sidebarState.width = parseFloat(s.sidebarWidth) || sidebarState.width;
     if (s.sidebarCollapsed != null) sidebarState.collapsed = !!s.sidebarCollapsed;
+    if (s.functionsPanelWidth != null) functionsPanelState.width = parseFloat(s.functionsPanelWidth) || functionsPanelState.width;
+    if (s.functionsPanelCollapsed != null) functionsPanelState.collapsed = !!s.functionsPanelCollapsed;
+    if (s.activeLibraryPane) activeLibraryPane = s.activeLibraryPane === 'audio' ? 'audio' : 'objects';
+    if (s.customBlockSkins && typeof s.customBlockSkins === 'object') {
+      setCustomBlockSkinsMap(s.customBlockSkins);
+    }
   } catch { /* corrupt data: ignore */ }
 }
 
 function clampSidebarWidth(value) {
   const maxWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, window.innerWidth - 220));
   return Math.max(SIDEBAR_MIN_WIDTH, Math.min(maxWidth, parseFloat(value) || sidebarState.width || 200));
+}
+
+function clampFunctionsPanelWidth(value) {
+  const maxWidth = Math.max(FUNCTIONS_PANEL_MIN_WIDTH, Math.min(FUNCTIONS_PANEL_MAX_WIDTH, window.innerWidth - 260));
+  return Math.max(FUNCTIONS_PANEL_MIN_WIDTH, Math.min(maxWidth, parseFloat(value) || functionsPanelState.width || 340));
 }
 
 function applySidebarState(options = {}) {
@@ -1693,6 +3982,27 @@ function applySidebarState(options = {}) {
   if (reflow) onResize();
 }
 
+function applyFunctionsPanelState(options = {}) {
+  const save = options.save !== false;
+  const reflow = options.reflow !== false;
+
+  functionsPanelState.width = clampFunctionsPanelWidth(functionsPanelState.width);
+  document.documentElement.style.setProperty('--fnW', `${functionsPanelState.width}px`);
+  if (workspaceEl) workspaceEl.classList.toggle('functions-collapsed', functionsPanelState.collapsed);
+
+  if (functionsPanelEl) functionsPanelEl.setAttribute('aria-hidden', functionsPanelState.collapsed ? 'true' : 'false');
+  if (functionsToggleBtn) {
+    const collapsed = functionsPanelState.collapsed;
+    functionsToggleBtn.textContent = collapsed ? '❮' : '❯';
+    functionsToggleBtn.title = collapsed ? 'Expand functions panel' : 'Collapse functions panel';
+    functionsToggleBtn.setAttribute('aria-label', functionsToggleBtn.title);
+    functionsToggleBtn.setAttribute('aria-pressed', String(collapsed));
+  }
+
+  if (save) saveEditorSettings();
+  if (reflow) onResize();
+}
+
 function stopSidebarResize() {
   if (!sidebarState.resizing) return;
   sidebarState.resizing = false;
@@ -1700,6 +4010,15 @@ function stopSidebarResize() {
   document.body.style.cursor = '';
   document.body.style.userSelect = '';
   applySidebarState({ save: true, reflow: true });
+}
+
+function stopFunctionsPanelResize() {
+  if (!functionsPanelState.resizing) return;
+  functionsPanelState.resizing = false;
+  if (workspaceEl) workspaceEl.classList.remove('functions-resizing');
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
+  applyFunctionsPanelState({ save: true, reflow: true });
 }
 
 function buildLevelPayload() {
@@ -1724,6 +4043,20 @@ function formatProjectDate(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return 'Unknown date';
   return d.toLocaleString();
+}
+
+function normalizePlayerProfile(profile = {}) {
+  const name = String(profile.name ?? '').trim() || 'Player';
+  const groups = normalizeGroupListValue(profile.groups ?? profile.group ?? 'default');
+  return { name, groups };
+}
+
+function refreshPlayerProfileUI() {
+  if (playerNameInput) playerNameInput.value = playerProfile.name;
+  if (playerGroupsInput) playerGroupsInput.value = playerProfile.groups.join(', ');
+  if (playerGroupsOptionsEl) {
+    playerGroupsOptionsEl.innerHTML = renderDatalistOptions(getKnownGroups(playerProfile.groups));
+  }
 }
 
 function getKnownLabels(extraValues = []) {
@@ -1759,6 +4092,7 @@ function getKnownGroups(extraValues = []) {
   };
 
   addValue('default');
+  for (const group of normalizeGroupListValue(playerProfile.groups)) addValue(group);
   for (const mesh of sceneObjects) {
     for (const group of getMeshGroups(mesh)) addValue(group);
   }
@@ -1787,6 +4121,23 @@ function normalizeGroupListValue(value) {
   return groups;
 }
 
+function parseRawGroupListValue(value) {
+  const source = Array.isArray(value)
+    ? value
+    : String(value ?? '').split(',');
+  const seen = new Set();
+  const groups = [];
+  for (const rawValue of source) {
+    const group = String(rawValue ?? '').trim();
+    if (!group) continue;
+    const key = group.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    groups.push(group);
+  }
+  return groups;
+}
+
 function getMeshGroups(mesh) {
   if (!mesh) return ['default'];
   if (Array.isArray(mesh.userData.groups) && mesh.userData.groups.length) {
@@ -1807,17 +4158,87 @@ function meshHasGroup(mesh, refValue) {
   return getMeshGroups(mesh).some(group => normalizeTouchRef(group) === needle);
 }
 
+function createDefaultControlFunctionGroup(name = 'General') {
+  const trimmed = String(name ?? '').trim() || 'General';
+  const id = `cfg_${_nextControlFunctionGroupId++}`;
+  return { id, name: trimmed, collapsed: false };
+}
+
+function normalizeControlFunctionGroup(group = {}) {
+  const fallback = createDefaultControlFunctionGroup();
+  const rawId = String(group.id ?? '').trim();
+  const id = rawId || fallback.id;
+  const match = id.match(/^cfg_(\d+)$/);
+  if (match) {
+    const n = parseInt(match[1], 10);
+    if (n >= _nextControlFunctionGroupId) _nextControlFunctionGroupId = n + 1;
+  }
+  const name = String(group.name ?? '').trim() || `Group ${id.replace('cfg_', '')}`;
+  return {
+    id,
+    name,
+    collapsed: group.collapsed === true,
+  };
+}
+
+function ensureControlFunctionGroups() {
+  if (!controlFunctionGroups.length) {
+    controlFunctionGroups.push(createDefaultControlFunctionGroup('General'));
+  }
+
+  const normalized = [];
+  const seenIds = new Set();
+  for (const group of controlFunctionGroups) {
+    const next = normalizeControlFunctionGroup(group);
+    if (seenIds.has(next.id)) continue;
+    seenIds.add(next.id);
+    normalized.push(next);
+  }
+
+  controlFunctionGroups.length = 0;
+  controlFunctionGroups.push(...normalized);
+
+  const fallbackGroupId = controlFunctionGroups[0].id;
+  const validGroupIds = new Set(controlFunctionGroups.map(g => g.id));
+  for (const fn of controlFunctions) {
+    if (!validGroupIds.has(fn.groupId)) fn.groupId = fallbackGroupId;
+  }
+}
+
 function createDefaultFunctionAction() {
   return {
     actionType: 'move',
     refType: 'group',
     refValue: '',
+    startOffset: [0, 0, 0],
     offset: [0, 0, 0],
     style: 'glide',
     duration: 1,
     returnOnDeactivate: true,
+    rotateStartOffset: [0, 0, 0],
+    rotateOffset: [0, 0, 0],
+    rotateRepeat: false,
+    rotateRpm: [0, 0, 0],
+    rotateGroupMode: 'separate',
     lightOp: 'toggle',
     lightValue: 3,
+    audioName: '',
+    audioMode: 'global',
+    audioDistance: 22,
+    audioLoop: false,
+    audioUntil: 'deactivate',
+    audioUntilFunction: '',
+    functionControlTarget: '',
+    functionControlCommand: 'stop',
+    playerGroupMode: 'set',
+    playerGroupValue: 'default',
+    setVarName: '',
+    setVarOp: '=',
+    setVarValueType: 'digits',
+    setVarValue: 0,
+    setVarValueVar: '',
+    setBoolName: '',
+    setBoolValue: true,
   };
 }
 
@@ -1831,18 +4252,44 @@ function normalizeFunctionAction(config = {}) {
     actionType: CONTROL_ACTION_TYPES.includes(config.actionType) ? config.actionType : base.actionType,
     refType: config.refType === 'name' ? 'name' : 'group',
     refValue: String(config.refValue ?? '').trim(),
+    startOffset: normalizeVec(config.startOffset ?? base.startOffset),
+    // Keep for backward compatibility, but default to true so start is explicit.
+    useStartOffset: config.useStartOffset !== false,
     offset: normalizeVec(config.offset ?? base.offset),
     style: ['glide', 'strict', 'snap'].includes(config.style) ? config.style : base.style,
     duration: Math.max(0, parseFloat(config.duration) || base.duration),
     returnOnDeactivate: config.returnOnDeactivate !== false,
+    rotateStartOffset: normalizeVec(config.rotateStartOffset ?? config.startRotation ?? base.rotateStartOffset),
+    rotateOffset: normalizeVec(config.rotateOffset ?? config.rotation ?? base.rotateOffset),
+    rotateRepeat: config.rotateRepeat === true,
+    rotateRpm: normalizeVec(config.rotateRpm ?? config.spinRpm ?? base.rotateRpm),
+    rotateGroupMode: config.rotateGroupMode === 'together' || config.groupRotateMode === 'together' ? 'together' : 'separate',
     lightOp: CONTROL_LIGHT_OPS.includes(config.lightOp) ? config.lightOp : base.lightOp,
     lightValue: Number.isFinite(parseFloat(config.lightValue)) ? parseFloat(config.lightValue) : base.lightValue,
+    audioName: String(config.audioName ?? '').trim(),
+    audioMode: AUDIO_PLAY_MODES.includes(config.audioMode) ? config.audioMode : base.audioMode,
+    audioDistance: clampAudioDistance(config.audioDistance),
+    audioLoop: config.audioLoop === true,
+    audioUntil: AUDIO_UNTIL_EVENTS.includes(config.audioUntil) ? config.audioUntil : base.audioUntil,
+    audioUntilFunction: String(config.audioUntilFunction ?? '').trim(),
+    functionControlTarget: String(config.functionControlTarget ?? '').trim(),
+    functionControlCommand: FUNCTION_CONTROL_COMMANDS.includes(config.functionControlCommand) ? config.functionControlCommand : base.functionControlCommand,
+    playerGroupMode: CONTROL_PLAYER_GROUP_MODES.includes(config.playerGroupMode) ? config.playerGroupMode : base.playerGroupMode,
+    playerGroupValue: String(config.playerGroupValue ?? '').trim() || base.playerGroupValue,
+    setVarName: String(config.setVarName ?? '').trim(),
+    setVarOp: ['=', '+', '-', '*', '/'].includes(config.setVarOp) ? config.setVarOp : '=',
+    setVarValueType: config.setVarValueType === 'var' ? 'var' : 'digits',
+    setVarValue: Number.isFinite(parseFloat(config.setVarValue)) ? parseFloat(config.setVarValue) : 0,
+    setVarValueVar: String(config.setVarValueVar ?? '').trim(),
+    setBoolName: String(config.setBoolName ?? '').trim(),
+    setBoolValue: config.setBoolValue === 'toggle' ? 'toggle' : !!config.setBoolValue,
   };
 }
 
-function createDefaultControlFunction() {
+function createDefaultControlFunction(groupId = '') {
   return {
     name: '',
+    groupId: String(groupId ?? '').trim(),
     actions: [createDefaultFunctionAction()],
   };
 }
@@ -1851,6 +4298,7 @@ function normalizeControlFunction(fn = {}) {
   const actions = Array.isArray(fn.actions) ? fn.actions.map(normalizeFunctionAction) : [];
   return {
     name: String(fn.name ?? '').trim(),
+    groupId: String(fn.groupId ?? '').trim(),
     actions: actions.length ? actions : [createDefaultFunctionAction()],
   };
 }
@@ -1876,11 +4324,23 @@ function normalizeCondition(cond = {}) {
     posAxis: CONDITION_POS_AXES.includes(cond.posAxis) ? cond.posAxis : 'y',
     posOp: CONDITION_OPS.includes(cond.posOp) ? cond.posOp : '>',
     posValue: Number.isFinite(parseFloat(cond.posValue)) ? parseFloat(cond.posValue) : 0,
+    posValueType: cond.posValueType === 'var' ? 'var' : 'digits',
+    posValueVar: String(cond.posValueVar ?? '').trim(),
     distTarget: String(cond.distTarget ?? '').trim(),
     distOp: CONDITION_OPS.includes(cond.distOp) ? cond.distOp : '<',
     distValue: Math.max(0, Number.isFinite(parseFloat(cond.distValue)) ? parseFloat(cond.distValue) : 5),
+    distValueType: cond.distValueType === 'var' ? 'var' : 'digits',
+    distValueVar: String(cond.distValueVar ?? '').trim(),
     timerSeconds: Math.max(0, Number.isFinite(parseFloat(cond.timerSeconds)) ? parseFloat(cond.timerSeconds) : 1),
+    timerType: cond.timerType === 'var' ? 'var' : 'digits',
+    timerVar: String(cond.timerVar ?? '').trim(),
     keyCode: String(cond.keyCode ?? 'Space').trim(),
+    varCmpName: String(cond.varCmpName ?? '').trim(),
+    varCmpOp: CONDITION_OPS.includes(cond.varCmpOp) ? cond.varCmpOp : '=',
+    varCmpValue: Number.isFinite(parseFloat(cond.varCmpValue)) ? parseFloat(cond.varCmpValue) : 0,
+    varCmpValueType: cond.varCmpValueType === 'var' ? 'var' : 'digits',
+    varCmpValueVar: String(cond.varCmpValueVar ?? '').trim(),
+    boolName: String(cond.boolName ?? '').trim(),
     negate: !!cond.negate,
   };
 }
@@ -2313,7 +4773,6 @@ function showRuntimePauseMenu() {
           <label style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 10px"><span style="font-size:11px;color:var(--muted)">Light Distance</span><input id="rp-quality-light" type="number" min="10" max="200" step="5" style="width:90px;font-size:11px;padding:3px 5px"/></label>
           <label style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 10px"><span style="font-size:11px;color:var(--muted)">Day Cycle</span><input id="rp-day-cycle" type="checkbox"/></label>
           <label style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 10px"><span style="font-size:11px;color:var(--muted)">Day Duration (s)</span><input id="rp-day-duration" type="number" min="1" max="3600" step="1" style="width:90px;font-size:11px;padding:3px 5px"/></label>
-          <label style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 10px"><span style="font-size:11px;color:var(--muted)">Dev View</span><input id="rp-dev-view" type="checkbox"/></label>
           <label style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 10px"><span style="font-size:11px;color:var(--muted)">Auto Performance</span><input id="rp-auto-perf" type="checkbox"/></label>
           <label style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:9px 10px"><span style="font-size:11px;color:var(--muted)">Auto Visual</span><input id="rp-auto-visual" type="checkbox"/></label>
         </div>
@@ -2355,7 +4814,6 @@ function showRuntimePauseMenu() {
     updateSunSky();
     syncRuntimeSettingsPanel();
   });
-  overlay.querySelector('#rp-dev-view')?.addEventListener('change', e => setPlaytestDevView(!!e.target.checked));
   overlay.querySelector('#rp-auto-perf')?.addEventListener('change', e => setRuntimeAutoPerformance(!!e.target.checked));
   overlay.querySelector('#rp-auto-visual')?.addEventListener('change', e => setRuntimeAutoVisual(!!e.target.checked));
 
@@ -2369,7 +4827,6 @@ function syncRuntimeSettingsPanel() {
     const lightInput = runtimeSettingsPanelEl.querySelector('#rt-quality-light');
     const cycleInput = runtimeSettingsPanelEl.querySelector('#rt-day-cycle');
     const dayDurInput = runtimeSettingsPanelEl.querySelector('#rt-day-duration');
-    const devViewInput = runtimeSettingsPanelEl.querySelector('#rt-dev-view');
     const autoPerfInput = runtimeSettingsPanelEl.querySelector('#rt-auto-perf');
     const autoVisualInput = runtimeSettingsPanelEl.querySelector('#rt-auto-visual');
 
@@ -2378,7 +4835,6 @@ function syncRuntimeSettingsPanel() {
     if (lightInput) lightInput.value = quality.lightDist;
     if (cycleInput && sunDayCycleEnabledInput) cycleInput.checked = !!sunDayCycleEnabledInput.checked;
     if (dayDurInput && sunDayDurationInput) dayDurInput.value = clampSunDayDuration(parseFloat(sunDayDurationInput.value));
-    if (devViewInput) devViewInput.checked = !!fpsDevView;
     if (autoPerfInput) autoPerfInput.checked = !!runtimeOptimizer.autoPerformance;
     if (autoVisualInput) autoVisualInput.checked = !!runtimeOptimizer.autoVisual;
   }
@@ -2389,7 +4845,6 @@ function syncRuntimeSettingsPanel() {
     const lightInput = runtimePauseOverlayEl.querySelector('#rp-quality-light');
     const cycleInput = runtimePauseOverlayEl.querySelector('#rp-day-cycle');
     const dayDurInput = runtimePauseOverlayEl.querySelector('#rp-day-duration');
-    const devViewInput = runtimePauseOverlayEl.querySelector('#rp-dev-view');
     const autoPerfInput = runtimePauseOverlayEl.querySelector('#rp-auto-perf');
     const autoVisualInput = runtimePauseOverlayEl.querySelector('#rp-auto-visual');
 
@@ -2398,7 +4853,6 @@ function syncRuntimeSettingsPanel() {
     if (lightInput) lightInput.value = quality.lightDist;
     if (cycleInput && sunDayCycleEnabledInput) cycleInput.checked = !!sunDayCycleEnabledInput.checked;
     if (dayDurInput && sunDayDurationInput) dayDurInput.value = clampSunDayDuration(parseFloat(sunDayDurationInput.value));
-    if (devViewInput) devViewInput.checked = !!fpsDevView;
     if (autoPerfInput) autoPerfInput.checked = !!runtimeOptimizer.autoPerformance;
     if (autoVisualInput) autoVisualInput.checked = !!runtimeOptimizer.autoVisual;
   }
@@ -2454,7 +4908,6 @@ function ensureRuntimeHud() {
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px"><span style="font-size:10px;color:var(--muted)">Light Dist</span><input id="rt-quality-light" type="number" min="10" max="200" step="5" style="width:84px;font-size:11px;padding:2px 4px"/></div>
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px"><span style="font-size:10px;color:var(--muted)">Day Cycle</span><input id="rt-day-cycle" type="checkbox"/></div>
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px"><span style="font-size:10px;color:var(--muted)">Day (s)</span><input id="rt-day-duration" type="number" min="1" max="3600" step="1" style="width:84px;font-size:11px;padding:2px 4px"/></div>
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px"><span style="font-size:10px;color:var(--muted)">Dev View</span><input id="rt-dev-view" type="checkbox"/></div>
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px"><span style="font-size:10px;color:var(--muted)">Auto Perf</span><input id="rt-auto-perf" type="checkbox"/></div>
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px"><span style="font-size:10px;color:var(--muted)">Auto Visual</span><input id="rt-auto-visual" type="checkbox"/></div>
     <div style="display:flex;gap:6px"><button id="rt-open-pause" style="flex:1;font-size:10px;padding:3px 6px">Pause Menu</button><button id="rt-close" style="flex:1;font-size:10px;padding:3px 6px">Close</button></div>
@@ -2481,10 +4934,6 @@ function ensureRuntimeHud() {
     if (sunDayDurationInput) sunDayDurationInput.value = String(val);
     e.target.value = val;
     updateSunSky();
-    syncRuntimeSettingsPanel();
-  });
-  panel.querySelector('#rt-dev-view')?.addEventListener('change', e => {
-    setPlaytestDevView(!!e.target.checked);
     syncRuntimeSettingsPanel();
   });
   panel.querySelector('#rt-auto-perf')?.addEventListener('change', e => {
@@ -2529,6 +4978,8 @@ function applyRuntimeChrome() {
   }
   if (sidebarEl) sidebarEl.style.display = 'none';
   if (sidebarResizerEl) sidebarResizerEl.style.display = 'none';
+  if (functionsResizerEl) functionsResizerEl.style.display = 'none';
+  if (functionsPanelEl) functionsPanelEl.style.display = 'none';
   if (workspaceEl) workspaceEl.classList.remove('studio-hidden');
   hideProps();
   ensureRuntimeHud();
@@ -2696,6 +5147,7 @@ function startRuntimeGame(payload = null, options = {}) {
 }
 
 function showMainMenu() {
+  closeTransientMenus();
   if (runtimeMode) {
     applyRuntimeChrome();
     showStudio();
@@ -2709,12 +5161,15 @@ function showMainMenu() {
 }
 
 function showStudio() {
+  closeTransientMenus();
   if (mainMenuEl) mainMenuEl.classList.add('hidden');
   if (topbarEl) {
     topbarEl.classList.remove('studio-hidden');
     if (!runtimeMode) topbarEl.style.display = '';
   }
   if (workspaceEl) workspaceEl.classList.remove('studio-hidden');
+  if (functionsPanelEl) functionsPanelEl.style.display = runtimeMode ? 'none' : '';
+  if (functionsResizerEl) functionsResizerEl.style.display = runtimeMode ? 'none' : '';
   if (runtimeMode) applyRuntimeChrome();
   onResize();
   refreshStatus();
@@ -2820,16 +5275,24 @@ const fpsKeys   = new Set();
 const fpsPos    = new THREE.Vector3();
 const savedTargetColors = new Map();
 const fpsRay    = new THREE.Raycaster();
-const playerBox = new THREE.Box3();
 const _spawnAABB = new THREE.Box3();
+const _checkpointAABB = new THREE.Box3();
 const _playtestBasePositions = new Map();
+const _playtestBaseRotations = new Map();
 const _playtestPrevPositions = new Map();
+const _playtestPrevRotations = new Map();
 const _playtestPrevAABBs = new Map();
 const _triggerMoveStates = new Map();
+const _triggerRotateStates = new Map();
 const _triggerMoveTemp = new THREE.Vector3();
+const _triggerRotateEuler = new THREE.Euler(0, 0, 0, 'XYZ');
+const _triggerRotateQuat = new THREE.Quaternion();
+const _triggerAnimPivot = new THREE.Vector3();
+const _triggerAnimOffset = new THREE.Vector3();
 
 // ─── Editor simulation (preview without playtest) ────────────────────────────
 const _simBasePositions = new Map(); // mesh -> original Vector3
+const _simBaseRotations = new Map(); // mesh -> original Quaternion
 const _simLightStates = new Map();   // mesh -> { had, intensity, distance }
 let _simActive = false;
 
@@ -2839,6 +5302,180 @@ function ensureSimBasePositions(meshes) {
       _simBasePositions.set(mesh, mesh.position.clone());
     }
   }
+}
+
+function ensureSimBaseRotations(meshes) {
+  for (const mesh of meshes) {
+    if (!_simBaseRotations.has(mesh)) {
+      _simBaseRotations.set(mesh, mesh.quaternion.clone());
+    }
+  }
+}
+
+function getActionAnimationProgress(st, nowSeconds) {
+  const rawT = st.duration <= 0 ? 1 : THREE.MathUtils.clamp((nowSeconds - st.startedAt) / st.duration, 0, 1);
+  let easedT = rawT;
+  if (st.style === 'glide') easedT = rawT * rawT * (3 - 2 * rawT);
+  else if (st.style === 'snap') easedT = rawT >= 1 ? 1 : 0;
+  return { rawT, easedT };
+}
+
+function applyRotateVectorToQuaternion(rotVecDegrees, outQuat) {
+  _triggerRotateEuler.set(
+    rotVecDegrees.x * Math.PI / 180,
+    rotVecDegrees.y * Math.PI / 180,
+    rotVecDegrees.z * Math.PI / 180,
+    'XYZ'
+  );
+  outQuat.setFromEuler(_triggerRotateEuler);
+  return outQuat;
+}
+
+function updateMoveStateProgress(stateMap, nowSeconds, offsetsByMesh, options = {}) {
+  let anyFunctionJustCompleted = false;
+  const keyFilter = typeof options.keyFilter === 'function' ? options.keyFilter : null;
+
+  for (const [key, st] of [...stateMap]) {
+    if (keyFilter && !keyFilter(key, st)) continue;
+    const paused = isFunctionPaused(st.functionName);
+
+    if (paused) {
+      if (!Number.isFinite(st.pausedAt)) st.pausedAt = nowSeconds;
+      for (const mesh of st.targets) {
+        if (!offsetsByMesh.has(mesh)) offsetsByMesh.set(mesh, new THREE.Vector3());
+        offsetsByMesh.get(mesh).add(st.currentOffset);
+      }
+      continue;
+    }
+
+    if (Number.isFinite(st.pausedAt)) {
+      st.startedAt += Math.max(0, nowSeconds - st.pausedAt);
+      st.pausedAt = null;
+    }
+
+    const { rawT, easedT } = getActionAnimationProgress(st, nowSeconds);
+
+    st.currentOffset.copy(st.fromOffset).lerp(st.toOffset, easedT);
+
+    for (const mesh of st.targets) {
+      if (!offsetsByMesh.has(mesh)) offsetsByMesh.set(mesh, new THREE.Vector3());
+      offsetsByMesh.get(mesh).add(st.currentOffset);
+    }
+
+    if (rawT >= 1 && st.toOffset.lengthSq() === 0) {
+      stateMap.delete(key);
+    }
+
+    if (rawT >= 1 && st.functionName && !st.functionMarked) {
+      markControlFunctionMet(st.functionName, st.callerUuid ? sceneObjects.find(m => m.uuid === st.callerUuid) ?? null : null);
+      st.functionMarked = true;
+      anyFunctionJustCompleted = true;
+    }
+  }
+
+  return anyFunctionJustCompleted;
+}
+
+function applyAnimatedTransforms(basePositions, baseRotations, moveStateMap, rotateStateMap, nowSeconds, options = {}) {
+  const offsetsByMesh = new Map();
+  let anyFunctionJustCompleted = updateMoveStateProgress(moveStateMap, nowSeconds, offsetsByMesh, options);
+  const keyFilter = typeof options.keyFilter === 'function' ? options.keyFilter : null;
+
+  for (const [mesh, basePos] of basePositions) {
+    const offset = offsetsByMesh.get(mesh);
+    if (offset) _triggerMoveTemp.copy(basePos).add(offset);
+    else _triggerMoveTemp.copy(basePos);
+    mesh.position.copy(_triggerMoveTemp);
+
+    const baseQuat = baseRotations.get(mesh);
+    if (baseQuat) mesh.quaternion.copy(baseQuat);
+  }
+
+  for (const [key, st] of [...rotateStateMap]) {
+    if (keyFilter && !keyFilter(key, st)) continue;
+    const paused = isFunctionPaused(st.functionName);
+
+    if (paused) {
+      if (!Number.isFinite(st.pausedAt)) st.pausedAt = nowSeconds;
+      applyRotateVectorToQuaternion(st.currentRotation, _triggerRotateQuat);
+      const rotateTogetherPaused = st.groupMode === 'together' && st.targets.length > 1;
+      if (rotateTogetherPaused) {
+        _triggerAnimPivot.set(0, 0, 0);
+        let targetCount = 0;
+        for (const mesh of st.targets) {
+          if (!basePositions.has(mesh)) continue;
+          _triggerAnimPivot.add(mesh.position);
+          targetCount++;
+        }
+        if (targetCount > 0) _triggerAnimPivot.multiplyScalar(1 / targetCount);
+        for (const mesh of st.targets) {
+          if (!basePositions.has(mesh)) continue;
+          _triggerAnimOffset.copy(mesh.position).sub(_triggerAnimPivot).applyQuaternion(_triggerRotateQuat);
+          mesh.position.copy(_triggerAnimPivot).add(_triggerAnimOffset);
+          mesh.quaternion.premultiply(_triggerRotateQuat);
+        }
+      } else {
+        for (const mesh of st.targets) {
+          if (!basePositions.has(mesh)) continue;
+          mesh.quaternion.multiply(_triggerRotateQuat);
+        }
+      }
+      continue;
+    }
+
+    if (Number.isFinite(st.pausedAt)) {
+      st.startedAt += Math.max(0, nowSeconds - st.pausedAt);
+      st.pausedAt = null;
+    }
+
+    const { rawT, easedT } = getActionAnimationProgress(st, nowSeconds);
+    st.currentRotation.copy(st.fromRotation).lerp(st.toRotation, easedT);
+
+    if (st.repeat) {
+      const elapsed = Math.max(0, nowSeconds - st.startedAt);
+      st.currentRotation.x += st.rpm.x * 6 * elapsed;
+      st.currentRotation.y += st.rpm.y * 6 * elapsed;
+      st.currentRotation.z += st.rpm.z * 6 * elapsed;
+    }
+
+    applyRotateVectorToQuaternion(st.currentRotation, _triggerRotateQuat);
+    const rotateTogether = st.groupMode === 'together' && st.targets.length > 1;
+
+    if (rotateTogether) {
+      _triggerAnimPivot.set(0, 0, 0);
+      let targetCount = 0;
+      for (const mesh of st.targets) {
+        if (!basePositions.has(mesh)) continue;
+        _triggerAnimPivot.add(mesh.position);
+        targetCount++;
+      }
+      if (targetCount > 0) _triggerAnimPivot.multiplyScalar(1 / targetCount);
+
+      for (const mesh of st.targets) {
+        if (!basePositions.has(mesh)) continue;
+        _triggerAnimOffset.copy(mesh.position).sub(_triggerAnimPivot).applyQuaternion(_triggerRotateQuat);
+        mesh.position.copy(_triggerAnimPivot).add(_triggerAnimOffset);
+        mesh.quaternion.premultiply(_triggerRotateQuat);
+      }
+    } else {
+      for (const mesh of st.targets) {
+        if (!basePositions.has(mesh)) continue;
+        mesh.quaternion.multiply(_triggerRotateQuat);
+      }
+    }
+
+    if (rawT >= 1 && !st.repeat && st.toRotation.lengthSq() === 0) {
+      rotateStateMap.delete(key);
+    }
+
+    if (rawT >= 1 && st.functionName && !st.functionMarked) {
+      markControlFunctionMet(st.functionName, st.callerUuid ? sceneObjects.find(m => m.uuid === st.callerUuid) ?? null : null);
+      st.functionMarked = true;
+      anyFunctionJustCompleted = true;
+    }
+  }
+
+  return anyFunctionJustCompleted;
 }
 
 function ensureSimLightState(mesh) {
@@ -2865,8 +5502,8 @@ function simulateFunction(fnIdx) {
     if (action.actionType === 'move') {
       ensureSimBasePositions(targets);
       const stateKey = `sim:${fn.name}:${i}`;
-      const prev = _triggerMoveStates.get(stateKey);
-      const fromOffset = prev ? prev.currentOffset.clone() : new THREE.Vector3();
+      clearConflictingMoveStates(stateKey, targets, { includeSim: true });
+      const fromOffset = new THREE.Vector3(action.startOffset[0], action.startOffset[1], action.startOffset[2]);
       _triggerMoveStates.set(stateKey, {
         callerUuid: null,
         targets,
@@ -2879,11 +5516,33 @@ function simulateFunction(fnIdx) {
         functionName: fn.name,
         functionMarked: false,
       });
+    } else if (action.actionType === 'rotate') {
+      ensureSimBasePositions(targets);
+      ensureSimBaseRotations(targets);
+      const stateKey = `sim:${fn.name}:${i}`;
+      clearConflictingMoveStates(stateKey, targets, { includeSim: true, stateMap: _triggerRotateStates });
+      _triggerRotateStates.set(stateKey, {
+        callerUuid: null,
+        targets,
+        fromRotation: new THREE.Vector3(action.rotateStartOffset[0], action.rotateStartOffset[1], action.rotateStartOffset[2]),
+        toRotation: new THREE.Vector3(action.rotateOffset[0], action.rotateOffset[1], action.rotateOffset[2]),
+        currentRotation: new THREE.Vector3(action.rotateStartOffset[0], action.rotateStartOffset[1], action.rotateStartOffset[2]),
+        rpm: new THREE.Vector3(action.rotateRpm[0], action.rotateRpm[1], action.rotateRpm[2]),
+        repeat: action.rotateRepeat,
+        groupMode: action.rotateGroupMode,
+        startedAt: nowSeconds,
+        duration: action.duration,
+        style: action.style,
+        functionName: fn.name,
+        functionMarked: false,
+      });
     } else if (action.actionType === 'light') {
       for (const target of targets) {
         ensureSimLightState(target);
         applyLightActionToMesh(target, action.lightOp, action.lightValue);
       }
+    } else if (action.actionType === 'playerGroup') {
+      applyPlayerGroupAction(action);
     }
   }
   refreshControlFunctionsUI();
@@ -2895,6 +5554,12 @@ function resetSimulation() {
     mesh.position.copy(basePos);
   }
   _simBasePositions.clear();
+
+  // Restore rotations
+  for (const [mesh, baseQuat] of _simBaseRotations) {
+    mesh.quaternion.copy(baseQuat);
+  }
+  _simBaseRotations.clear();
 
   // Restore light states
   for (const [mesh, saved] of _simLightStates) {
@@ -2914,38 +5579,22 @@ function resetSimulation() {
   for (const [key] of [..._triggerMoveStates]) {
     if (key.startsWith('sim:')) _triggerMoveStates.delete(key);
   }
+  for (const [key] of [..._triggerRotateStates]) {
+    if (key.startsWith('sim:')) _triggerRotateStates.delete(key);
+  }
   _simActive = false;
   refreshControlFunctionsUI();
 }
 
 function updateSimAnimations(nowSeconds) {
-  const offsetsByMesh = new Map();
-
-  for (const [key, st] of _triggerMoveStates) {
-    if (!key.startsWith('sim:')) continue;
-    const rawT = st.duration <= 0 ? 1 : THREE.MathUtils.clamp((nowSeconds - st.startedAt) / st.duration, 0, 1);
-    let easedT = rawT;
-    if (st.style === 'glide') easedT = rawT * rawT * (3 - 2 * rawT);
-    else if (st.style === 'snap') easedT = rawT >= 1 ? 1 : 0;
-
-    st.currentOffset.copy(st.fromOffset).lerp(st.toOffset, easedT);
-
-    for (const mesh of st.targets) {
-      if (!offsetsByMesh.has(mesh)) offsetsByMesh.set(mesh, new THREE.Vector3());
-      offsetsByMesh.get(mesh).add(st.currentOffset);
-    }
-
-    if (rawT >= 1 && st.toOffset.lengthSq() === 0) {
-      _triggerMoveStates.delete(key);
-    }
-  }
-
-  for (const [mesh, basePos] of _simBasePositions) {
-    const offset = offsetsByMesh.get(mesh);
-    if (offset) _triggerMoveTemp.copy(basePos).add(offset);
-    else _triggerMoveTemp.copy(basePos);
-    mesh.position.copy(_triggerMoveTemp);
-  }
+  applyAnimatedTransforms(
+    _simBasePositions,
+    _simBaseRotations,
+    _triggerMoveStates,
+    _triggerRotateStates,
+    nowSeconds,
+    { keyFilter: key => key.startsWith('sim:') }
+  );
 
   // Update position readouts in UI
   if (controlFunctionsListEl) {
@@ -2968,8 +5617,11 @@ function updateSimAnimations(nowSeconds) {
 
   // Auto-stop when all sim animations are done
   let anySimRunning = false;
-  for (const [key] of _triggerMoveStates) {
-    if (key.startsWith('sim:')) { anySimRunning = true; break; }
+  for (const stateMap of [_triggerMoveStates, _triggerRotateStates]) {
+    for (const [key] of stateMap) {
+      if (key.startsWith('sim:')) { anySimRunning = true; break; }
+    }
+    if (anySimRunning) break;
   }
   if (!anySimRunning && _simLightStates.size === 0) {
     // Keep positions as-is (final state) but mark inactive
@@ -2977,7 +5629,22 @@ function updateSimAnimations(nowSeconds) {
   }
 }
 const _tractionCarry = new THREE.Vector3();
+const _tractionLocalPoint = new THREE.Vector3();
+const _tractionWorldPoint = new THREE.Vector3();
+const _tractionPrevQuat = new THREE.Quaternion();
 let fpsDevView = false;
+let activeCheckpointMeshUuid = null;
+const _activeTouchCheckpoints = new Set();
+const _movementPathStates = new Map();
+let _pendingPathCheckpointPick = null;
+let _selectedPathPreviewLine = null;
+const _selectedPathPreviewMarkers = [];
+const _activeAudioInstances = new Map();
+const _audioHandlesByAction = new Map();
+const _pausedFunctionKeys = new Set();
+let _nextAudioInstanceId = 1;
+const _pathPreviewTarget = new THREE.Vector3();
+const _pathPreviewDelta = new THREE.Vector3();
 
 function getPlayHintBaseHtml() {
   if (runtimeMode) {
@@ -2988,6 +5655,10 @@ function getPlayHintBaseHtml() {
 
 function updatePlayHint() {
   if (!playHint) return;
+  if (runtimeMode) {
+    playHint.innerHTML = getPlayHintBaseHtml();
+    return;
+  }
   playHint.innerHTML = `${getPlayHintBaseHtml()} &nbsp;│&nbsp; V · Dev View (${fpsDevView ? 'ON' : 'OFF'})`;
 }
 
@@ -2995,7 +5666,12 @@ function setPlaytestDevView(enabled) {
   fpsDevView = !!enabled;
   for (const m of sceneObjects) {
     if (!m.userData._playtestHidden) continue;
-    if (m.material) m.material.visible = fpsDevView;
+    if (m.userData._customSkinActive) {
+      if (m.material) m.material.visible = false;
+      if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = fpsDevView;
+    } else if (m.material) {
+      m.material.visible = fpsDevView;
+    }
   }
   updatePlayHint();
   refreshStatus();
@@ -3011,6 +5687,9 @@ const _upDir        = new THREE.Vector3(0, 1, 0);
 const _physOrigin   = new THREE.Vector3();
 const _solidAABB    = new THREE.Box3();
 const _tmpAABB      = new THREE.Box3();
+const _playerAABB   = new THREE.Box3();
+const _stepMove     = new THREE.Vector3();
+const _stepDelta    = new THREE.Vector3();
 const _bodyDirs      = [
   new THREE.Vector3(1, 0, 0),
   new THREE.Vector3(-1, 0, 0),
@@ -3023,40 +5702,47 @@ const _bodyDirs      = [
 ];
 const _bodyRayDir = new THREE.Vector3();
 
+function setPlayerAABB(out, pos, playerHeight = gameRules.height) {
+  out.min.set(pos.x - PLAYER_RADIUS, pos.y, pos.z - PLAYER_RADIUS);
+  out.max.set(pos.x + PLAYER_RADIUS, pos.y + playerHeight, pos.z + PLAYER_RADIUS);
+  return out;
+}
+
+function colliderIgnored(collider, ignoreMeshes = null) {
+  if (!ignoreMeshes?.size) return false;
+  return collider.members.every(mesh => ignoreMeshes.has(mesh));
+}
+
+function buildCollisionIgnoreSet(mesh) {
+  const ignore = new Set();
+  if (!mesh) return ignore;
+  const gid = mesh.userData.editorGroupId;
+  if (gid) {
+    for (const member of sceneObjects) {
+      if (member.userData.editorGroupId === gid) ignore.add(member);
+    }
+    return ignore;
+  }
+  ignore.add(mesh);
+  return ignore;
+}
+
 function isSolidMesh(mesh) {
-  return Boolean(mesh.userData.solid);
+  return Boolean(mesh.userData.solid) &&
+    clampMeshSolidness(mesh.userData.solidness ?? 1) > 0.01 &&
+    clampMeshOpacity(mesh.userData.opacity ?? 1) > 0.03;
+}
+
+function getMeshCollisionMode(mesh) {
+  return mesh?.userData?.collisionMode === 'geometry' ? 'geometry' : 'aabb';
 }
 
 function refreshSolids() {
   _solidColliders.length = 0;
-
-  // Build one collider per editor group, plus one per ungrouped solid.
-  const grouped = new Map();
   for (const m of sceneObjects) {
     if (!isSolidMesh(m)) continue;
-    const gid = m.userData.editorGroupId;
-    if (gid) {
-      if (!grouped.has(gid)) grouped.set(gid, []);
-      grouped.get(gid).push(m);
-      continue;
-    }
-    _solidAABB.setFromObject(m);
+    computeMeshCollisionAABB(m, _solidAABB);
     _solidColliders.push({ members: [m], aabb: _solidAABB.clone() });
-  }
-
-  for (const members of grouped.values()) {
-    let seeded = false;
-    const aabb = new THREE.Box3();
-    for (const m of members) {
-      _tmpAABB.setFromObject(m);
-      if (!seeded) {
-        aabb.copy(_tmpAABB);
-        seeded = true;
-      } else {
-        aabb.union(_tmpAABB);
-      }
-    }
-    if (seeded) _solidColliders.push({ members, aabb });
   }
 }
 
@@ -3087,13 +5773,9 @@ function colliderIntersectsBody(collider, pos, bodyBottom, bodyTop) {
   return false;
 }
 
-/**
- * Simple full-body AABB collision.
- * Player box: feet at pos.y, head at pos.y + playerHeight.
- * Returns true if player box overlaps any solid mesh's world AABB.
- */
-function collidesAt(pos, playerHeight) {
-  const pH = playerHeight ?? gameRules.height;
+function colliderIntersectsPlayerGeometry(collider, pos, bodyBottom, bodyTop) {
+  if (colliderIntersectsBody(collider, pos, bodyBottom, bodyTop)) return true;
+
   const sampleXZ = [
     [0, 0],
     [ PLAYER_RADIUS * 0.7, 0],
@@ -3101,7 +5783,34 @@ function collidesAt(pos, playerHeight) {
     [0,  PLAYER_RADIUS * 0.7],
     [0, -PLAYER_RADIUS * 0.7],
   ];
+  const rayHeight = Math.max(0.05, bodyTop - bodyBottom + 0.04);
+
+  for (const [ox, oz] of sampleXZ) {
+    _physOrigin.set(pos.x + ox, bodyBottom + 0.02, pos.z + oz);
+    _physRay.set(_physOrigin, _upDir);
+    _physRay.near = 0;
+    _physRay.far = rayHeight;
+    if (_physRay.intersectObjects(collider.members, false).length > 0) return true;
+
+    _physOrigin.set(pos.x + ox, bodyTop - 0.02, pos.z + oz);
+    _physRay.set(_physOrigin, _downDir);
+    _physRay.near = 0;
+    _physRay.far = rayHeight;
+    if (_physRay.intersectObjects(collider.members, false).length > 0) return true;
+  }
+
+  return false;
+}
+
+/**
+ * Simple full-body AABB collision.
+ * Player box: feet at pos.y, head at pos.y + playerHeight.
+ * Returns true if player box overlaps any solid mesh's world AABB.
+ */
+function collidesAt(pos, playerHeight, ignoreMeshes = null) {
+  const pH = playerHeight ?? gameRules.height;
   for (const c of _solidColliders) {
+    if (colliderIgnored(c, ignoreMeshes)) continue;
     const aabb = c.aabb;
     // Check all 3 axes overlap
     if (pos.x + PLAYER_RADIUS <= aabb.min.x) continue;
@@ -3111,21 +5820,8 @@ function collidesAt(pos, playerHeight) {
     if (pos.y + pH <= aabb.min.y) continue;  // player entirely below block
     if (pos.y >= aabb.max.y) continue;       // player entirely above block
 
-    // AABB overlap is only broad-phase. Confirm with actual rendered geometry
-    // so grouped colliders don't block empty space inside the group bounds.
-    let hitGeometry = false;
-    for (const [ox, oz] of sampleXZ) {
-      _physOrigin.set(pos.x + ox, pos.y + 0.01, pos.z + oz);
-      _physRay.set(_physOrigin, _upDir);
-      _physRay.near = 0;
-      _physRay.far  = pH + 0.05;
-      const hits = _physRay.intersectObjects(c.members, false);
-      if (hits.length > 0) {
-        hitGeometry = true;
-        break;
-      }
-    }
-    if (hitGeometry) return true;
+    if (getMeshCollisionMode(c.members[0]) !== 'geometry') return true;
+    if (colliderIntersectsPlayerGeometry(c, pos, pos.y, pos.y + pH)) return true;
   }
   return false;
 }
@@ -3134,10 +5830,11 @@ function collidesAt(pos, playerHeight) {
  * Check only horizontal + body-above-step collision (for walk movement).
  * Ignores the bottom STEP_HEIGHT of the player so small ledges don't block.
  */
-function collidesWalk(pos) {
-  const bodyBot = pos.y + STEP_HEIGHT;
+function collidesWalk(pos, ignoreMeshes = null) {
+  const bodyBot = pos.y + (fpsGrounded ? STEP_HEIGHT : 0.02);
   const bodyTop = pos.y + gameRules.height;
   for (const c of _solidColliders) {
+    if (colliderIgnored(c, ignoreMeshes)) continue;
     const aabb = c.aabb;
     if (pos.x + PLAYER_RADIUS <= aabb.min.x) continue;
     if (pos.x - PLAYER_RADIUS >= aabb.max.x) continue;
@@ -3146,27 +5843,8 @@ function collidesWalk(pos) {
     if (bodyTop <= aabb.min.y) continue;
     if (bodyBot >= aabb.max.y) continue;
 
-    // AABB says overlap. Confirm against rendered triangles for this collider
-    // so grouped ramps/walls share one collider but still use true geometry.
-    _physOrigin.set(pos.x, pos.y + gameRules.height + 0.1, pos.z);
-    _physRay.set(_physOrigin, _downDir);
-    _physRay.near = 0;
-    _physRay.far  = gameRules.height + STEP_HEIGHT + 0.2;
-    const hits = _physRay.intersectObjects(c.members, false);
-    let hasSupport = false;
-    for (const h of hits) {
-      if (h.point.y <= pos.y + STEP_HEIGHT + 0.01) {
-        hasSupport = true;
-        break;
-      }
-    }
-    if (hasSupport) continue;
-
-    // If the player's body does not actually intersect any rendered triangles,
-    // this is just empty space inside the collider bounds and should stay walkable.
-    if (!colliderIntersectsBody(c, pos, bodyBot, bodyTop)) continue;
-
-    return true;
+    if (getMeshCollisionMode(c.members[0]) !== 'geometry') return true;
+    if (colliderIntersectsPlayerGeometry(c, pos, bodyBot, bodyTop)) return true;
   }
   return false;
 }
@@ -3188,6 +5866,15 @@ function findGroundHeight(pos) {
       if (_physOrigin.z < aabb.min.z - PLAYER_RADIUS || _physOrigin.z > aabb.max.z + PLAYER_RADIUS) continue;
       if (_physOrigin.y < aabb.min.y) continue;
 
+      if (getMeshCollisionMode(c.members[0]) !== 'geometry') {
+        if (_physOrigin.x >= aabb.min.x && _physOrigin.x <= aabb.max.x &&
+            _physOrigin.z >= aabb.min.z && _physOrigin.z <= aabb.max.z &&
+            aabb.max.y <= pos.y + STEP_HEIGHT + 0.01) {
+          ground = Math.max(ground, aabb.max.y);
+        }
+        continue;
+      }
+
       const hits = _physRay.intersectObjects(c.members, false);
       for (const h of hits) {
         if (h.point.y <= pos.y + STEP_HEIGHT + 0.01) {
@@ -3198,6 +5885,124 @@ function findGroundHeight(pos) {
     }
   }
   return ground;
+}
+
+function movePlayerHorizontal(delta, ignoreMeshes = null) {
+  if (delta.lengthSq() <= 1e-10) return;
+
+  const distance = delta.length();
+  const steps = Math.max(1, Math.ceil(distance / COLLISION_SUBSTEP));
+  _stepDelta.copy(delta).multiplyScalar(1 / steps);
+
+  for (let stepIdx = 0; stepIdx < steps; stepIdx++) {
+    _stepMove.copy(fpsPos);
+    _stepMove.x += _stepDelta.x;
+    _stepMove.z += _stepDelta.z;
+    if (fpsGrounded) {
+      const g = findGroundHeight(_stepMove);
+      if (g > _stepMove.y && g <= _stepMove.y + STEP_HEIGHT) _stepMove.y = g;
+    }
+    if (!collidesWalk(_stepMove, ignoreMeshes)) {
+      if (fpsGrounded && _stepMove.y > fpsPos.y) fpsVelY = 0;
+      fpsPos.copy(_stepMove);
+      continue;
+    }
+
+    if (_stepDelta.x !== 0) {
+      _stepMove.copy(fpsPos);
+      _stepMove.x += _stepDelta.x;
+      if (fpsGrounded) {
+        const g = findGroundHeight(_stepMove);
+        if (g > _stepMove.y && g <= _stepMove.y + STEP_HEIGHT) _stepMove.y = g;
+      }
+      if (!collidesWalk(_stepMove, ignoreMeshes)) {
+        if (fpsGrounded && _stepMove.y > fpsPos.y) fpsVelY = 0;
+        fpsPos.copy(_stepMove);
+      }
+    }
+
+    if (_stepDelta.z !== 0) {
+      _stepMove.copy(fpsPos);
+      _stepMove.z += _stepDelta.z;
+      if (fpsGrounded) {
+        const g = findGroundHeight(_stepMove);
+        if (g > _stepMove.y && g <= _stepMove.y + STEP_HEIGHT) _stepMove.y = g;
+      }
+      if (!collidesWalk(_stepMove, ignoreMeshes)) {
+        if (fpsGrounded && _stepMove.y > fpsPos.y) fpsVelY = 0;
+        fpsPos.copy(_stepMove);
+      }
+    }
+  }
+}
+
+function movePlayerVertical(deltaY, ignoreMeshes = null) {
+  if (Math.abs(deltaY) <= 1e-10) return;
+  const steps = Math.max(1, Math.ceil(Math.abs(deltaY) / COLLISION_SUBSTEP));
+  const stepY = deltaY / steps;
+
+  for (let stepIdx = 0; stepIdx < steps; stepIdx++) {
+    _stepMove.copy(fpsPos);
+    _stepMove.y = Math.max(0, _stepMove.y + stepY);
+    if (!collidesAt(_stepMove, gameRules.height, ignoreMeshes)) {
+      fpsPos.copy(_stepMove);
+    } else {
+      break;
+    }
+  }
+}
+
+function resolveMovingSolidPushes() {
+  const supportMeshes = new Set();
+  const supportGroupIds = new Set();
+  const currentSupport = getTractionSupportMesh();
+  const previousSupport = getTractionSupportMeshFromPreviousFrame();
+  if (currentSupport) {
+    supportMeshes.add(currentSupport);
+    if (currentSupport.userData.editorGroupId) supportGroupIds.add(currentSupport.userData.editorGroupId);
+  }
+  if (previousSupport) {
+    supportMeshes.add(previousSupport);
+    if (previousSupport.userData.editorGroupId) supportGroupIds.add(previousSupport.userData.editorGroupId);
+  }
+
+  for (const mesh of sceneObjects) {
+    if (!isSolidMesh(mesh)) continue;
+    if (mesh.userData._playtestHidden || !mesh.visible) continue;
+    if (supportMeshes.has(mesh)) continue;
+    if (mesh.userData.editorGroupId && supportGroupIds.has(mesh.userData.editorGroupId)) continue;
+
+    const prevPos = _playtestPrevPositions.get(mesh);
+    const prevAABB = _playtestPrevAABBs.get(mesh);
+    if (!prevPos || !prevAABB) continue;
+
+    _stepDelta.subVectors(mesh.position, prevPos);
+    if (_stepDelta.lengthSq() <= 1e-10) continue;
+
+    const ignoreMeshes = buildCollisionIgnoreSet(mesh);
+    const steps = Math.max(1, Math.ceil(_stepDelta.length() / COLLISION_SUBSTEP));
+    const stepVec = _stepDelta.clone().multiplyScalar(1 / steps);
+    const steppedAABB = prevAABB.clone();
+
+    for (let stepIdx = 0; stepIdx < steps; stepIdx++) {
+      steppedAABB.translate(stepVec);
+      setPlayerAABB(_playerAABB, fpsPos);
+      if (!_playerAABB.intersectsBox(steppedAABB)) continue;
+
+      movePlayerHorizontal(new THREE.Vector3(stepVec.x, 0, stepVec.z), ignoreMeshes);
+      movePlayerVertical(stepVec.y, ignoreMeshes);
+
+      setPlayerAABB(_playerAABB, fpsPos);
+      if (_playerAABB.intersectsBox(steppedAABB)) {
+        const escape = new THREE.Vector3();
+        if (stepVec.x !== 0) escape.x = stepVec.x > 0 ? (steppedAABB.max.x - _playerAABB.min.x) : (steppedAABB.min.x - _playerAABB.max.x);
+        if (stepVec.z !== 0) escape.z = stepVec.z > 0 ? (steppedAABB.max.z - _playerAABB.min.z) : (steppedAABB.min.z - _playerAABB.max.z);
+        if (stepVec.y !== 0) escape.y = stepVec.y > 0 ? (steppedAABB.max.y - _playerAABB.min.y) : (steppedAABB.min.y - _playerAABB.max.y);
+        movePlayerHorizontal(new THREE.Vector3(escape.x, 0, escape.z), ignoreMeshes);
+        movePlayerVertical(escape.y, ignoreMeshes);
+      }
+    }
+  }
 }
 
 function getTractionSupportMesh() {
@@ -3218,10 +6023,26 @@ function getTractionSupportMesh() {
     for (const hit of hits) {
       const mesh = hit.object;
       if (!mesh.userData.solid || !mesh.userData.traction || mesh.userData._playtestHidden || !mesh.visible) continue;
+      if (getMeshCollisionMode(mesh) !== 'geometry') continue;
       if (hit.point.y > fpsPos.y + 0.05) continue;
       if (fpsPos.y - hit.point.y > maxDrop) continue;
       if (hit.point.y > bestY) {
         bestY = hit.point.y;
+        bestMesh = mesh;
+      }
+    }
+
+    for (const mesh of sceneObjects) {
+      if (!mesh.userData.solid || !mesh.userData.traction || mesh.userData._playtestHidden || !mesh.visible) continue;
+      if (getMeshCollisionMode(mesh) === 'geometry') continue;
+      _tmpAABB.setFromObject(mesh);
+      if (_physOrigin.x < _tmpAABB.min.x || _physOrigin.x > _tmpAABB.max.x) continue;
+      if (_physOrigin.z < _tmpAABB.min.z || _physOrigin.z > _tmpAABB.max.z) continue;
+      if (_physOrigin.y < _tmpAABB.max.y) continue;
+      if (_tmpAABB.max.y > fpsPos.y + 0.05) continue;
+      if (fpsPos.y - _tmpAABB.max.y > maxDrop) continue;
+      if (_tmpAABB.max.y > bestY) {
+        bestY = _tmpAABB.max.y;
         bestMesh = mesh;
       }
     }
@@ -3264,13 +6085,23 @@ function applyTractionCarry() {
   if (!supportMesh) return;
 
   const prevPos = _playtestPrevPositions.get(supportMesh);
+  const prevQuat = _playtestPrevRotations.get(supportMesh);
   if (!prevPos) return;
 
-  _tractionCarry.set(
-    supportMesh.position.x - prevPos.x,
-    0,
-    supportMesh.position.z - prevPos.z,
-  );
+  if (prevQuat) {
+    _tractionPrevQuat.copy(prevQuat).invert();
+    _tractionLocalPoint.copy(fpsPos).sub(prevPos).applyQuaternion(_tractionPrevQuat);
+    _tractionWorldPoint.copy(_tractionLocalPoint).applyQuaternion(supportMesh.quaternion).add(supportMesh.position);
+    _tractionCarry.subVectors(_tractionWorldPoint, fpsPos);
+  } else {
+    _tractionCarry.set(
+      supportMesh.position.x - prevPos.x,
+      0,
+      supportMesh.position.z - prevPos.z,
+    );
+  }
+
+  _tractionCarry.y = 0;
   if (_tractionCarry.lengthSq() <= 1e-8) return;
 
   _next.copy(fpsPos).add(_tractionCarry);
@@ -3318,6 +6149,7 @@ function syncFpsCamera() {
 }
 
 function startJump() {
+  if (!gameRules.gravityEnabled) return;
   if (!fpsGrounded) return;
   fpsVelY = gameRules.jumpHeight;
   fpsGrounded = false;
@@ -3334,16 +6166,39 @@ function updateHealthHud() {
 }
 
 function getSpawnBlockState() {
-  const spawn = sceneObjects.find(m => m.userData.type === 'spawn');
+  const allSpawns = sceneObjects.filter(m => m.userData.type === 'spawn');
+  if (!allSpawns.length) return null;
+
+  const matchingSpawns = allSpawns.filter(meshMatchesPlayerGroups);
+  const spawn = matchingSpawns[0] || allSpawns[0];
   if (!spawn) return null;
 
   _spawnAABB.setFromObject(spawn);
   const center = spawn.getWorldPosition(new THREE.Vector3());
+  const basePos = new THREE.Vector3(center.x, _spawnAABB.max.y + 0.05, center.z);
+  const ignoreMeshes = buildCollisionIgnoreSet(spawn);
+  const spawnPos = resolveSpawnPosition(basePos, ignoreMeshes);
   return {
-    pos: new THREE.Vector3(center.x, _spawnAABB.min.y + 0.01, center.z),
+    pos: spawnPos,
     yaw: spawn.rotation.y,
     pitch: 0,
   };
+}
+
+function resolveSpawnPosition(startPos, ignoreMeshes = null) {
+  const pos = startPos.clone();
+  pos.y = Math.max(0, pos.y);
+  if (!collidesAt(pos, gameRules.height, ignoreMeshes)) return pos;
+
+  // Step upward to keep the feet position outside solid geometry.
+  const maxSteps = 200;
+  const stepSize = 0.1;
+  for (let i = 0; i < maxSteps; i++) {
+    pos.y += stepSize;
+    if (!collidesAt(pos, gameRules.height, ignoreMeshes)) return pos;
+  }
+
+  return pos;
 }
 
 function getFallbackSpawnState() {
@@ -3363,24 +6218,187 @@ function applySpawnState(spawnState) {
   fpsPitch = spawnState.pitch;
 }
 
-function setControlMoveActionState(stateKey, action, targetOffset, callerMesh) {
+function getCheckpointSpawnState(mesh) {
+  if (!mesh || mesh.userData.type !== 'checkpoint') return null;
+  _checkpointAABB.setFromObject(mesh);
+  const center = mesh.getWorldPosition(new THREE.Vector3());
+  const basePos = new THREE.Vector3(center.x, _checkpointAABB.max.y + 0.05, center.z);
+  const ignoreMeshes = buildCollisionIgnoreSet(mesh);
+  const spawnPos = resolveSpawnPosition(basePos, ignoreMeshes);
+  return {
+    pos: spawnPos,
+    yaw: mesh.rotation.y,
+    pitch: 0,
+  };
+}
+
+function getActiveCheckpointMesh() {
+  if (!activeCheckpointMeshUuid) return null;
+  const mesh = sceneObjects.find(m => m.uuid === activeCheckpointMeshUuid) || null;
+  if (!mesh || mesh.userData.type !== 'checkpoint') return null;
+  return mesh;
+}
+
+function resetActiveCheckpointToWorldSpawn(options = {}) {
+  activeCheckpointMeshUuid = null;
+  _activeTouchCheckpoints.clear();
+
+  const spawnState = getSpawnBlockState() ?? getFallbackSpawnState();
+  fpsSpawnPos.copy(spawnState.pos);
+  fpsSpawnYaw = spawnState.yaw;
+  fpsSpawnPitch = spawnState.pitch;
+
+  if (options.respawnNow && state.isPlaytest) {
+    respawnPlayer();
+  }
+
+  refreshStatus();
+  return spawnState;
+}
+
+function getPlayerGroupSet() {
+  const set = new Set();
+  for (const group of normalizeGroupListValue(playerProfile.groups)) {
+    const key = normalizeTouchRef(group);
+    if (key) set.add(key);
+  }
+  if (!set.size) set.add('default');
+  return set;
+}
+
+function meshMatchesPlayerGroups(mesh) {
+  if (!mesh) return false;
+  const playerGroups = getPlayerGroupSet();
+  for (const group of getMeshGroups(mesh)) {
+    const key = normalizeTouchRef(group);
+    if (key && playerGroups.has(key)) return true;
+  }
+  return false;
+}
+
+function activateCheckpoint(mesh) {
+  if (!mesh || mesh.userData.type !== 'checkpoint') return false;
+  if (!meshMatchesPlayerGroups(mesh)) return false;
+
+  const spawnState = getCheckpointSpawnState(mesh);
+  if (!spawnState) return false;
+
+  activeCheckpointMeshUuid = mesh.uuid;
+  fpsSpawnPos.copy(spawnState.pos);
+  fpsSpawnYaw = spawnState.yaw;
+  fpsSpawnPitch = spawnState.pitch;
+  return true;
+}
+
+function ensureCheckpointIndicator(mesh) {
+  if (!mesh || mesh.userData.type !== 'checkpoint') return null;
+  if (mesh.userData.checkpointIndicator) return mesh.userData.checkpointIndicator;
+
+  const indicator = new THREE.Mesh(
+    new THREE.TorusGeometry(0.5, 0.04, 8, 24),
+    new THREE.MeshBasicMaterial({
+      color: 0x3cb8ff,
+      transparent: true,
+      opacity: 0.75,
+      depthTest: false,
+    })
+  );
+  indicator.rotation.x = Math.PI / 2;
+  indicator.position.set(0, 0.74, 0);
+  indicator.renderOrder = 30;
+  indicator.visible = false;
+  mesh.add(indicator);
+  mesh.userData.checkpointIndicator = indicator;
+  return indicator;
+}
+
+function updateCheckpointIndicators(nowSeconds) {
+  const pulse = 0.5 + 0.5 * Math.sin(nowSeconds * 5.2);
+  for (const mesh of sceneObjects) {
+    if (mesh.userData.type !== 'checkpoint') continue;
+    const indicator = ensureCheckpointIndicator(mesh);
+    if (!indicator) continue;
+
+    if (!state.isPlaytest) {
+      indicator.visible = false;
+      continue;
+    }
+
+    const isActive = mesh.uuid === activeCheckpointMeshUuid;
+    const isTouching = _activeTouchCheckpoints.has(mesh);
+    indicator.visible = true;
+
+    if (isActive) {
+      indicator.material.color.setHex(0x4ce06d);
+      indicator.material.opacity = 0.95;
+      const s = 1.05 + pulse * 0.2;
+      indicator.scale.set(s, s, s);
+    } else if (isTouching) {
+      indicator.material.color.setHex(0xffd166);
+      indicator.material.opacity = 0.8;
+      const s = 0.96 + pulse * 0.1;
+      indicator.scale.set(s, s, s);
+    } else {
+      indicator.material.color.setHex(0x3cb8ff);
+      indicator.material.opacity = 0.35;
+      indicator.scale.set(0.92, 0.92, 0.92);
+    }
+  }
+}
+
+function setControlMoveActionState(stateKey, functionName, action, targetOffset, callerMesh, isActivation) {
   if (!targetOffset) {
     _triggerMoveStates.delete(stateKey);
     return;
   }
 
   const prev = _triggerMoveStates.get(stateKey);
-  const fromOffset = prev ? prev.currentOffset.clone() : new THREE.Vector3();
+  const targets = triggerMoveTargets(action.refType, action.refValue);
+  if (isActivation) clearConflictingMoveStates(stateKey, targets);
+  const fromOffset = isActivation
+    ? new THREE.Vector3(action.startOffset[0], action.startOffset[1], action.startOffset[2])
+    : (prev ? prev.currentOffset.clone() : new THREE.Vector3());
   _triggerMoveStates.set(stateKey, {
     callerUuid: callerMesh?.uuid ?? null,
-    targets: triggerMoveTargets(action.refType, action.refValue),
+    targets,
     fromOffset,
     toOffset: new THREE.Vector3(targetOffset[0], targetOffset[1], targetOffset[2]),
     currentOffset: fromOffset.clone(),
     startedAt: performance.now() / 1000,
     duration: action.duration,
     style: action.style,
-    functionName: stateKey.split(':')[0], // extract fn name from key
+    functionName: String(functionName ?? '').trim(),
+    functionMarked: false,
+  });
+}
+
+function setControlRotateActionState(stateKey, functionName, action, targetRotation, callerMesh, isActivation) {
+  if (!targetRotation) {
+    _triggerRotateStates.delete(stateKey);
+    return;
+  }
+
+  const prev = _triggerRotateStates.get(stateKey);
+  const targets = triggerMoveTargets(action.refType, action.refValue);
+  if (isActivation) clearConflictingMoveStates(stateKey, targets, { stateMap: _triggerRotateStates });
+  const fromRotation = isActivation
+    ? new THREE.Vector3(action.rotateStartOffset[0], action.rotateStartOffset[1], action.rotateStartOffset[2])
+    : (prev ? prev.currentRotation.clone() : new THREE.Vector3());
+  _triggerRotateStates.set(stateKey, {
+    callerUuid: callerMesh?.uuid ?? null,
+    targets,
+    fromRotation,
+    toRotation: new THREE.Vector3(targetRotation[0], targetRotation[1], targetRotation[2]),
+    currentRotation: fromRotation.clone(),
+    rpm: isActivation
+      ? new THREE.Vector3(action.rotateRpm[0], action.rotateRpm[1], action.rotateRpm[2])
+      : new THREE.Vector3(),
+    repeat: isActivation && action.rotateRepeat === true,
+    groupMode: action.rotateGroupMode === 'together' ? 'together' : 'separate',
+    startedAt: performance.now() / 1000,
+    duration: action.duration,
+    style: action.style,
+    functionName: String(functionName ?? '').trim(),
     functionMarked: false,
   });
 }
@@ -3420,32 +6438,439 @@ function applyLightActionToMesh(mesh, lightOp, lightValue) {
   }
 }
 
-function executeControlFunction(functionName, callerMesh, active) {
+function isControlFunctionStopped(functionName) {
+  const key = normalizeControlFunctionKey(functionName);
+  if (!key) return false;
+  return _permanentFunctionStops.has(key) || (_momentaryFunctionStopCounts.get(key) ?? 0) > 0;
+}
+
+function clearFunctionRuntimeStates(functionName) {
+  const fnKey = normalizeControlFunctionKey(functionName);
+  if (!fnKey) return;
+
+  for (const [key, state] of [..._triggerMoveStates]) {
+    if (normalizeControlFunctionKey(state?.functionName) === fnKey) _triggerMoveStates.delete(key);
+  }
+  for (const [key, state] of [..._triggerRotateStates]) {
+    if (normalizeControlFunctionKey(state?.functionName) === fnKey) _triggerRotateStates.delete(key);
+  }
+  for (const [, calls] of _activeTriggerCalls) {
+    for (const call of calls) {
+      if (normalizeControlFunctionKey(call?.functionName) !== fnKey) continue;
+      call.started = false;
+      call.runStartedAt = null;
+    }
+  }
+  stopAudioByFunction(functionName);
+}
+
+function applyTriggerFunctionStops(triggerMesh, entering) {
+  const config = getMeshTriggerStopConfig(triggerMesh);
+  if (config.mode === 'none' || !config.functionNames.length) return;
+
+  for (const functionName of config.functionNames) {
+    const key = normalizeControlFunctionKey(functionName);
+    if (!key) continue;
+
+    if (config.mode === 'permanent') {
+      if (!entering) continue;
+      _permanentFunctionStops.add(key);
+      clearFunctionRuntimeStates(functionName);
+      continue;
+    }
+
+    if (entering) {
+      _momentaryFunctionStopCounts.set(key, (_momentaryFunctionStopCounts.get(key) ?? 0) + 1);
+      clearFunctionRuntimeStates(functionName);
+    } else {
+      const next = (_momentaryFunctionStopCounts.get(key) ?? 0) - 1;
+      if (next > 0) _momentaryFunctionStopCounts.set(key, next);
+      else _momentaryFunctionStopCounts.delete(key);
+    }
+  }
+}
+
+function clearRuntimeFunctionStops() {
+  _momentaryFunctionStopCounts.clear();
+  _permanentFunctionStops.clear();
+  _pausedFunctionKeys.clear();
+}
+
+function getMovementPathState(mesh, create = false) {
+  if (!mesh) return null;
+  let pathState = _movementPathStates.get(mesh.uuid) || null;
+  if (!pathState && create) {
+    pathState = { targetIndex: 0, finished: false, active: false, paused: false };
+    _movementPathStates.set(mesh.uuid, pathState);
+  }
+  return pathState;
+}
+
+function startMovementPath(mesh, options = {}) {
+  const config = getMeshMovementPathConfig(mesh);
+  if (!config.enabled || !config.checkpoints.length) return;
+
+  const pathState = getMovementPathState(mesh, true);
+  if (options.reset === true || pathState.finished) {
+    pathState.targetIndex = 0;
+    pathState.finished = false;
+  }
+  pathState.active = true;
+  pathState.paused = false;
+}
+
+function pauseMovementPath(mesh) {
+  const pathState = getMovementPathState(mesh, false);
+  if (!pathState) return;
+  pathState.paused = true;
+  pathState.active = false;
+}
+
+function stopMovementPath(mesh) {
+  const pathState = getMovementPathState(mesh, false);
+  if (!pathState) return;
+  pathState.active = false;
+  pathState.paused = false;
+}
+
+function resetMovementPath(mesh) {
+  if (!mesh) return;
+  _movementPathStates.delete(mesh.uuid);
+  const basePos = _playtestBasePositions.get(mesh);
+  if (state.isPlaytest && basePos) {
+    mesh.position.copy(basePos);
+  }
+}
+
+function applyPathAction(action, active) {
+  if (!active) return;
+
+  const targets = triggerMoveTargets(action.refType, action.refValue);
+  if (!targets.length) return;
+
+  const command = PATH_CONTROL_COMMANDS.includes(action.pathCommand)
+    ? action.pathCommand
+    : 'start';
+
+  for (const target of targets) {
+    if (command === 'start' || command === 'resume') {
+      startMovementPath(target, { reset: false });
+    } else if (command === 'pause') {
+      pauseMovementPath(target);
+    } else if (command === 'stop') {
+      stopMovementPath(target);
+    } else if (command === 'reset') {
+      resetMovementPath(target);
+    }
+  }
+}
+
+function applyPlayerGroupAction(action) {
+  const mode = CONTROL_PLAYER_GROUP_MODES.includes(action.playerGroupMode)
+    ? action.playerGroupMode
+    : 'set';
+  const values = parseRawGroupListValue(action.playerGroupValue);
+  const current = normalizeGroupListValue(playerProfile.groups);
+
+  if (mode === 'set') {
+    playerProfile.groups = normalizeGroupListValue(values);
+    refreshPlayerProfileUI();
+    return;
+  }
+
+  if (!values.length) return;
+
+  if (mode === 'add') {
+    playerProfile.groups = normalizeGroupListValue([...current, ...values]);
+  } else if (mode === 'remove') {
+    const removeSet = new Set(values.map(v => normalizeTouchRef(v)));
+    const kept = current.filter(group => !removeSet.has(normalizeTouchRef(group)));
+    playerProfile.groups = kept.length ? kept : ['default'];
+  } else if (mode === 'random') {
+    const idx = Math.floor(Math.random() * values.length);
+    playerProfile.groups = [values[Math.max(0, Math.min(values.length - 1, idx))]];
+  }
+
+  refreshPlayerProfileUI();
+}
+
+function isFunctionPaused(functionName) {
+  const key = normalizeControlFunctionKey(functionName);
+  if (!key) return false;
+  return _pausedFunctionKeys.has(key);
+}
+
+function stopAudioInstance(instance) {
+  if (!instance) return;
+  try {
+    instance.audio.pause();
+    instance.audio.currentTime = 0;
+  } catch {
+    // ignore media cleanup errors
+  }
+  _activeAudioInstances.delete(instance.id);
+}
+
+function stopAudioByActionKey(actionKey) {
+  const ids = _audioHandlesByAction.get(actionKey);
+  if (!ids || !ids.size) return;
+  for (const id of [...ids]) {
+    const instance = _activeAudioInstances.get(id);
+    if (instance) stopAudioInstance(instance);
+  }
+  _audioHandlesByAction.delete(actionKey);
+}
+
+function stopAudioByFunction(functionName) {
+  const fnKey = normalizeControlFunctionKey(functionName);
+  if (!fnKey) return;
+  for (const [id, instance] of [..._activeAudioInstances]) {
+    if (normalizeControlFunctionKey(instance.functionName) !== fnKey) continue;
+    stopAudioInstance(instance);
+  }
+  for (const [key, ids] of [..._audioHandlesByAction]) {
+    for (const id of [...ids]) {
+      if (!_activeAudioInstances.has(id)) ids.delete(id);
+    }
+    if (!ids.size) _audioHandlesByAction.delete(key);
+  }
+}
+
+function clearAllRuntimeAudio() {
+  for (const instance of _activeAudioInstances.values()) stopAudioInstance(instance);
+  _activeAudioInstances.clear();
+  _audioHandlesByAction.clear();
+}
+
+function updateAudioProximityVolume(instance) {
+  if (!instance || instance.mode !== 'proximity') return;
+  const listenerPos = state.isPlaytest ? fpsPos : editorCam.position;
+  const sourceMesh = sceneObjects.find(m => m.uuid === instance.sourceMeshUuid) || null;
+  const sourcePos = sourceMesh ? sourceMesh.position : (instance.callerMeshUuid ? (sceneObjects.find(m => m.uuid === instance.callerMeshUuid)?.position || null) : null);
+  if (!sourcePos) {
+    instance.audio.volume = 0;
+    return;
+  }
+  const dist = listenerPos.distanceTo(sourcePos);
+  const maxDist = Math.max(1, instance.maxDistance || 22);
+  const t = THREE.MathUtils.clamp(1 - (dist / maxDist), 0, 1);
+  instance.audio.volume = t * t;
+}
+
+function updateRuntimeAudioInstances() {
+  for (const [id, instance] of [..._activeAudioInstances]) {
+    if (!instance || instance.done) {
+      _activeAudioInstances.delete(id);
+      continue;
+    }
+
+    if (instance.untilEvent === 'functionDone') {
+      const refName = instance.untilFunctionName || instance.functionName;
+      if (refName && isControlFunctionMet(refName)) {
+        stopAudioInstance(instance);
+        continue;
+      }
+    }
+
+    if (isFunctionPaused(instance.functionName)) {
+      if (!instance.audio.paused) {
+        try { instance.audio.pause(); } catch { /* ignore */ }
+      }
+      continue;
+    }
+
+    if (instance.resumeRequested && instance.audio.paused) {
+      instance.resumeRequested = false;
+      instance.audio.play().catch(() => {});
+    }
+
+    updateAudioProximityVolume(instance);
+  }
+
+  for (const [key, ids] of [..._audioHandlesByAction]) {
+    for (const id of [...ids]) {
+      if (!_activeAudioInstances.has(id)) ids.delete(id);
+    }
+    if (!ids.size) _audioHandlesByAction.delete(key);
+  }
+}
+
+function executeAudioAction(functionName, actionIndex, action, callerMesh, active) {
+  const actionKey = `${normalizeControlFunctionKey(functionName)}:${actionIndex}:${callerMesh?.uuid ?? 'global'}`;
+  const until = AUDIO_UNTIL_EVENTS.includes(action.audioUntil) ? action.audioUntil : 'deactivate';
+
+  if (!active) {
+    if (until === 'deactivate') stopAudioByActionKey(actionKey);
+    return;
+  }
+
+  const entry = getAudioLibraryEntryByName(action.audioName);
+  if (!entry) return;
+
+  const mode = AUDIO_PLAY_MODES.includes(action.audioMode) ? action.audioMode : 'global';
+  const targets = action.refValue ? triggerMoveTargets(action.refType, action.refValue, callerMesh) : (callerMesh ? [callerMesh] : []);
+  const emitTargets = targets.length ? targets : [callerMesh].filter(Boolean);
+  const maxDistance = clampAudioDistance(action.audioDistance);
+  const createdIds = new Set(_audioHandlesByAction.get(actionKey) || []);
+
+  for (const sourceMesh of emitTargets) {
+    const audio = new Audio(entry.dataUrl);
+    audio.loop = action.audioLoop === true;
+    audio.preload = 'auto';
+    const instance = {
+      id: _nextAudioInstanceId++,
+      functionName,
+      callerMeshUuid: callerMesh?.uuid ?? null,
+      sourceMeshUuid: sourceMesh?.uuid ?? null,
+      mode,
+      maxDistance,
+      untilEvent: until,
+      untilFunctionName: String(action.audioUntilFunction ?? '').trim(),
+      audio,
+      done: false,
+      resumeRequested: false,
+    };
+
+    audio.addEventListener('ended', () => {
+      instance.done = true;
+      if (instance.untilEvent === 'audioDone' || !audio.loop) stopAudioInstance(instance);
+    });
+
+    if (mode === 'proximity') updateAudioProximityVolume(instance);
+    else audio.volume = 1;
+
+    _activeAudioInstances.set(instance.id, instance);
+    createdIds.add(instance.id);
+    audio.play().catch(() => {
+      instance.done = true;
+      stopAudioInstance(instance);
+    });
+  }
+
+  if (createdIds.size) _audioHandlesByAction.set(actionKey, createdIds);
+}
+
+function pauseFunctionRuntime(functionName) {
+  const key = normalizeControlFunctionKey(functionName);
+  if (!key) return;
+  _pausedFunctionKeys.add(key);
+}
+
+function resumeFunctionRuntime(functionName) {
+  const key = normalizeControlFunctionKey(functionName);
+  if (!key) return;
+  _pausedFunctionKeys.delete(key);
+  for (const instance of _activeAudioInstances.values()) {
+    if (normalizeControlFunctionKey(instance.functionName) === key) {
+      instance.resumeRequested = true;
+    }
+  }
+}
+
+function stopFunctionRuntime(functionName, options = {}) {
+  const key = normalizeControlFunctionKey(functionName);
+  if (!key) return;
+  _pausedFunctionKeys.delete(key);
+  clearFunctionRuntimeStates(functionName);
+  stopAudioByFunction(functionName);
+  if (options.resetState) _controlFunctionStates.delete(key);
+}
+
+function applyFunctionControlAction(action, currentFunctionName, callerMesh, active, context = {}) {
+  if (!active) return;
+
+  const command = FUNCTION_CONTROL_COMMANDS.includes(action.functionControlCommand)
+    ? action.functionControlCommand
+    : 'stop';
+  const targets = normalizeFunctionNameList(action.functionControlTarget);
+  if (!targets.length) return;
+
+  for (const targetName of targets) {
+    const targetKey = normalizeControlFunctionKey(targetName);
+    const currentKey = normalizeControlFunctionKey(currentFunctionName);
+
+    if (command === 'pause') {
+      pauseFunctionRuntime(targetName);
+    } else if (command === 'resume') {
+      resumeFunctionRuntime(targetName);
+    } else if (command === 'stop') {
+      stopFunctionRuntime(targetName);
+    } else if (command === 'reset') {
+      stopFunctionRuntime(targetName, { resetState: true });
+    } else if (command === 'restart') {
+      if (targetKey && targetKey === currentKey) continue;
+      stopFunctionRuntime(targetName, { resetState: true });
+      executeControlFunction(targetName, callerMesh, true, {
+        depth: (context.depth ?? 0) + 1,
+      });
+    }
+  }
+}
+
+function executeControlFunction(functionName, callerMesh, active, context = {}) {
+  if ((context.depth ?? 0) > 6) return false;
   const func = getControlFunctionByName(functionName);
-  if (!func) return;
+  if (!func) return false;
+  if (active && isControlFunctionStopped(func.name)) return false;
+  if (active && isFunctionPaused(func.name)) return false;
   const nowSeconds = performance.now() / 1000;
-  let hasMoveAction = false;
+  let hasTransformAction = false;
 
   for (let i = 0; i < func.actions.length; i++) {
     const action = normalizeFunctionAction(func.actions[i]);
-    if (!action.refValue) continue;
+    const needsTargetRef = ['move', 'rotate', 'light', 'path'].includes(action.actionType);
+    if (needsTargetRef && !action.refValue) continue;
 
     if (action.actionType === 'move') {
-      hasMoveAction = true;
-      const stateKey = `${func.name}:${i}`;
+      hasTransformAction = true;
+      const callerKey = callerMesh?.uuid ?? 'global';
+      const stateKey = `${func.name}:${i}:${callerKey}`;
       if (!active && !action.returnOnDeactivate) continue; // keep current state
       const targetOffset = active ? action.offset : [0, 0, 0];
-      setControlMoveActionState(stateKey, action, targetOffset, callerMesh);
+      setControlMoveActionState(stateKey, func.name, action, targetOffset, callerMesh, active);
       const st = _triggerMoveStates.get(stateKey);
+      if (st) { st.callerUuid = callerMesh?.uuid ?? null; st.startedAt = nowSeconds; }
+    } else if (action.actionType === 'rotate') {
+      hasTransformAction = true;
+      const callerKey = callerMesh?.uuid ?? 'global';
+      const stateKey = `${func.name}:${i}:${callerKey}`;
+      if (!active && !action.returnOnDeactivate) continue;
+      const targetRotation = active ? action.rotateOffset : [0, 0, 0];
+      setControlRotateActionState(stateKey, func.name, action, targetRotation, callerMesh, active);
+      const st = _triggerRotateStates.get(stateKey);
       if (st) { st.callerUuid = callerMesh?.uuid ?? null; st.startedAt = nowSeconds; }
     } else if (action.actionType === 'light') {
       const targets = triggerMoveTargets(action.refType, action.refValue);
       for (const target of targets) applyLightActionToMesh(target, action.lightOp, action.lightValue);
+    } else if (action.actionType === 'audio') {
+      executeAudioAction(func.name, i, action, callerMesh, active);
+    } else if (action.actionType === 'path') {
+      applyPathAction(action, active);
+    } else if (action.actionType === 'functionControl') {
+      applyFunctionControlAction(action, func.name, callerMesh, active, context);
+    } else if (action.actionType === 'playerGroup') {
+      if (active) applyPlayerGroupAction(action);
+    } else if (action.actionType === 'setVar') {
+      if (active && action.setVarName) {
+        const amount = resolveValueSource(action.setVarValueType, action.setVarValue, action.setVarValueVar);
+        const current = getGameVar(action.setVarName);
+        let nextValue = amount;
+        if (action.setVarOp === '+') nextValue = current + amount;
+        else if (action.setVarOp === '-') nextValue = current - amount;
+        else if (action.setVarOp === '*') nextValue = current * amount;
+        else if (action.setVarOp === '/') nextValue = amount === 0 ? current : current / amount;
+        setGameVar(action.setVarName, nextValue);
+      }
+    } else if (action.actionType === 'setBool') {
+      if (active && action.setBoolName) {
+        if (action.setBoolValue === 'toggle') setGameBool(action.setBoolName, !getGameBool(action.setBoolName));
+        else setGameBool(action.setBoolName, !!action.setBoolValue);
+      }
     }
   }
 
-  // When a new function with move actions starts, un-mark all OTHER functions
-  if (active && hasMoveAction) {
+  // When a new function with transform actions starts, un-mark all OTHER functions
+  if (active && hasTransformAction) {
     const thisKey = normalizeControlFunctionKey(func.name);
     for (const [key, entry] of _controlFunctionStates) {
       if (key !== thisKey && entry.met) {
@@ -3455,9 +6880,10 @@ function executeControlFunction(functionName, callerMesh, active) {
   }
 
   // Light-only functions complete immediately
-  if (active && !hasMoveAction) {
+  if (active && !hasTransformAction) {
     markControlFunctionMet(func.name, callerMesh);
   }
+  return true;
 }
 
 function compareOp(a, op, b) {
@@ -3484,22 +6910,12 @@ function evaluateCondition(condition, callerMesh, activatedAt) {
       break;
     case 'touching': {
       const targets = triggerMoveTargets(cond.touchRefType, cond.touchRef);
-      result = false;
-      const pH = gameRules.height;
-      for (const t of targets) {
-        _condAABB.setFromObject(t);
-        if (fpsPos.x + PLAYER_RADIUS > _condAABB.min.x &&
-            fpsPos.x - PLAYER_RADIUS < _condAABB.max.x &&
-            fpsPos.z + PLAYER_RADIUS > _condAABB.min.z &&
-            fpsPos.z - PLAYER_RADIUS < _condAABB.max.z &&
-            fpsPos.y + pH > _condAABB.min.y &&
-            fpsPos.y < _condAABB.max.y) {
-          result = true;
-          break;
-        }
-      }
+      result = targets.some(t => isPlayerTouchingMesh(t));
       break;
     }
+    case 'touchingPlayer':
+      result = isPlayerTouchingMesh(callerMesh);
+      break;
     case 'position': {
       let pos;
       if (!cond.posSubject || cond.posSubject === 'player') {
@@ -3508,14 +6924,14 @@ function evaluateCondition(condition, callerMesh, activatedAt) {
         const target = sceneObjects.find(m => (m.userData.label || '').toLowerCase() === cond.posSubject.toLowerCase());
         pos = target ? target.position : null;
       }
-      result = pos ? compareOp(pos[cond.posAxis], cond.posOp, cond.posValue) : false;
+      result = pos ? compareOp(pos[cond.posAxis], cond.posOp, resolveValueSource(cond.posValueType, cond.posValue, cond.posValueVar)) : false;
       break;
     }
     case 'distance': {
       const target = sceneObjects.find(m => (m.userData.label || '').toLowerCase() === cond.distTarget.toLowerCase());
       if (target) {
         const dist = fpsPos.distanceTo(target.position);
-        result = compareOp(dist, cond.distOp, cond.distValue);
+        result = compareOp(dist, cond.distOp, resolveValueSource(cond.distValueType, cond.distValue, cond.distValueVar));
       } else {
         result = false;
       }
@@ -3523,7 +6939,7 @@ function evaluateCondition(condition, callerMesh, activatedAt) {
     }
     case 'timer': {
       const elapsed = (performance.now() / 1000) - (activatedAt || 0);
-      result = elapsed >= cond.timerSeconds;
+      result = elapsed >= resolveValueSource(cond.timerType, cond.timerSeconds, cond.timerVar);
       break;
     }
     case 'key':
@@ -3531,6 +6947,12 @@ function evaluateCondition(condition, callerMesh, activatedAt) {
       break;
     case 'grounded':
       result = fpsGrounded;
+      break;
+    case 'varCmp':
+      result = compareOp(getGameVar(cond.varCmpName), cond.varCmpOp, resolveValueSource(cond.varCmpValueType, cond.varCmpValue, cond.varCmpValueVar));
+      break;
+    case 'bool':
+      result = getGameBool(cond.boolName);
       break;
     default:
       result = true;
@@ -3550,11 +6972,60 @@ function evaluateCallConditions(call, mesh) {
 function evaluateTriggerCalls(mesh) {
   const pending = _activeTriggerCalls.get(mesh.uuid);
   if (!pending) return;
+
+  const isOneShotController = !!pending[0]?.oneShot;
+
   for (const call of pending) {
-    if (call.started) continue;
-    if (!evaluateCallConditions(call, mesh)) continue;
-    call.started = true;
-    executeControlFunction(call.functionName, mesh, true);
+    if (call.completed) continue;
+
+    const met = evaluateCallConditions(call, mesh);
+    if (met && !call.started) {
+      if (isControlFunctionStopped(call.functionName)) {
+        if (call.oneShot) call.completed = true;
+      } else {
+        const runStartedAt = performance.now() / 1000;
+        const started = executeControlFunction(call.functionName, mesh, true);
+        if (started) {
+          call.started = true;
+          call.runStartedAt = runStartedAt;
+        }
+      }
+    }
+    if (!met && call.started) {
+      call.started = false;
+      executeControlFunction(call.functionName, mesh, false);
+    }
+
+    if (!call.oneShot) continue;
+
+    if (!call.functionName) {
+      call.completed = true;
+      continue;
+    }
+
+    const startedAt = Number.isFinite(call.runStartedAt) ? call.runStartedAt : (call.activatedAt ?? 0);
+    const completedThisRun = hasFunctionRunCompletedForCaller(call.functionName, mesh.uuid, startedAt);
+    if (!completedThisRun) continue;
+
+    const fn = getControlFunctionByName(call.functionName);
+    const hasReturnableTransform = !!fn && fn.actions.some(a => {
+      const na = normalizeFunctionAction(a);
+      return (na.actionType === 'move' || na.actionType === 'rotate') && na.returnOnDeactivate;
+    });
+
+    // One-shot switches should stop tracking after completion. If the function
+    // has returnable transform actions, deactivate once so it returns with its style.
+    if (call.started && hasReturnableTransform) {
+      call.started = false;
+      executeControlFunction(call.functionName, mesh, false);
+    } else {
+      call.started = false;
+    }
+    call.completed = true;
+  }
+
+  if (isOneShotController && pending.every(c => c.completed)) {
+    _activeTriggerCalls.delete(mesh.uuid);
   }
 }
 
@@ -3562,7 +7033,15 @@ function activateControlMesh(controllerMesh, options = {}) {
   const calls = ensureTriggerCalls(controllerMesh);
   if (!calls.length) return;
   const now = performance.now() / 1000;
-  _activeTriggerCalls.set(controllerMesh.uuid, calls.map(c => ({ ...c, started: false, activatedAt: now })));
+  const oneShot = options.oneShot === true;
+  _activeTriggerCalls.set(controllerMesh.uuid, calls.map(c => ({
+    ...c,
+    started: false,
+    activatedAt: now,
+    runStartedAt: null,
+    completed: false,
+    oneShot,
+  })));
   evaluateTriggerCalls(controllerMesh);
 }
 
@@ -3586,39 +7065,20 @@ function pressSwitch(mesh) {
   const value = getRuntimeValueByKey(switchConfig.varKey);
   if (value < min || value > max) return false;
 
-  activateControlMesh(mesh);
+  activateControlMesh(mesh, { oneShot: switchConfig.runMode !== 'repeat' });
   return true;
 }
 
 function updateTriggerMoveAnimations(nowSeconds) {
   if (!_playtestBasePositions.size) return;
 
-  const offsetsByMesh = new Map();
-  let anyFunctionJustCompleted = false;
-
-  for (const [key, st] of _triggerMoveStates) {
-    const rawT = st.duration <= 0 ? 1 : THREE.MathUtils.clamp((nowSeconds - st.startedAt) / st.duration, 0, 1);
-    let easedT = rawT;
-    if (st.style === 'glide') easedT = rawT * rawT * (3 - 2 * rawT);
-    else if (st.style === 'snap') easedT = rawT >= 1 ? 1 : 0;
-
-    st.currentOffset.copy(st.fromOffset).lerp(st.toOffset, easedT);
-
-    for (const mesh of st.targets) {
-      if (!offsetsByMesh.has(mesh)) offsetsByMesh.set(mesh, new THREE.Vector3());
-      offsetsByMesh.get(mesh).add(st.currentOffset);
-    }
-
-    if (rawT >= 1 && st.toOffset.lengthSq() === 0) {
-      _triggerMoveStates.delete(key);
-    }
-
-    if (rawT >= 1 && st.functionName && !st.functionMarked) {
-      markControlFunctionMet(st.functionName);
-      st.functionMarked = true;
-      anyFunctionJustCompleted = true;
-    }
-  }
+  const anyFunctionJustCompleted = applyAnimatedTransforms(
+    _playtestBasePositions,
+    _playtestBaseRotations,
+    _triggerMoveStates,
+    _triggerRotateStates,
+    nowSeconds
+  );
 
   // Re-evaluate pending calls when a function just completed
   if (anyFunctionJustCompleted) {
@@ -3630,11 +7090,63 @@ function updateTriggerMoveAnimations(nowSeconds) {
     }
   }
 
-  for (const [mesh, basePos] of _playtestBasePositions) {
-    const offset = offsetsByMesh.get(mesh);
-    if (offset) _triggerMoveTemp.copy(basePos).add(offset);
-    else _triggerMoveTemp.copy(basePos);
-    mesh.position.copy(_triggerMoveTemp);
+}
+
+function updateMovementPathAnimations(dt) {
+  if (!state.isPlaytest || dt <= 0) return;
+
+  for (const mesh of sceneObjects) {
+    const config = getMeshMovementPathConfig(mesh);
+    if (!config.enabled || !config.checkpoints.length) {
+      _movementPathStates.delete(mesh.uuid);
+      continue;
+    }
+
+    const st = getMovementPathState(mesh, false);
+    if (!st || !st.active || st.paused) continue;
+
+    const speed = Math.max(0.01, Number(config.speed) || 0.01);
+    let remainingDistance = speed * dt;
+    if (remainingDistance <= 0) continue;
+
+    if (st.finished && !config.loop) {
+      st.active = false;
+      continue;
+    }
+    if (st.targetIndex >= config.checkpoints.length || st.targetIndex < 0) st.targetIndex = 0;
+
+    let guard = config.checkpoints.length * 2 + 4;
+    while (remainingDistance > 1e-6 && guard-- > 0) {
+      const idx = THREE.MathUtils.clamp(st.targetIndex, 0, config.checkpoints.length - 1);
+      const cp = normalizeMovementPathCheckpoint(config.checkpoints[idx]);
+      _pathPreviewTarget.set(cp.pos[0], cp.pos[1], cp.pos[2]);
+      _pathPreviewDelta.subVectors(_pathPreviewTarget, mesh.position);
+      const dist = _pathPreviewDelta.length();
+
+      if (dist <= 1e-5 || remainingDistance >= dist) {
+        mesh.position.copy(_pathPreviewTarget);
+        remainingDistance = dist <= 1e-5 ? 0 : (remainingDistance - dist);
+
+        const fnName = String(cp.functionName ?? '').trim();
+        if (fnName) executeControlFunction(fnName, mesh, true);
+
+        if (config.loop) {
+          st.targetIndex = (idx + 1) % config.checkpoints.length;
+          st.finished = false;
+        } else if (idx >= config.checkpoints.length - 1) {
+          st.targetIndex = idx;
+          st.finished = true;
+          st.active = false;
+          break;
+        } else {
+          st.targetIndex = idx + 1;
+        }
+        continue;
+      }
+
+      mesh.position.addScaledVector(_pathPreviewDelta, remainingDistance / dist);
+      remainingDistance = 0;
+    }
   }
 }
 
@@ -3652,7 +7164,9 @@ function applyFallDamage(fallDistance) {
 }
 
 function respawnPlayer() {
-  const spawnState = getSpawnBlockState() ?? { pos: fpsSpawnPos.clone(), yaw: fpsSpawnYaw, pitch: fpsSpawnPitch };
+  const activeCheckpoint = getActiveCheckpointMesh();
+  const checkpointSpawn = activeCheckpoint ? getCheckpointSpawnState(activeCheckpoint) : null;
+  const spawnState = checkpointSpawn ?? getSpawnBlockState() ?? { pos: fpsSpawnPos.clone(), yaw: fpsSpawnYaw, pitch: fpsSpawnPitch };
   applySpawnState(spawnState);
   fpsSpawnPos.copy(spawnState.pos);
   fpsSpawnYaw = spawnState.yaw;
@@ -3669,7 +7183,6 @@ function respawnPlayer() {
 
 // ─── Trigger blocks overlap detection ────────────────────────────────────────
 const _triggerAABB = new THREE.Box3();
-const _condAABB = new THREE.Box3();
 const _activeTriggers = new Set();
 
 function checkTriggerBlocks() {
@@ -3689,6 +7202,7 @@ function checkTriggerBlocks() {
     if (overlap && !_activeTriggers.has(m)) {
       _activeTriggers.add(m);
       activateControlMesh(m);
+      applyTriggerFunctionStops(m, true);
       // Apply gamerule overrides
       const rules = m.userData.triggerRules;
       if (rules) {
@@ -3697,8 +7211,39 @@ function checkTriggerBlocks() {
         }
       }
     } else if (!overlap) {
-      if (_activeTriggers.has(m)) deactivateControlMesh(m);
+      if (_activeTriggers.has(m)) {
+        deactivateControlMesh(m);
+        applyTriggerFunctionStops(m, false);
+      }
       _activeTriggers.delete(m);
+    }
+  }
+}
+
+function checkCheckpointBlocks() {
+  const pH = gameRules.height;
+  for (const mesh of sceneObjects) {
+    if (mesh.userData.type !== 'checkpoint') continue;
+    const config = getMeshCheckpointConfig(mesh);
+    if (config.interaction !== 'touch') {
+      _activeTouchCheckpoints.delete(mesh);
+      continue;
+    }
+
+    _checkpointAABB.setFromObject(mesh);
+    const overlap =
+      fpsPos.x + PLAYER_RADIUS > _checkpointAABB.min.x &&
+      fpsPos.x - PLAYER_RADIUS < _checkpointAABB.max.x &&
+      fpsPos.z + PLAYER_RADIUS > _checkpointAABB.min.z &&
+      fpsPos.z - PLAYER_RADIUS < _checkpointAABB.max.z &&
+      fpsPos.y + pH > _checkpointAABB.min.y &&
+      fpsPos.y < _checkpointAABB.max.y;
+
+    if (overlap && !_activeTouchCheckpoints.has(mesh)) {
+      _activeTouchCheckpoints.add(mesh);
+      activateCheckpoint(mesh);
+    } else if (!overlap) {
+      _activeTouchCheckpoints.delete(mesh);
     }
   }
 }
@@ -3707,30 +7252,143 @@ function checkTriggerBlocks() {
 const conditionalTriggers = [];
 let _nextCtId = 1;
 
+// ─── Game variables / booleans ───────────────────────────────────────────────
+const gameVars = [];
+const gameBools = [];
+
+function namedValueKey(name) {
+  return String(name ?? '').trim().toLowerCase();
+}
+
+function isUniqueNamedEntry(list, index, candidate) {
+  const key = namedValueKey(candidate);
+  if (!key) return false;
+  for (let i = 0; i < list.length; i++) {
+    if (i === index) continue;
+    if (namedValueKey(list[i]?.name) === key) return false;
+  }
+  return true;
+}
+
+function buildNextAvailableName(prefix, list) {
+  let n = 1;
+  let candidate = `${prefix}${n}`;
+  while (!isUniqueNamedEntry(list, -1, candidate)) {
+    n += 1;
+    candidate = `${prefix}${n}`;
+  }
+  return candidate;
+}
+
+function normalizeGameVarEntry(entry = {}) {
+  const name = String(entry.name ?? '').trim();
+  const defaultValue = Math.trunc(Number.isFinite(parseFloat(entry.defaultValue)) ? parseFloat(entry.defaultValue) : 0);
+  const runtimeRaw = Number.isFinite(parseFloat(entry.runtimeValue)) ? parseFloat(entry.runtimeValue) : defaultValue;
+  return { name, defaultValue, runtimeValue: Math.trunc(runtimeRaw) };
+}
+
+function normalizeGameBoolEntry(entry = {}) {
+  const name = String(entry.name ?? '').trim();
+  const defaultValue = !!entry.defaultValue;
+  const runtimeValue = entry.runtimeValue === undefined ? defaultValue : !!entry.runtimeValue;
+  return { name, defaultValue, runtimeValue };
+}
+
+function getGameVar(name) {
+  const key = String(name ?? '').trim();
+  const entry = gameVars.find(item => item.name === key);
+  return entry ? entry.runtimeValue : 0;
+}
+
+function hasGameVar(name) {
+  const key = String(name ?? '').trim();
+  return !!key && gameVars.some(item => item.name === key);
+}
+
+function setGameVar(name, value) {
+  const key = String(name ?? '').trim();
+  const entry = gameVars.find(item => item.name === key);
+  const nextValue = Math.trunc(Number.isFinite(parseFloat(value)) ? parseFloat(value) : 0);
+  if (entry) {
+    entry.runtimeValue = nextValue;
+    refreshVarPanel();
+    return;
+  }
+  if (key) _runtimeNumericOverrides.set(key, nextValue);
+}
+
+function getGameBool(name) {
+  const key = String(name ?? '').trim();
+  const entry = gameBools.find(item => item.name === key);
+  return entry ? entry.runtimeValue : false;
+}
+
+function setGameBool(name, value) {
+  const key = String(name ?? '').trim();
+  const entry = gameBools.find(item => item.name === key);
+  if (!entry) return;
+  entry.runtimeValue = !!value;
+  refreshBoolPanel();
+}
+
+function resetGameValueState() {
+  for (const entry of gameVars) entry.runtimeValue = entry.defaultValue;
+  for (const entry of gameBools) entry.runtimeValue = entry.defaultValue;
+  _runtimeNumericOverrides.clear();
+  refreshVarPanel();
+  refreshBoolPanel();
+}
+
+function getKnownVarNames(extra = []) {
+  return [...new Set([...gameVars.map(item => item.name).filter(Boolean), ...extra.filter(Boolean)])];
+}
+
+function getKnownBoolNames(extra = []) {
+  return [...new Set([...gameBools.map(item => item.name).filter(Boolean), ...extra.filter(Boolean)])];
+}
+
+function resolveValueSource(sourceType, numericValue, variableName) {
+  if (sourceType === 'var') return getGameVar(variableName);
+  return Number.isFinite(parseFloat(numericValue)) ? parseFloat(numericValue) : 0;
+}
+
 function normalizeTouchRef(value) {
   return String(value ?? '').trim().toLowerCase();
+}
+
+function isPlayerTouchingMesh(mesh) {
+  if (!mesh) return false;
+  const pH = gameRules.height;
+  _tmpAABB.setFromObject(mesh);
+  return (
+    fpsPos.x + PLAYER_RADIUS > _tmpAABB.min.x &&
+    fpsPos.x - PLAYER_RADIUS < _tmpAABB.max.x &&
+    fpsPos.z + PLAYER_RADIUS > _tmpAABB.min.z &&
+    fpsPos.z - PLAYER_RADIUS < _tmpAABB.max.z &&
+    fpsPos.y + pH > _tmpAABB.min.y &&
+    fpsPos.y < _tmpAABB.max.y
+  );
 }
 
 function isPlayerTouchingRef(refType, refValue) {
   const needle = normalizeTouchRef(refValue);
   if (!needle) return false;
 
-  playerBox.min.set(fpsPos.x - PLAYER_RADIUS, fpsPos.y, fpsPos.z - PLAYER_RADIUS);
-  playerBox.max.set(fpsPos.x + PLAYER_RADIUS, fpsPos.y + gameRules.height, fpsPos.z + PLAYER_RADIUS);
-
   for (const m of sceneObjects) {
     const match = refType === 'name'
       ? normalizeTouchRef(m.userData.label) === needle
       : meshHasGroup(m, needle);
     if (!match) continue;
-    _tmpAABB.setFromObject(m);
-    if (playerBox.intersectsBox(_tmpAABB)) return true;
+    if (isPlayerTouchingMesh(m)) return true;
   }
 
   return false;
 }
 
 function getRuntimeValueByKey(key, context = null) {
+  const namedKey = String(key ?? '').trim();
+  if (hasGameVar(namedKey)) return getGameVar(namedKey);
+  if (_runtimeNumericOverrides.has(namedKey)) return _runtimeNumericOverrides.get(namedKey);
   if (key === 'touching') return isPlayerTouchingRef(context?.touchRefType ?? 'group', context?.touchRefValue ?? '') ? 1 : 0;
   if (key === 'hits') return fpsHits;
   if (key === 'health') return fpsHealth;
@@ -3747,6 +7405,9 @@ function getRuntimeValueByKey(key, context = null) {
 }
 
 function getCtSourceValue(key, ct = null) {
+  if (key === 'var') return getGameVar(ct?.varCondName);
+  if (key === 'bool') return getGameBool(ct?.boolCondName) ? 1 : 0;
+  if (String(key).startsWith('var:')) return getGameVar(String(key).slice(4));
   return getRuntimeValueByKey(key, ct);
 }
 
@@ -3762,7 +7423,9 @@ function compareCtValues(a, op, b) {
 
 function resolveCtActionMath(ct) {
   const baseKey = (ct.actionBase ?? 'none');
-  const amount = parseFloat(ct.actionValue);
+  const amount = ct.actionValueType === 'var'
+    ? getGameVar(ct.actionValueVar)
+    : parseFloat(ct.actionValue);
   const amountVal = Number.isFinite(amount) ? amount : 0;
   if (!baseKey || baseKey === 'none') return amountVal;
 
@@ -3787,10 +7450,13 @@ function evaluateConditionalTriggers() {
   const now = performance.now() / 1000;
   for (const ct of sorted) {
     const isTouchCondition = ct.conditionType === 'touching';
+    const isBoolCondition = ct.conditionType === 'bool';
     const condVal = getCtSourceValue(ct.conditionType, ct);
-    const condOpRaw = isTouchCondition ? '=' : (ct.condOp ?? ct.op ?? '=');
+    const condOpRaw = (isTouchCondition || isBoolCondition) ? '=' : (ct.condOp ?? ct.op ?? '=');
     const condOp = condOpRaw === '==' ? '=' : condOpRaw;
-    const condValue = isTouchCondition ? 1 : (Number.isFinite(parseFloat(ct.value)) ? parseFloat(ct.value) : 0);
+    const condValue = (isTouchCondition || isBoolCondition)
+      ? 1
+      : (ct.valueType === 'var' ? getGameVar(ct.valueVarName) : (Number.isFinite(parseFloat(ct.value)) ? parseFloat(ct.value) : 0));
 
     // Backward compatibility: old data used op='is' or op='not'.
     const legacySense = ct.op === 'not' ? 'not' : (ct.op === 'is' ? 'is' : null);
@@ -3850,8 +7516,9 @@ function resolveCtValue(ruleKey, expr) {
     const ref = match[1];
     const op = match[2];
     const num = parseFloat(match[3]);
-    const runtimeBase = getRuntimeValueByKey(ref);
-    const base = runtimeBase || (parseFloat(ref) || 0);
+    const base = hasGameVar(ref)
+      ? getGameVar(ref)
+      : (Number.isFinite(parseFloat(ref)) ? parseFloat(ref) : getRuntimeValueByKey(ref));
     if (op === '+') return base + num;
     if (op === '-') return base - num;
     if (op === '*') return base * num;
@@ -3860,11 +7527,15 @@ function resolveCtValue(ruleKey, expr) {
   const num = parseFloat(s);
   if (Number.isFinite(num)) return num;
   // Bare variable reference
-  return getRuntimeValueByKey(s);
+  return hasGameVar(s) ? getGameVar(s) : getRuntimeValueByKey(s);
 }
 
 function applyCtAction(ruleKey, expr) {
   if (!ruleKey) return;
+  if (String(ruleKey).startsWith('var:')) {
+    setGameVar(String(ruleKey).slice(4), resolveCtValue(ruleKey, expr));
+    return;
+  }
   const val = resolveCtValue(ruleKey, expr);
   if (ruleKey === 'health') {
     fpsHealth = Math.max(0, Math.min(gameRules.maxHealth, val));
@@ -3890,6 +7561,7 @@ function applyCtAction(ruleKey, expr) {
 function syncGameruleUI() {
   grJumpInput.value    = gameRules.jumpHeight;
   grGravityInput.value = gameRules.gravity;
+  if (grGravityEnabledInput) grGravityEnabledInput.checked = !!gameRules.gravityEnabled;
   grHeightInput.value  = gameRules.height;
   grSprintInput.value  = gameRules.sprintSpeed;
   grMaxHpInput.value   = gameRules.maxHealth;
@@ -3898,10 +7570,12 @@ function syncGameruleUI() {
   grFallDmgMultInput.value  = gameRules.fallDamageMultiplier;
   grSpawnProtTimeInput.value = gameRules.spawnProtectTime;
   grSpawnProtCondInput.value = gameRules.spawnProtectCondition;
+  refreshPlayerProfileUI();
 }
 
 function startPlaytest() {
   if (state.isPlaytest) return;
+  stopLibraryPreviewAudio();
   // Reset any editor simulation before starting playtest
   if (_simActive || _simBasePositions.size) resetSimulation();
   state.isPlaytest = true;
@@ -3919,14 +7593,25 @@ function startPlaytest() {
   fpsSpawnLanded = false;
   _controlFunctionStates.clear();
   _playtestBasePositions.clear();
+  _playtestBaseRotations.clear();
   _playtestPrevPositions.clear();
+  _playtestPrevRotations.clear();
   _playtestPrevAABBs.clear();
   _triggerMoveStates.clear();
+  _triggerRotateStates.clear();
+  _movementPathStates.clear();
   _activeTriggerCalls.clear();
+  clearRuntimeFunctionStops();
+  clearAllRuntimeAudio();
+  _pausedFunctionKeys.clear();
+  activeCheckpointMeshUuid = null;
+  _activeTouchCheckpoints.clear();
   for (const m of sceneObjects) {
     const pos = m.position.clone();
     _playtestBasePositions.set(m, pos);
+    _playtestBaseRotations.set(m, m.quaternion.clone());
     _playtestPrevPositions.set(m, pos.clone());
+    _playtestPrevRotations.set(m, m.quaternion.clone());
     _playtestPrevAABBs.set(m, new THREE.Box3().setFromObject(m));
   }
 
@@ -3945,6 +7630,7 @@ function startPlaytest() {
   for (const m of sceneObjects) {
     if (m.userData.type === 'light' && m.userData.pointLight) {
       m.material.visible = false;
+      if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = false;
       m.castShadow = false;
       m.userData._playtestHidden = true;
     }
@@ -3954,6 +7640,7 @@ function startPlaytest() {
   for (const m of sceneObjects) {
     if (m.userData.type === 'spawn' || m.userData.type === 'trigger') {
       m.material.visible = false;
+      if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = false;
       m.userData._playtestHidden = true;
     }
   }
@@ -3987,6 +7674,7 @@ function startPlaytest() {
 }
 
 function _cleanupPlaytest() {
+  closeRuntimeKeypadOverlay();
   // Restore dedicated light block visibility
   for (const m of sceneObjects) {
     if (m.userData.type === 'light' && m.userData.pointLight) {
@@ -4011,16 +7699,28 @@ function _cleanupPlaytest() {
   for (const m of sceneObjects) {
     const basePos = _playtestBasePositions.get(m);
     if (basePos) m.position.copy(basePos);
+    const baseQuat = _playtestBaseRotations.get(m);
+    if (baseQuat) m.quaternion.copy(baseQuat);
     m.userData._playtestHidden = false;
     m.visible = true;
   }
   _playtestBasePositions.clear();
+  _playtestBaseRotations.clear();
   _playtestPrevPositions.clear();
+  _playtestPrevRotations.clear();
   _playtestPrevAABBs.clear();
   _triggerMoveStates.clear();
+  _triggerRotateStates.clear();
+  _movementPathStates.clear();
   _activeTriggerCalls.clear();
+  clearRuntimeFunctionStops();
+  clearAllRuntimeAudio();
+  _pausedFunctionKeys.clear();
+  activeCheckpointMeshUuid = null;
+  _activeTouchCheckpoints.clear();
   for (const [m, hex] of savedTargetColors) m.material.color.setHex(hex);
   savedTargetColors.clear();
+  for (const m of sceneObjects) applyCustomSkinToMesh(m);
   fpsKeys.clear();
   editKeys.clear();
   _activeTriggers.clear();
@@ -4056,6 +7756,10 @@ function stopPlaytest(options = {}) {
 document.addEventListener('pointerlockchange', () => {
   fpsLocked = document.pointerLockElement === renderer.domElement;
   if (!fpsLocked && state.isPlaytest) {
+    if (suppressPointerUnlockStop) {
+      suppressPointerUnlockStop = false;
+      return;
+    }
     if (runtimeMode) {
       pauseRuntimeGame();
       return;
@@ -4074,16 +7778,19 @@ document.addEventListener('mousemove', e => {
 // ─── Canvas pointer events ────────────────────────────────────────────────────
 let pDownPos = null;
 renderer.domElement.addEventListener('pointerdown', e => {
+  if (e.button !== 0) return;
   pDownPos = { x: e.clientX, y: e.clientY };
 });
 renderer.domElement.addEventListener('pointerup', e => {
+  if (e.button !== 0) return;
   if (!pDownPos) return;
   const dx = e.clientX - pDownPos.x;
   const dy = e.clientY - pDownPos.y;
   pDownPos = null;
-  if (Math.hypot(dx, dy) > 5) return;          // drag → not a click
+  if (Math.hypot(dx, dy) > 5) return;          // drag -> not a click
   if (state.isPlaytest) {                       // playtest: lock or shoot
     if (runtimeMode && runtimePauseActive) return;
+    if (tryOpenRuntimeKeypadFromPointerEvent(e)) return;
     if (!fpsLocked) renderer.domElement.requestPointerLock();
     else fpsShoot();
     return;
@@ -4092,13 +7799,31 @@ renderer.domElement.addEventListener('pointerup', e => {
   handleEditorClick(e);
 });
 
+renderer.domElement.addEventListener('contextmenu', e => {
+  if (state.isPlaytest && pickKeypadMeshFromPointerEvent(e)) e.preventDefault();
+});
+
 function handleEditorClick(e) {
   if (runtimeMode) return;
   const ndc = toNDC(e);
+
+  if (state.colorPickArmed) {
+    const hit = surfaceHit(ndc);
+    if (hit?.object?.material?.color) {
+      const hex = hit.object.material.color.getHex();
+      state.brushColor = hex;
+      if (paintColorInput) paintColorInput.value = colorHexToCss(hex);
+    }
+    state.colorPickArmed = false;
+    refreshStatus();
+    return;
+  }
+
   if (state.mode === 'place') {
+    const shapeParams = getPlacementShapeParams(state.placingType);
     const hit = surfaceHit(ndc);
     if (hit) {
-      const pos = computeSurfacePlacement(hit.point, hit.normal, state.placingType, state.cloneScale);
+      const pos = computeSurfacePlacement(hit.point, hit.normal, state.placingType, state.cloneScale, shapeParams);
       snapSurface(pos, hit.normal);
       placeObject(pos);
       return;
@@ -4106,9 +7831,13 @@ function handleEditorClick(e) {
     const pt = groundPoint(ndc);
     if (pt) {
       snap(pt);
-      placeObject(new THREE.Vector3(pt.x, DEFS[state.placingType].placedY, pt.z));
+      placeObject(new THREE.Vector3(pt.x, getPlacedY(state.placingType, shapeParams, state.cloneScale), pt.z));
     }
+  } else if (state.mode === 'paint') {
+    const hit = surfaceHit(ndc);
+    if (hit?.object) paintMesh(hit.object, state.brushColor);
   } else if (state.mode === 'select') {
+    if (tryApplyPathCheckpointViewportPick(ndc)) return;
     const obj = hitObject(ndc);
     if (e.shiftKey) {
       toggleMultiSelect(obj);
@@ -4119,19 +7848,51 @@ function handleEditorClick(e) {
   } else if (state.mode === 'delete') {
     const obj = hitObject(ndc);
     if (obj) deleteObject(obj);
+  } else if (state.mode === 'erase') {
+    const hit = surfaceHit(ndc);
+    if (hit?.object) eraseHoleAtHit(hit);
   }
 }
 
 renderer.domElement.addEventListener('pointermove', e => {
-  if (state.isPlaytest || state.mode !== 'place') { removeGhost(); return; }
+  if (state.isPlaytest || !['place', 'erase', 'paint'].includes(state.mode)) { removeGhost(); return; }
   const ndc = toNDC(e);
   lastPlaceNDC.copy(ndc);
 
+  if (state.mode === 'paint' && (e.buttons & 1) === 1) {
+    const hit = surfaceHit(ndc);
+    if (hit?.object) paintMesh(hit.object, state.brushColor);
+  }
+
+  if (state.mode === 'paint') {
+    removeGhost();
+    return;
+  }
+
+  if (state.mode === 'erase') {
+    ensureGhost(state.placingType);
+    const hit = surfaceHit(ndc);
+    if (hit) {
+      const pos = hit.point.clone().addScaledVector(hit.normal, THREE.MathUtils.clamp(state.eraserSize * 0.5, 0.05, 6));
+      snapSurface(pos, hit.normal);
+      ghost.position.copy(pos);
+      ghost.visible = true;
+      return;
+    }
+    const pt = groundPoint(ndc);
+    if (!pt) { if (ghost) ghost.visible = false; return; }
+    snap(pt);
+    ghost.position.set(pt.x, THREE.MathUtils.clamp(state.eraserSize * 0.5, 0.05, 6), pt.z);
+    ghost.visible = true;
+    return;
+  }
+
   // Try surface-snap first
+  const shapeParams = getPlacementShapeParams(state.placingType);
   const hit = surfaceHit(ndc);
   if (hit) {
     ensureGhost(state.placingType);
-    const pos = computeSurfacePlacement(hit.point, hit.normal, state.placingType, state.cloneScale);
+    const pos = computeSurfacePlacement(hit.point, hit.normal, state.placingType, state.cloneScale, shapeParams);
     snapSurface(pos, hit.normal);
     ghost.position.copy(pos);
     ghost.visible = true;
@@ -4143,7 +7904,7 @@ renderer.domElement.addEventListener('pointermove', e => {
   if (!pt) { if (ghost) ghost.visible = false; return; }
   snap(pt);
   ensureGhost(state.placingType);
-  ghost.position.set(pt.x, DEFS[state.placingType].placedY, pt.z);
+  ghost.position.set(pt.x, getPlacedY(state.placingType, shapeParams, state.cloneScale), pt.z);
   ghost.visible = true;
 });
 
@@ -4155,6 +7916,11 @@ function fpsShoot() {
   fpsRay.set(fpsCam.position, fpsCam.getWorldDirection(new THREE.Vector3()));
   const shootables = sceneObjects.filter(m => {
     if (m.userData.type === 'target' && !m.userData._dead) return true;
+    if (m.userData.type === 'checkpoint') {
+      const config = getMeshCheckpointConfig(m);
+      if (config.interaction === 'shoot') return true;
+      if (config.interaction === 'switch') return getMeshSwitchConfig(m).enabled;
+    }
     return getMeshSwitchConfig(m).enabled;
   });
   const hits = fpsRay.intersectObjects(shootables, false);
@@ -4177,7 +7943,18 @@ function fpsShoot() {
     }
   }
 
-  if (pressSwitch(target)) handled = true;
+  if (target.userData.type === 'checkpoint') {
+    const cpConfig = getMeshCheckpointConfig(target);
+    if (cpConfig.interaction === 'shoot' && activateCheckpoint(target)) handled = true;
+  }
+
+  const switchPressed = pressSwitch(target);
+  if (switchPressed) handled = true;
+  if (target.userData.type === 'checkpoint') {
+    const cpConfig = getMeshCheckpointConfig(target);
+    if (cpConfig.interaction === 'switch' && switchPressed && activateCheckpoint(target)) handled = true;
+  }
+
   if (handled) refreshStatus();
 }
 
@@ -4206,7 +7983,7 @@ window.addEventListener('keydown', e => {
       }
     }
 
-    if (e.code === 'KeyV' && !e.repeat) {
+    if (!runtimeMode && e.code === 'KeyV' && !e.repeat) {
       e.preventDefault();
       setPlaytestDevView(!fpsDevView);
       return;
@@ -4278,6 +8055,11 @@ window.addEventListener('keydown', e => {
       const obj = hits[0].object;
       setPlacingType(obj.userData.type);
       state.cloneScale = obj.scale.clone();
+      state.cloneShapeParams = normalizeShapeParams(obj.userData.type, obj.userData.shapeParams || {});
+      if (state.cloneShapeParams.sides != null) state.placeSides = state.cloneShapeParams.sides;
+      if (state.cloneShapeParams.depth != null) state.place2DDepth = state.cloneShapeParams.depth;
+      if (shapeSidesInput && state.cloneShapeParams.sides != null) shapeSidesInput.value = String(state.cloneShapeParams.sides);
+      if (shapeDepthInput && state.cloneShapeParams.depth != null) shapeDepthInput.value = r3(state.cloneShapeParams.depth, 2);
       removeGhost();
     }
     return;
@@ -4293,11 +8075,12 @@ window.addEventListener('keyup', e => {
 // ─── UI wiring ───────────────────────────────────────────────────────────────
 function setMode(mode) {
   state.mode = mode;
+  if (mode !== 'paint') state.colorPickArmed = false;
   Object.entries(modeButtons).forEach(([k, b]) => b.classList.toggle('active', k === mode));
   if (mode !== 'select') selectObject(null);
   transformGroup.style.opacity       = mode === 'select' ? '1'    : '.4';
   transformGroup.style.pointerEvents = mode === 'select' ? ''     : 'none';
-  if (mode !== 'place') removeGhost();
+  if (!['place', 'erase'].includes(mode)) removeGhost();
   refreshStatus();
 }
 
@@ -4311,7 +8094,59 @@ function setTransformMode(tm) {
 function setPlacingType(type) {
   state.placingType = type;
   state.cloneScale = null;
+  state.cloneShapeParams = null;
   document.querySelectorAll('.lib-btn').forEach(b => b.classList.toggle('active', b.dataset.type === type));
+  refreshStatus();
+}
+
+function setPlacementSides(val) {
+  state.placeSides = clampShapeSides(parseInt(val, 10));
+  if (shapeSidesInput) shapeSidesInput.value = String(state.placeSides);
+  if (state.cloneShapeParams?.sides != null) state.cloneShapeParams.sides = state.placeSides;
+  if (ghost && state.mode === 'place') removeGhost();
+  if (ghost && state.mode === 'erase') ensureEraserGhost();
+  saveEditorSettings();
+  refreshStatus();
+}
+
+function setPlacementDepth(val) {
+  state.place2DDepth = clampShapeDepth(parseFloat(val));
+  if (shapeDepthInput) shapeDepthInput.value = r3(state.place2DDepth, 2);
+  if (state.cloneShapeParams?.depth != null) state.cloneShapeParams.depth = state.place2DDepth;
+  if (ghost && state.mode === 'place') removeGhost();
+  saveEditorSettings();
+  refreshStatus();
+}
+
+function setPlacementOpacity(val) {
+  state.placeOpacity = clampMeshOpacity(parseFloat(val));
+  if (placeOpacityInput) placeOpacityInput.value = r3(state.placeOpacity, 2);
+  saveEditorSettings();
+  refreshStatus();
+}
+
+function setBrushColor(value) {
+  state.brushColor = parseCssColor(value, state.brushColor);
+  if (paintColorInput) paintColorInput.value = colorHexToCss(state.brushColor);
+  saveEditorSettings();
+  refreshStatus();
+}
+
+function setEraserShape(value) {
+  const allowed = ['box', 'sphere', 'cylinder', 'prism', 'square2d', 'triangle2d', 'circle2d', 'polygon2d'];
+  state.eraserShape = allowed.includes(value) ? value : 'box';
+  if (eraserShapeInput) eraserShapeInput.value = state.eraserShape;
+  if (state.mode === 'erase') ensureEraserGhost();
+  saveEditorSettings();
+  refreshStatus();
+}
+
+function setEraserSize(value) {
+  state.eraserSize = THREE.MathUtils.clamp(parseFloat(value) || 1, 0.1, 12);
+  if (eraserSizeInput) eraserSizeInput.value = r3(state.eraserSize, 2);
+  if (state.mode === 'erase') ensureEraserGhost();
+  saveEditorSettings();
+  refreshStatus();
 }
 
 function setSnap(val) {
@@ -4388,7 +8223,39 @@ function moveEditorCamera(dt) {
 
 Object.entries(modeButtons).forEach(([k, b]) => b.addEventListener('click', () => setMode(k)));
 Object.entries(transformButtons).forEach(([k, b]) => b.addEventListener('click', () => setTransformMode(k)));
-document.querySelectorAll('.lib-btn').forEach(b => b.addEventListener('click', () => setPlacingType(b.dataset.type)));
+document.querySelectorAll('.lib-btn').forEach(b => {
+  b.addEventListener('click', () => setPlacingType(b.dataset.type));
+  b.addEventListener('contextmenu', e => {
+    if (runtimeMode || state.isPlaytest) return;
+    e.preventDefault();
+    const type = b.dataset.type;
+    showLibraryContextMenu(type, e.clientX, e.clientY);
+  });
+});
+libraryPaneButtons.forEach(btn => {
+  btn.addEventListener('click', () => setLibraryPane(btn.dataset.libPane));
+});
+
+document.addEventListener('pointerdown', e => {
+  const target = e.target;
+  if (libraryContextMenuEl && libraryContextMenuEl.contains(target)) return;
+  if (keypadContextMenuEl && keypadContextMenuEl.contains(target)) return;
+  closeTransientMenus();
+});
+
+window.addEventListener('resize', () => {
+  closeTransientMenus();
+});
+
+if (audioImportBtn && audioImportInput) {
+  audioImportBtn.addEventListener('click', () => audioImportInput.click());
+  audioImportInput.addEventListener('change', async () => {
+    const files = audioImportInput.files;
+    await importAudioFiles(files);
+    audioImportInput.value = '';
+    saveEditorSettings();
+  });
+}
 
 snapSelect.addEventListener('change', () => { setSnap(snapSelect.value); saveEditorSettings(); });
 lightIntensityInput.addEventListener('change', () => setDefaultLightIntensity(lightIntensityInput.value));
@@ -4401,11 +8268,25 @@ topMenuSelect.addEventListener('change', () => setTopMenu(topMenuSelect.value));
 if (scaleSideXSelect) scaleSideXSelect.addEventListener('change', () => { state.scaleSides.x = scaleSideXSelect.value === 'neg' ? 'neg' : 'pos'; refreshStatus(); });
 if (scaleSideYSelect) scaleSideYSelect.addEventListener('change', () => { state.scaleSides.y = scaleSideYSelect.value === 'neg' ? 'neg' : 'pos'; refreshStatus(); });
 if (scaleSideZSelect) scaleSideZSelect.addEventListener('change', () => { state.scaleSides.z = scaleSideZSelect.value === 'neg' ? 'neg' : 'pos'; refreshStatus(); });
+if (shapeSidesInput) shapeSidesInput.addEventListener('change', () => setPlacementSides(shapeSidesInput.value));
+if (shapeDepthInput) shapeDepthInput.addEventListener('change', () => setPlacementDepth(shapeDepthInput.value));
+if (placeOpacityInput) placeOpacityInput.addEventListener('change', () => setPlacementOpacity(placeOpacityInput.value));
+if (paintColorInput) paintColorInput.addEventListener('input', () => setBrushColor(paintColorInput.value));
+if (eraserShapeInput) eraserShapeInput.addEventListener('change', () => setEraserShape(eraserShapeInput.value));
+if (eraserSizeInput) eraserSizeInput.addEventListener('change', () => setEraserSize(eraserSizeInput.value));
+if (pickColorBtn) {
+  pickColorBtn.addEventListener('click', () => {
+    state.colorPickArmed = true;
+    setMode('paint');
+    refreshStatus();
+  });
+}
 syncScaleSideUI();
 
 // Gamerule inputs
 grJumpInput.addEventListener('change', () => { gameRules.jumpHeight = parseFloat(grJumpInput.value) || 8.5; });
 grGravityInput.addEventListener('change', () => { gameRules.gravity = parseFloat(grGravityInput.value) || 24; });
+if (grGravityEnabledInput) grGravityEnabledInput.addEventListener('change', () => { gameRules.gravityEnabled = !!grGravityEnabledInput.checked; });
 grHeightInput.addEventListener('change', () => {
   gameRules.height = parseFloat(grHeightInput.value) || 1.75;
   gameRules.eyeHeight = gameRules.height - 0.15;
@@ -4417,6 +8298,50 @@ grFallDmgMinHtInput.addEventListener('change', () => { gameRules.fallDamageMinHe
 grFallDmgMultInput.addEventListener('change', () => { gameRules.fallDamageMultiplier = Math.max(0, parseFloat(grFallDmgMultInput.value) || 1); });
 grSpawnProtTimeInput.addEventListener('change', () => { gameRules.spawnProtectTime = Math.max(0, parseFloat(grSpawnProtTimeInput.value) || 0); });
 grSpawnProtCondInput.addEventListener('change', () => { gameRules.spawnProtectCondition = grSpawnProtCondInput.value; });
+if (playerNameInput) {
+  playerNameInput.addEventListener('change', () => {
+    playerProfile.name = String(playerNameInput.value || '').trim() || 'Player';
+    playerNameInput.value = playerProfile.name;
+  });
+}
+if (playerGroupsInput) {
+  playerGroupsInput.addEventListener('change', () => {
+    playerProfile.groups = normalizeGroupListValue(playerGroupsInput.value);
+    playerGroupsInput.value = playerProfile.groups.join(', ');
+    refreshPlayerProfileUI();
+  });
+}
+if (btnAddVar) {
+  btnAddVar.addEventListener('click', () => {
+    gameVars.push(normalizeGameVarEntry({
+      name: buildNextAvailableName('var', gameVars),
+      defaultValue: 0,
+      runtimeValue: 0,
+    }));
+    refreshVarPanel();
+    refreshCondTriggerUI();
+    refreshControlFunctionsUI();
+  });
+}
+if (btnAddBool) {
+  btnAddBool.addEventListener('click', () => {
+    gameBools.push(normalizeGameBoolEntry({
+      name: buildNextAvailableName('bool', gameBools),
+      defaultValue: false,
+      runtimeValue: false,
+    }));
+    refreshBoolPanel();
+    refreshCondTriggerUI();
+    refreshControlFunctionsUI();
+  });
+}
+if (btnResetValues) {
+  btnResetValues.addEventListener('click', () => {
+    resetGameValueState();
+    refreshCondTriggerUI();
+    refreshControlFunctionsUI();
+  });
+}
 
 // Grid fill controls
 function setGridFill(enabled, color) {
@@ -4493,6 +8418,11 @@ loadInput.addEventListener('change', () => {
 
 document.getElementById('btn-playtest').addEventListener('click', startPlaytest);
 document.getElementById('btn-stop').addEventListener('click', stopPlaytest);
+if (btnResetCheckpoints) {
+  btnResetCheckpoints.addEventListener('click', () => {
+    resetActiveCheckpointToWorldSpawn({ respawnNow: state.isPlaytest });
+  });
+}
 if (btnSaveProject) btnSaveProject.addEventListener('click', saveProjectToLibrary);
 if (btnBackMenu) btnBackMenu.addEventListener('click', showMainMenu);
 
@@ -4502,6 +8432,15 @@ if (sidebarToggleBtn) {
     e.stopPropagation();
     sidebarState.collapsed = !sidebarState.collapsed;
     applySidebarState();
+  });
+}
+
+if (functionsToggleBtn) {
+  functionsToggleBtn.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    functionsPanelState.collapsed = !functionsPanelState.collapsed;
+    applyFunctionsPanelState();
   });
 }
 
@@ -4516,20 +8455,45 @@ if (sidebarResizerEl) {
   });
 }
 
+if (functionsResizerEl) {
+  functionsResizerEl.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || functionsPanelState.collapsed || e.target === functionsToggleBtn) return;
+    functionsPanelState.resizing = true;
+    if (workspaceEl) workspaceEl.classList.add('functions-resizing');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+}
+
 window.addEventListener('pointermove', e => {
-  if (!sidebarState.resizing || !workspaceEl) return;
+  if (!workspaceEl) return;
   const rect = workspaceEl.getBoundingClientRect();
-  sidebarState.width = clampSidebarWidth(e.clientX - rect.left);
-  applySidebarState({ save: false, reflow: true });
+  if (sidebarState.resizing) {
+    sidebarState.width = clampSidebarWidth(e.clientX - rect.left);
+    applySidebarState({ save: false, reflow: true });
+  }
+  if (functionsPanelState.resizing) {
+    functionsPanelState.width = clampFunctionsPanelWidth(rect.right - e.clientX);
+    applyFunctionsPanelState({ save: false, reflow: true });
+  }
 });
 
 window.addEventListener('pointerup', stopSidebarResize);
+window.addEventListener('pointerup', stopFunctionsPanelResize);
 window.addEventListener('pointercancel', stopSidebarResize);
+window.addEventListener('pointercancel', stopFunctionsPanelResize);
 window.addEventListener('resize', () => {
   const nextWidth = clampSidebarWidth(sidebarState.width);
-  if (nextWidth === sidebarState.width) return;
-  sidebarState.width = nextWidth;
-  applySidebarState({ save: true, reflow: false });
+  if (nextWidth !== sidebarState.width) {
+    sidebarState.width = nextWidth;
+    applySidebarState({ save: true, reflow: false });
+  }
+  const nextFnWidth = clampFunctionsPanelWidth(functionsPanelState.width);
+  if (nextFnWidth !== functionsPanelState.width) {
+    functionsPanelState.width = nextFnWidth;
+    applyFunctionsPanelState({ save: true, reflow: false });
+  }
 });
 
 if (mmNewBtn) mmNewBtn.addEventListener('click', startNewProject);
@@ -4700,6 +8664,223 @@ function bindSolidToggle(mesh) {
   });
 }
 
+function bindSolidnessProps(mesh) {
+  const rangeInput = document.getElementById('prop-solidness-range');
+  const numberInput = document.getElementById('prop-solidness-number');
+  if (!rangeInput || !numberInput || state.selectedObject !== mesh) return;
+
+  const targets = getPropertyTargets(mesh).filter(t => t.userData.solid !== undefined);
+  if (!targets.length) return;
+
+  let before = new Map(targets.map(t => [t, clampMeshSolidness(t.userData.solidness ?? 1)]));
+
+  const syncValue = value => {
+    const v = clampMeshSolidness(parseFloat(value));
+    rangeInput.value = v;
+    numberInput.value = r3(v, 2);
+    for (const t of targets) t.userData.solidness = v;
+  };
+
+  const commit = value => {
+    const v = clampMeshSolidness(parseFloat(value));
+    for (const t of targets) {
+      const b = before.get(t);
+      if (b !== undefined && Math.abs(b - v) > 0.0001) {
+        pushUndo({ type: 'solidness', mesh: t, before: b, after: v });
+      }
+    }
+    before = new Map(targets.map(t => [t, clampMeshSolidness(t.userData.solidness ?? 1)]));
+    syncValue(v);
+  };
+
+  rangeInput.addEventListener('pointerdown', () => { before = new Map(targets.map(t => [t, clampMeshSolidness(t.userData.solidness ?? 1)])); });
+  rangeInput.addEventListener('input', () => syncValue(rangeInput.value));
+  rangeInput.addEventListener('change', () => commit(rangeInput.value));
+  numberInput.addEventListener('focus', () => { before = new Map(targets.map(t => [t, clampMeshSolidness(t.userData.solidness ?? 1)])); });
+  numberInput.addEventListener('input', () => syncValue(numberInput.value));
+  numberInput.addEventListener('change', () => commit(numberInput.value));
+}
+
+function bindOpacityProps(mesh) {
+  const rangeInput = document.getElementById('prop-opacity-range');
+  const numberInput = document.getElementById('prop-opacity-number');
+  if (!rangeInput || !numberInput || state.selectedObject !== mesh) return;
+
+  const targets = getPropertyTargets(mesh).filter(t => t.material);
+  if (!targets.length) return;
+
+  let before = new Map(targets.map(t => [t, clampMeshOpacity(t.userData.opacity ?? t.material.opacity ?? 1)]));
+
+  const syncValue = value => {
+    const v = clampMeshOpacity(parseFloat(value));
+    rangeInput.value = v;
+    numberInput.value = r3(v, 2);
+    for (const t of targets) setMeshOpacity(t, v);
+  };
+
+  const commit = value => {
+    const v = clampMeshOpacity(parseFloat(value));
+    for (const t of targets) {
+      const b = before.get(t);
+      if (b !== undefined && Math.abs(b - v) > 0.0001) {
+        pushUndo({ type: 'opacity', mesh: t, before: b, after: v });
+      }
+    }
+    before = new Map(targets.map(t => [t, clampMeshOpacity(t.userData.opacity ?? t.material.opacity ?? 1)]));
+    syncValue(v);
+  };
+
+  rangeInput.addEventListener('pointerdown', () => { before = new Map(targets.map(t => [t, clampMeshOpacity(t.userData.opacity ?? t.material.opacity ?? 1)])); });
+  rangeInput.addEventListener('input', () => syncValue(rangeInput.value));
+  rangeInput.addEventListener('change', () => commit(rangeInput.value));
+  numberInput.addEventListener('focus', () => { before = new Map(targets.map(t => [t, clampMeshOpacity(t.userData.opacity ?? t.material.opacity ?? 1)])); });
+  numberInput.addEventListener('input', () => syncValue(numberInput.value));
+  numberInput.addEventListener('change', () => commit(numberInput.value));
+}
+
+function buildCollisionConfigSnapshot(mesh) {
+  return {
+    collisionMode: getMeshCollisionMode(mesh),
+    hitboxConfig: normalizeHitboxConfig(getMeshHitboxConfig(mesh)),
+  };
+}
+
+function bindCollisionProps(mesh) {
+  const collisionModeInput = document.getElementById('prop-collision-mode');
+  if (!collisionModeInput || state.selectedObject !== mesh) return;
+
+  const targets = getPropertyTargets(mesh);
+  if (!targets.length) return;
+
+  const applyToTargets = buildNext => {
+    let changed = false;
+    for (const target of targets) {
+      const before = buildCollisionConfigSnapshot(target);
+      const after = buildNext(before, target);
+      if (!after) continue;
+      const beforeSig = JSON.stringify(before);
+      const nextState = {
+        collisionMode: after.collisionMode === 'geometry' ? 'geometry' : 'aabb',
+        hitboxConfig: normalizeHitboxConfig(after.hitboxConfig),
+      };
+      if (beforeSig === JSON.stringify(nextState)) continue;
+      applyMeshCollisionConfig(target, nextState);
+      pushUndo({ type: 'collision-config', mesh: target, before, after: nextState });
+      changed = true;
+    }
+    if (changed) refreshProps();
+  };
+
+  collisionModeInput.addEventListener('change', () => {
+    applyToTargets(before => ({ ...before, collisionMode: collisionModeInput.value }));
+  });
+
+  const hitboxModeInput = document.getElementById('prop-hitbox-mode');
+  if (hitboxModeInput) {
+    hitboxModeInput.addEventListener('change', () => {
+      applyToTargets(before => ({
+        ...before,
+        collisionMode: 'aabb',
+        hitboxConfig: { ...before.hitboxConfig, mode: hitboxModeInput.value === 'manual' ? 'manual' : 'auto' },
+      }));
+    });
+  }
+
+  const offsetInputs = ['x', 'y', 'z'].map(axis => document.getElementById(`prop-hitbox-offset-${axis}`));
+  const sizeInputs = ['x', 'y', 'z'].map(axis => document.getElementById(`prop-hitbox-size-${axis}`));
+
+  if (offsetInputs.every(Boolean)) {
+    const handler = () => {
+      applyToTargets(before => ({
+        ...before,
+        collisionMode: 'aabb',
+        hitboxConfig: {
+          ...before.hitboxConfig,
+          mode: 'manual',
+          offset: offsetInputs.map(input => parseFloat(input.value) || 0),
+        },
+      }));
+    };
+    offsetInputs.forEach(input => input.addEventListener('change', handler));
+  }
+
+  if (sizeInputs.every(Boolean)) {
+    const handler = () => {
+      applyToTargets(before => ({
+        ...before,
+        collisionMode: 'aabb',
+        hitboxConfig: {
+          ...before.hitboxConfig,
+          mode: 'manual',
+          size: sizeInputs.map(input => Math.abs(parseFloat(input.value) || 0.05)),
+        },
+      }));
+    };
+    sizeInputs.forEach(input => input.addEventListener('change', handler));
+  }
+
+  document.getElementById('prop-hitbox-autofit')?.addEventListener('click', () => {
+    applyToTargets((before, target) => {
+      const autoBox = computeAutoHitboxBox(target, new THREE.Vector3(), new THREE.Vector3());
+      return {
+        ...before,
+        collisionMode: 'aabb',
+        hitboxConfig: {
+          mode: 'manual',
+          offset: autoBox.center.toArray(),
+          size: autoBox.size.toArray(),
+        },
+      };
+    });
+  });
+}
+
+function bindShapeParamProps(mesh) {
+  const sidesInput = document.getElementById('prop-shape-sides');
+  const depthInput = document.getElementById('prop-shape-depth');
+  if ((!sidesInput && !depthInput) || state.selectedObject !== mesh) return;
+
+  const type = mesh.userData.type;
+  const def = DEFS[type];
+  if (!def) return;
+
+  const targets = getPropertyTargets(mesh).filter(t => t.userData.type === type);
+  if (!targets.length) return;
+
+  const applyShapeToTargets = patch => {
+    for (const t of targets) {
+      const beforeParams = normalizeShapeParams(type, t.userData.shapeParams || {});
+      const nextParams = normalizeShapeParams(type, { ...beforeParams, ...patch });
+      if (JSON.stringify(beforeParams) === JSON.stringify(nextParams)) continue;
+
+      const beforeGeo = t.geometry.clone();
+      const afterGeo = buildTypeGeometry(type, nextParams);
+      t.userData.shapeParams = nextParams;
+      setMeshGeometry(t, afterGeo);
+      pushUndo({
+        type: 'shape',
+        mesh: t,
+        beforeParams,
+        afterParams: nextParams,
+        beforeGeo,
+        afterGeo: afterGeo.clone(),
+      });
+    }
+    refreshProps();
+  };
+
+  if (sidesInput) {
+    sidesInput.addEventListener('change', () => {
+      applyShapeToTargets({ sides: clampShapeSides(parseInt(sidesInput.value, 10)) });
+    });
+  }
+  if (depthInput) {
+    depthInput.addEventListener('change', () => {
+      applyShapeToTargets({ depth: clampShapeDepth(parseFloat(depthInput.value)) });
+    });
+  }
+}
+
 function bindTractionToggle(mesh) {
   const toggle = document.getElementById('prop-traction-toggle');
   if (!toggle || state.selectedObject !== mesh) return;
@@ -4720,7 +8901,7 @@ function isSwitchableObjectType(type) {
 function isControlActionHost(mesh) {
   if (!mesh) return false;
   if (mesh.userData.type === 'trigger') return true;
-  return isSwitchableObjectType(mesh.userData.type) && getMeshSwitchConfig(mesh).enabled;
+  return isSwitchableObjectType(mesh.userData.type);
 }
 
 function bindSwitchProps(mesh) {
@@ -4742,12 +8923,13 @@ function bindSwitchProps(mesh) {
   const varInput = document.getElementById('prop-switch-var');
   const minInput = document.getElementById('prop-switch-min');
   const maxInput = document.getElementById('prop-switch-max');
+  const modeInput = document.getElementById('prop-switch-mode');
 
   if (varInput) {
     varInput.addEventListener('change', () => {
       for (const target of switchableTargets) {
         const config = getMeshSwitchConfig(target);
-        config.varKey = SWITCH_VAR_KEYS.includes(varInput.value) ? varInput.value : config.varKey;
+        config.varKey = String(varInput.value || '').trim() || config.varKey;
         target.userData.switchConfig = normalizeSwitchConfig(config);
       }
     });
@@ -4774,6 +8956,56 @@ function bindSwitchProps(mesh) {
       }
     });
   }
+
+  if (modeInput) {
+    modeInput.addEventListener('change', () => {
+      for (const target of switchableTargets) {
+        const config = getMeshSwitchConfig(target);
+        config.runMode = SWITCH_RUN_MODES.includes(modeInput.value) ? modeInput.value : config.runMode;
+        target.userData.switchConfig = normalizeSwitchConfig(config);
+      }
+    });
+  }
+}
+
+function bindKeypadProps(mesh) {
+  if (mesh.userData.type !== 'keypad' || state.selectedObject !== mesh) return;
+  const targets = getPropertyTargets(mesh).filter(target => target.userData.type === 'keypad');
+  if (!targets.length) return;
+
+  const titleInput = document.getElementById('prop-keypad-title');
+  const digitsInput = document.getElementById('prop-keypad-digits');
+  const offsetXInput = document.getElementById('prop-keypad-offset-x');
+  const offsetYInput = document.getElementById('prop-keypad-offset-y');
+
+  const applyToTargets = updater => {
+    for (const target of targets) {
+      const next = normalizeKeypadConfig(updater(getMeshKeypadConfig(target)));
+      target.userData.keypadConfig = next;
+    }
+    refreshProps();
+  };
+
+  if (titleInput) {
+    titleInput.addEventListener('change', () => {
+      applyToTargets(before => ({ ...before, title: titleInput.value }));
+    });
+  }
+  if (digitsInput) {
+    digitsInput.addEventListener('change', () => {
+      applyToTargets(before => ({ ...before, maxDigits: digitsInput.value }));
+    });
+  }
+  if (offsetXInput) {
+    offsetXInput.addEventListener('change', () => {
+      applyToTargets(before => ({ ...before, offsetX: offsetXInput.value }));
+    });
+  }
+  if (offsetYInput) {
+    offsetYInput.addEventListener('change', () => {
+      applyToTargets(before => ({ ...before, offsetY: offsetYInput.value }));
+    });
+  }
 }
 
 function bindGroupProp(mesh) {
@@ -4784,7 +9016,228 @@ function bindGroupProp(mesh) {
     input.value = val.join(', ');
     const targets = getPropertyTargets(mesh);
     for (const t of targets) setMeshGroups(t, val);
+    refreshPlayerProfileUI();
   });
+}
+
+function bindMovementPathProps(mesh) {
+  if (state.selectedObject !== mesh) return;
+
+  const pathTargets = getPropertyTargets(mesh).filter(m => !['spawn', 'checkpoint', 'trigger'].includes(m.userData.type));
+  if (!pathTargets.length) return;
+
+  const withConfig = updater => {
+    for (const target of pathTargets) {
+      const cfg = getMeshMovementPathConfig(target);
+      updater(cfg, target);
+      target.userData.movementPath = normalizeMovementPathConfig(cfg);
+    }
+    refreshSelectedPathPreview();
+  };
+
+  const enabledInput = document.getElementById('prop-path-enabled');
+  const speedInput = document.getElementById('prop-path-speed');
+  const loopInput = document.getElementById('prop-path-loop');
+  const addSelectedBtn = document.getElementById('prop-path-add-selected');
+  const addCameraBtn = document.getElementById('prop-path-add-camera');
+  const clearBtn = document.getElementById('prop-path-clear');
+
+  if (enabledInput) {
+    enabledInput.addEventListener('change', () => {
+      withConfig(cfg => { cfg.enabled = !!enabledInput.checked; });
+    });
+  }
+
+  if (speedInput) {
+    speedInput.addEventListener('change', () => {
+      const speed = Math.max(0.01, parseFloat(speedInput.value) || 0.01);
+      speedInput.value = r3(speed, 2);
+      withConfig(cfg => { cfg.speed = speed; });
+    });
+  }
+
+  if (loopInput) {
+    loopInput.addEventListener('change', () => {
+      withConfig(cfg => { cfg.loop = !!loopInput.checked; });
+    });
+  }
+
+  if (addSelectedBtn) {
+    addSelectedBtn.addEventListener('click', () => {
+      const pos = state.selectedObject ? state.selectedObject.position : mesh.position;
+      withConfig(cfg => {
+        cfg.checkpoints.push(normalizeMovementPathCheckpoint({ pos: [pos.x, pos.y, pos.z], functionName: '' }));
+      });
+      refreshProps();
+    });
+  }
+
+  if (addCameraBtn) {
+    addCameraBtn.addEventListener('click', () => {
+      const cam = activeCameraPosition();
+      withConfig(cfg => {
+        cfg.checkpoints.push(normalizeMovementPathCheckpoint({ pos: [cam.x, cam.y, cam.z], functionName: '' }));
+      });
+      refreshProps();
+    });
+  }
+
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      withConfig(cfg => { cfg.checkpoints = []; });
+      clearPathCheckpointViewportPick();
+      refreshProps();
+    });
+  }
+
+  document.querySelectorAll('.prop-path-x').forEach(input => {
+    input.addEventListener('change', () => {
+      const idx = parseInt(input.dataset.pathIndex, 10);
+      if (!Number.isFinite(idx)) return;
+      const value = parseFloat(input.value);
+      withConfig((cfg, target) => {
+        while (cfg.checkpoints.length <= idx) cfg.checkpoints.push(normalizeMovementPathCheckpoint({ pos: target.position.toArray() }));
+        const cp = normalizeMovementPathCheckpoint(cfg.checkpoints[idx]);
+        cp.pos[0] = Number.isFinite(value) ? value : cp.pos[0];
+        cfg.checkpoints[idx] = cp;
+      });
+    });
+  });
+
+  document.querySelectorAll('.prop-path-y').forEach(input => {
+    input.addEventListener('change', () => {
+      const idx = parseInt(input.dataset.pathIndex, 10);
+      if (!Number.isFinite(idx)) return;
+      const value = parseFloat(input.value);
+      withConfig((cfg, target) => {
+        while (cfg.checkpoints.length <= idx) cfg.checkpoints.push(normalizeMovementPathCheckpoint({ pos: target.position.toArray() }));
+        const cp = normalizeMovementPathCheckpoint(cfg.checkpoints[idx]);
+        cp.pos[1] = Number.isFinite(value) ? value : cp.pos[1];
+        cfg.checkpoints[idx] = cp;
+      });
+    });
+  });
+
+  document.querySelectorAll('.prop-path-z').forEach(input => {
+    input.addEventListener('change', () => {
+      const idx = parseInt(input.dataset.pathIndex, 10);
+      if (!Number.isFinite(idx)) return;
+      const value = parseFloat(input.value);
+      withConfig((cfg, target) => {
+        while (cfg.checkpoints.length <= idx) cfg.checkpoints.push(normalizeMovementPathCheckpoint({ pos: target.position.toArray() }));
+        const cp = normalizeMovementPathCheckpoint(cfg.checkpoints[idx]);
+        cp.pos[2] = Number.isFinite(value) ? value : cp.pos[2];
+        cfg.checkpoints[idx] = cp;
+      });
+    });
+  });
+
+  document.querySelectorAll('.prop-path-fn').forEach(input => {
+    input.addEventListener('change', () => {
+      const idx = parseInt(input.dataset.pathIndex, 10);
+      if (!Number.isFinite(idx)) return;
+      withConfig(cfg => {
+        while (cfg.checkpoints.length <= idx) cfg.checkpoints.push(normalizeMovementPathCheckpoint({ pos: [0, 0, 0] }));
+        const cp = normalizeMovementPathCheckpoint(cfg.checkpoints[idx]);
+        cp.functionName = input.value.trim();
+        cfg.checkpoints[idx] = cp;
+      });
+    });
+  });
+
+  document.querySelectorAll('.prop-path-set-sel').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.pathIndex, 10);
+      if (!Number.isFinite(idx)) return;
+      const pos = state.selectedObject ? state.selectedObject.position : mesh.position;
+      withConfig(cfg => {
+        while (cfg.checkpoints.length <= idx) cfg.checkpoints.push(normalizeMovementPathCheckpoint({ pos: [pos.x, pos.y, pos.z] }));
+        const cp = normalizeMovementPathCheckpoint(cfg.checkpoints[idx]);
+        cp.pos = [pos.x, pos.y, pos.z];
+        cfg.checkpoints[idx] = cp;
+      });
+      refreshProps();
+    });
+  });
+
+  document.querySelectorAll('.prop-path-pick').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.pathIndex, 10);
+      if (!Number.isFinite(idx)) return;
+      const selectedUuid = state.selectedObject?.uuid || '';
+      const isSamePick = !!(_pendingPathCheckpointPick && _pendingPathCheckpointPick.index === idx && _pendingPathCheckpointPick.meshUuids.includes(selectedUuid));
+      if (isSamePick) clearPathCheckpointViewportPick();
+      else armPathCheckpointViewportPick(pathTargets, idx);
+      refreshProps();
+      refreshStatus();
+    });
+  });
+
+  document.querySelectorAll('.prop-path-del').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.pathIndex, 10);
+      if (!Number.isFinite(idx)) return;
+      withConfig(cfg => {
+        if (idx >= 0 && idx < cfg.checkpoints.length) cfg.checkpoints.splice(idx, 1);
+      });
+      if (_pendingPathCheckpointPick && _pendingPathCheckpointPick.index === idx) clearPathCheckpointViewportPick();
+      refreshProps();
+    });
+  });
+}
+
+function bindCheckpointProps(mesh) {
+  const interactionInput = document.getElementById('prop-checkpoint-interaction');
+  if (!interactionInput || state.selectedObject !== mesh) return;
+
+  const checkpointTargets = getPropertyTargets(mesh).filter(t => t.userData.type === 'checkpoint');
+  if (!checkpointTargets.length) return;
+
+  interactionInput.addEventListener('change', () => {
+    const nextInteraction = CHECKPOINT_INTERACTIONS.includes(interactionInput.value)
+      ? interactionInput.value
+      : 'touch';
+    for (const target of checkpointTargets) {
+      const config = getMeshCheckpointConfig(target);
+      config.interaction = nextInteraction;
+      target.userData.checkpointConfig = normalizeCheckpointConfig(config);
+    }
+  });
+}
+
+function bindTriggerStopProps(mesh) {
+  const modeInput = document.getElementById('prop-trigger-stop-mode');
+  const fnInput = document.getElementById('prop-trigger-stop-fns');
+  if ((!modeInput && !fnInput) || state.selectedObject !== mesh) return;
+
+  const triggerTargets = getPropertyTargets(mesh).filter(t => t.userData.type === 'trigger');
+  if (!triggerTargets.length) return;
+
+  if (modeInput) {
+    modeInput.addEventListener('change', () => {
+      const nextMode = CONTROL_FUNCTION_STOP_MODES.includes(modeInput.value)
+        ? modeInput.value
+        : 'none';
+      for (const target of triggerTargets) {
+        const config = getMeshTriggerStopConfig(target);
+        config.mode = nextMode;
+        target.userData.triggerStopConfig = normalizeTriggerStopConfig(config);
+      }
+    });
+  }
+
+  if (fnInput) {
+    fnInput.addEventListener('change', () => {
+      const names = normalizeFunctionNameList(fnInput.value);
+      fnInput.value = names.join(', ');
+      for (const target of triggerTargets) {
+        const config = getMeshTriggerStopConfig(target);
+        config.functionNames = names;
+        target.userData.triggerStopConfig = normalizeTriggerStopConfig(config);
+      }
+      refreshProps();
+    });
+  }
 }
 
 function bindTargetHealthProp(mesh) {
@@ -5017,6 +9470,27 @@ function bindControlActions(mesh) {
     });
   });
 
+  // position value source type
+  document.querySelectorAll('.tr-cond-pos-type').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const ci = parseInt(sel.dataset.callIndex, 10);
+      const di = parseInt(sel.dataset.condIndex, 10);
+      if (!Number.isFinite(ci) || !Number.isFinite(di)) return;
+      withCond(ci, di, cond => { cond.posValueType = sel.value === 'var' ? 'var' : 'digits'; });
+      refreshProps();
+    });
+  });
+
+  // position value variable
+  document.querySelectorAll('.tr-cond-pos-var').forEach(input => {
+    input.addEventListener('change', () => {
+      const ci = parseInt(input.dataset.callIndex, 10);
+      const di = parseInt(input.dataset.condIndex, 10);
+      if (!Number.isFinite(ci) || !Number.isFinite(di)) return;
+      withCond(ci, di, cond => { cond.posValueVar = input.value.trim(); });
+    });
+  });
+
   // distance target
   document.querySelectorAll('.tr-cond-dist-target').forEach(input => {
     input.addEventListener('change', () => {
@@ -5047,6 +9521,27 @@ function bindControlActions(mesh) {
     });
   });
 
+  // distance value source type
+  document.querySelectorAll('.tr-cond-dist-type').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const ci = parseInt(sel.dataset.callIndex, 10);
+      const di = parseInt(sel.dataset.condIndex, 10);
+      if (!Number.isFinite(ci) || !Number.isFinite(di)) return;
+      withCond(ci, di, cond => { cond.distValueType = sel.value === 'var' ? 'var' : 'digits'; });
+      refreshProps();
+    });
+  });
+
+  // distance value variable
+  document.querySelectorAll('.tr-cond-dist-var').forEach(input => {
+    input.addEventListener('change', () => {
+      const ci = parseInt(input.dataset.callIndex, 10);
+      const di = parseInt(input.dataset.condIndex, 10);
+      if (!Number.isFinite(ci) || !Number.isFinite(di)) return;
+      withCond(ci, di, cond => { cond.distValueVar = input.value.trim(); });
+    });
+  });
+
   // timer seconds
   document.querySelectorAll('.tr-cond-timer').forEach(input => {
     input.addEventListener('change', () => {
@@ -5054,6 +9549,84 @@ function bindControlActions(mesh) {
       const di = parseInt(input.dataset.condIndex, 10);
       if (!Number.isFinite(ci) || !Number.isFinite(di)) return;
       withCond(ci, di, cond => { cond.timerSeconds = Math.max(0, parseFloat(input.value) || 0); });
+    });
+  });
+
+  // timer source type
+  document.querySelectorAll('.tr-cond-timer-type').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const ci = parseInt(sel.dataset.callIndex, 10);
+      const di = parseInt(sel.dataset.condIndex, 10);
+      if (!Number.isFinite(ci) || !Number.isFinite(di)) return;
+      withCond(ci, di, cond => { cond.timerType = sel.value === 'var' ? 'var' : 'digits'; });
+      refreshProps();
+    });
+  });
+
+  // timer variable
+  document.querySelectorAll('.tr-cond-timer-var').forEach(input => {
+    input.addEventListener('change', () => {
+      const ci = parseInt(input.dataset.callIndex, 10);
+      const di = parseInt(input.dataset.condIndex, 10);
+      if (!Number.isFinite(ci) || !Number.isFinite(di)) return;
+      withCond(ci, di, cond => { cond.timerVar = input.value.trim(); });
+    });
+  });
+
+  // variable comparison condition
+  document.querySelectorAll('.tr-cond-var-name').forEach(input => {
+    input.addEventListener('change', () => {
+      const ci = parseInt(input.dataset.callIndex, 10);
+      const di = parseInt(input.dataset.condIndex, 10);
+      if (!Number.isFinite(ci) || !Number.isFinite(di)) return;
+      withCond(ci, di, cond => { cond.varCmpName = input.value.trim(); });
+    });
+  });
+
+  document.querySelectorAll('.tr-cond-var-op').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const ci = parseInt(sel.dataset.callIndex, 10);
+      const di = parseInt(sel.dataset.condIndex, 10);
+      if (!Number.isFinite(ci) || !Number.isFinite(di)) return;
+      withCond(ci, di, cond => { cond.varCmpOp = CONDITION_OPS.includes(sel.value) ? sel.value : '='; });
+    });
+  });
+
+  document.querySelectorAll('.tr-cond-var-type').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const ci = parseInt(sel.dataset.callIndex, 10);
+      const di = parseInt(sel.dataset.condIndex, 10);
+      if (!Number.isFinite(ci) || !Number.isFinite(di)) return;
+      withCond(ci, di, cond => { cond.varCmpValueType = sel.value === 'var' ? 'var' : 'digits'; });
+      refreshProps();
+    });
+  });
+
+  document.querySelectorAll('.tr-cond-var-ref').forEach(input => {
+    input.addEventListener('change', () => {
+      const ci = parseInt(input.dataset.callIndex, 10);
+      const di = parseInt(input.dataset.condIndex, 10);
+      if (!Number.isFinite(ci) || !Number.isFinite(di)) return;
+      withCond(ci, di, cond => { cond.varCmpValueVar = input.value.trim(); });
+    });
+  });
+
+  document.querySelectorAll('.tr-cond-var-val').forEach(input => {
+    input.addEventListener('change', () => {
+      const ci = parseInt(input.dataset.callIndex, 10);
+      const di = parseInt(input.dataset.condIndex, 10);
+      if (!Number.isFinite(ci) || !Number.isFinite(di)) return;
+      withCond(ci, di, cond => { cond.varCmpValue = Math.trunc(parseFloat(input.value) || 0); });
+    });
+  });
+
+  // boolean condition
+  document.querySelectorAll('.tr-cond-bool-name').forEach(input => {
+    input.addEventListener('change', () => {
+      const ci = parseInt(input.dataset.callIndex, 10);
+      const di = parseInt(input.dataset.condIndex, 10);
+      if (!Number.isFinite(ci) || !Number.isFinite(di)) return;
+      withCond(ci, di, cond => { cond.boolName = input.value.trim(); });
     });
   });
 
@@ -5083,23 +9656,48 @@ function refreshProps() {
   if (!m) { hideProps(); return; }
   propsPanel.style.display = 'block';
   const p = m.position, q = m.rotation, s = m.scale;
-  const isSurface = m.userData.type === 'wall' || m.userData.type === 'floor';
+  const def = DEFS[m.userData.type] || {};
+  const isSurface = m.material?.color && !['light', 'spawn', 'trigger'].includes(m.userData.type);
   const hasLight = !!m.userData.pointLight;
   const isLightType = m.userData.type === 'light';
   const isSpawn = m.userData.type === 'spawn';
+  const isCheckpoint = m.userData.type === 'checkpoint';
   const isTrigger = m.userData.type === 'trigger';
   const isTarget = m.userData.type === 'target';
+  const isKeypad = m.userData.type === 'keypad';
   const canToggleSwitch = isSwitchableObjectType(m.userData.type);
   const switchConfig = getMeshSwitchConfig(m);
+  const collisionMode = getMeshCollisionMode(m);
+  const hitboxConfig = getMeshHitboxConfig(m);
+  const autoHitbox = computeAutoHitboxBox(m, new THREE.Vector3(), new THREE.Vector3());
+  const activeHitbox = hitboxConfig.mode === 'manual'
+    ? { center: new THREE.Vector3().fromArray(hitboxConfig.offset), size: new THREE.Vector3().fromArray(hitboxConfig.size) }
+    : autoHitbox;
+  const checkpointConfig = isCheckpoint ? getMeshCheckpointConfig(m) : null;
+  const keypadConfig = isKeypad ? getMeshKeypadConfig(m) : null;
   const isSwitch = canToggleSwitch && switchConfig.enabled;
-  const canEditControlFunctions = isTrigger || isSwitch;
+  const canEditControlFunctions = isTrigger || canToggleSwitch;
+  const switchVarOptions = renderDatalistOptions([...new Set([...SWITCH_VAR_KEYS, ...getKnownVarNames([switchConfig.varKey])])]);
 
   const surfaceControls = isSurface
     ? `<div class="prop-row"><span class="prop-key">Color</span><div class="prop-controls"><input id="prop-surface-color" type="color" value="${colorHexToCss(m.material.color.getHex())}"/><span id="prop-surface-color-value" class="prop-code">${colorHexToCss(m.material.color.getHex()).toUpperCase()}</span></div></div>`
     : '';
 
+  const shapeParams = normalizeShapeParams(m.userData.type, m.userData.shapeParams || {});
+  const shapeControls = (def.usesSides || def.is2D)
+    ? `${def.usesSides ? `<div class="prop-row"><span class="prop-key">Sides</span><div class="prop-controls"><input id="prop-shape-sides" type="number" min="3" max="64" step="1" value="${shapeParams.sides ?? clampShapeSides(state.placeSides)}" style="width:64px"/></div></div>` : ''}
+       ${def.is2D ? `<div class="prop-row"><span class="prop-key">Depth</span><div class="prop-controls"><input id="prop-shape-depth" type="number" min="0.05" max="8" step="0.05" value="${r3(shapeParams.depth ?? clampShapeDepth(state.place2DDepth), 2)}" style="width:64px"/></div></div>` : ''}`
+    : '';
+
   const solidToggle = `<div class="prop-row"><span class="prop-key">Solid</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-solid-toggle" type="checkbox" ${m.userData.solid ? 'checked' : ''}/> Block</label></div></div>`;
+  const solidnessControls = `<div class="prop-row"><span class="prop-key">Dense</span><div class="prop-controls"><input id="prop-solidness-range" type="range" min="0" max="1" step="0.01" value="${clampMeshSolidness(m.userData.solidness ?? 1)}"/><input id="prop-solidness-number" type="number" min="0" max="1" step="0.01" value="${r3(clampMeshSolidness(m.userData.solidness ?? 1), 2)}"/></div></div>`;
+  const opacityControls = `<div class="prop-row"><span class="prop-key">Opacity</span><div class="prop-controls"><input id="prop-opacity-range" type="range" min="0.02" max="1" step="0.01" value="${clampMeshOpacity(m.userData.opacity ?? m.material.opacity ?? 1)}"/><input id="prop-opacity-number" type="number" min="0.02" max="1" step="0.01" value="${r3(clampMeshOpacity(m.userData.opacity ?? m.material.opacity ?? 1), 2)}"/></div></div>`;
   const tractionToggle = `<div class="prop-row"><span class="prop-key">Traction</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-traction-toggle" type="checkbox" ${m.userData.traction ? 'checked' : ''}/> Carry XZ</label></div></div>`;
+  const collisionControls = `<div class="prop-row"><span class="prop-key">Collision</span><div class="prop-controls"><select id="prop-collision-mode" style="font-size:10px;padding:2px 3px"><option value="aabb" ${collisionMode !== 'geometry' ? 'selected' : ''}>Box</option><option value="geometry" ${collisionMode === 'geometry' ? 'selected' : ''}>Geometry</option></select><span style="color:var(--muted);font-size:9px">geometry follows cut meshes</span></div></div>
+    ${collisionMode !== 'geometry' ? `<div class="prop-row"><span class="prop-key">Hitbox</span><div class="prop-controls"><select id="prop-hitbox-mode" style="font-size:10px;padding:2px 3px"><option value="auto" ${hitboxConfig.mode !== 'manual' ? 'selected' : ''}>Auto</option><option value="manual" ${hitboxConfig.mode === 'manual' ? 'selected' : ''}>Manual</option></select><button id="prop-hitbox-autofit" type="button" style="font-size:10px;padding:2px 6px">Auto Fit</button></div></div>
+    <div class="prop-row"><span class="prop-key">Auto Box</span><span class="prop-val" style="font-size:9px">${r3(autoHitbox.size.x, 2)} × ${r3(autoHitbox.size.y, 2)} × ${r3(autoHitbox.size.z, 2)}</span></div>
+    ${hitboxConfig.mode === 'manual' ? `<div class="prop-row"><span class="prop-key">HB Size</span><div class="prop-controls"><input id="prop-hitbox-size-x" type="number" step="0.05" value="${r3(activeHitbox.size.x, 2)}" style="width:52px"/><input id="prop-hitbox-size-y" type="number" step="0.05" value="${r3(activeHitbox.size.y, 2)}" style="width:52px"/><input id="prop-hitbox-size-z" type="number" step="0.05" value="${r3(activeHitbox.size.z, 2)}" style="width:52px"/></div></div>
+    <div class="prop-row"><span class="prop-key">HB Offset</span><div class="prop-controls"><input id="prop-hitbox-offset-x" type="number" step="0.05" value="${r3(activeHitbox.center.x, 2)}" style="width:52px"/><input id="prop-hitbox-offset-y" type="number" step="0.05" value="${r3(activeHitbox.center.y, 2)}" style="width:52px"/><input id="prop-hitbox-offset-z" type="number" step="0.05" value="${r3(activeHitbox.center.z, 2)}" style="width:52px"/></div></div>` : ''}` : ''}`;
 
   let lightControls = '';
   if (hasLight) {
@@ -5120,13 +9718,37 @@ function refreshProps() {
     ? `<div class="prop-row"><span class="prop-key">Groups</span><div class="prop-controls"><input id="prop-group" list="prop-group-options" type="text" value="${escapeHtml(currentGroups.join(', '))}" placeholder="default, teamA" style="width:150px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px;font-family:inherit"/><datalist id="prop-group-options">${groupOptions}</datalist></div></div>`
     : '';
 
+  const canEditPath = !['spawn', 'checkpoint', 'trigger'].includes(m.userData.type);
+  const pathConfig = getMeshMovementPathConfig(m);
+  const pathFnOptions = renderDatalistOptions(getKnownControlFunctionNames(pathConfig.checkpoints.map(cp => cp.functionName)));
+  const pathRows = pathConfig.checkpoints.map((cp, idx) => {
+    const px = Number.isFinite(cp.pos?.[0]) ? cp.pos[0] : 0;
+    const py = Number.isFinite(cp.pos?.[1]) ? cp.pos[1] : 0;
+    const pz = Number.isFinite(cp.pos?.[2]) ? cp.pos[2] : 0;
+    const pickArmed = !!(_pendingPathCheckpointPick && _pendingPathCheckpointPick.index === idx && _pendingPathCheckpointPick.meshUuids.includes(m.uuid));
+    return `<div class="prop-row" style="padding:2px 11px"><span class="prop-key" style="font-size:9px;min-width:24px">#${idx + 1}</span><div class="prop-controls" style="gap:4px;flex-wrap:wrap"><input class="prop-path-x" data-path-index="${idx}" type="number" step="0.1" value="${r3(px, 2)}" style="width:48px"/><input class="prop-path-y" data-path-index="${idx}" type="number" step="0.1" value="${r3(py, 2)}" style="width:48px"/><input class="prop-path-z" data-path-index="${idx}" type="number" step="0.1" value="${r3(pz, 2)}" style="width:48px"/><input class="prop-path-fn" data-path-index="${idx}" list="prop-path-fn-options" type="text" value="${escapeHtml(cp.functionName || '')}" placeholder="on-arrive fn" style="width:94px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:1px 3px;font-size:10px"/><button class="prop-path-set-sel" data-path-index="${idx}" style="font-size:9px;padding:1px 5px">Sel</button><button class="prop-path-pick ${pickArmed ? 'active' : ''}" data-path-index="${idx}" style="font-size:9px;padding:1px 5px">Pick</button><button class="ct-del prop-path-del" data-path-index="${idx}" title="Delete checkpoint">✕</button></div></div>`;
+  }).join('');
+  const pathControls = canEditPath
+    ? `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Path</span><div class="prop-controls" style="gap:6px;flex-wrap:wrap"><label style="display:flex;align-items:center;gap:3px;cursor:pointer;font-size:9px"><input id="prop-path-enabled" type="checkbox" ${pathConfig.enabled ? 'checked' : ''}/> Ready</label><span style="font-size:9px;color:var(--muted)">Speed</span><input id="prop-path-speed" type="number" min="0.01" step="0.1" value="${r3(pathConfig.speed, 2)}" style="width:56px"/><label style="display:flex;align-items:center;gap:3px;cursor:pointer;font-size:9px"><input id="prop-path-loop" type="checkbox" ${pathConfig.loop ? 'checked' : ''}/> Loop</label></div></div><div class="prop-row" style="padding:2px 11px"><div class="prop-controls" style="gap:4px;flex-wrap:wrap"><button id="prop-path-add-selected" style="font-size:9px;padding:1px 6px">+ Sel Pos</button><button id="prop-path-add-camera" style="font-size:9px;padding:1px 6px">+ Cam Pos</button><button id="prop-path-clear" class="danger-btn" style="font-size:9px;padding:1px 6px">Clear</button><span style="font-size:9px;color:var(--muted)">Call with function action: path -> start</span></div></div><div class="prop-row" style="padding:0 11px 3px 11px"><span style="font-size:9px;color:var(--muted)">Pick = click in viewport to place checkpoint</span></div><datalist id="prop-path-fn-options">${pathFnOptions}</datalist>${pathRows || '<div class="prop-row" style="padding:2px 11px"><span class="prop-val" style="font-size:10px;color:var(--muted)">No checkpoints yet.</span></div>'}`
+    : '';
+
   const switchControls = canToggleSwitch
-    ? `<div class="prop-row"><span class="prop-key">Switch</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-switch-toggle" type="checkbox" ${isSwitch ? 'checked' : ''}/> Shootable</label></div></div>`
+    ? `<div class="prop-row"><span class="prop-key">Switch</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-switch-toggle" type="checkbox" ${isSwitch ? 'checked' : ''}/> ${isKeypad ? 'Enabled' : 'Shootable'}</label></div></div>`
     : '';
 
   const switchRangeControls = isSwitch
-    ? `<div class="prop-row"><span class="prop-key">Var</span><div class="prop-controls"><select id="prop-switch-var" style="font-size:10px;padding:2px 3px">${SWITCH_VAR_KEYS.map(key => `<option value="${key}" ${switchConfig.varKey === key ? 'selected' : ''}>${key}</option>`).join('')}</select><span style="color:var(--muted);font-size:9px">must be in range</span></div></div>
-      <div class="prop-row"><span class="prop-key">Range</span><div class="prop-controls"><input id="prop-switch-min" type="number" step="0.1" value="${switchConfig.min}" style="width:56px"/><span style="color:var(--muted);font-size:9px">to</span><input id="prop-switch-max" type="number" step="0.1" value="${switchConfig.max}" style="width:56px"/></div></div>`
+    ? `<div class="prop-row"><span class="prop-key">Var</span><div class="prop-controls"><input id="prop-switch-var" list="prop-switch-var-options" type="text" value="${escapeHtml(switchConfig.varKey)}" placeholder="hits or codeVar" style="width:118px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px;font-family:inherit"/><datalist id="prop-switch-var-options">${switchVarOptions}</datalist><span style="color:var(--muted);font-size:9px">runtime key or game var</span></div></div>
+      <div class="prop-row"><span class="prop-key">Range</span><div class="prop-controls"><input id="prop-switch-min" type="number" step="0.1" value="${switchConfig.min}" style="width:56px"/><span style="color:var(--muted);font-size:9px">to</span><input id="prop-switch-max" type="number" step="0.1" value="${switchConfig.max}" style="width:56px"/></div></div>
+      <div class="prop-row"><span class="prop-key">Mode</span><div class="prop-controls"><select id="prop-switch-mode" style="font-size:10px;padding:2px 3px"><option value="oneShot" ${switchConfig.runMode === 'oneShot' ? 'selected' : ''}>One Shot</option><option value="repeat" ${switchConfig.runMode === 'repeat' ? 'selected' : ''}>Repeat</option></select><span style="color:var(--muted);font-size:9px">${isKeypad ? 'submit behavior' : 'shoot behavior'}</span></div></div>`
+    : '';
+  const keypadControls = isKeypad
+    ? `<div class="prop-row"><span class="prop-key">Pad Title</span><div class="prop-controls"><input id="prop-keypad-title" type="text" value="${escapeHtml(keypadConfig.title)}" placeholder="Keypad" style="width:150px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px;font-family:inherit"/></div></div>
+      <div class="prop-row"><span class="prop-key">Digits</span><div class="prop-controls"><input id="prop-keypad-digits" type="number" min="1" max="12" step="1" value="${keypadConfig.maxDigits}" style="width:56px"/><span style="color:var(--muted);font-size:9px">max entry length</span></div></div>
+      <div class="prop-row"><span class="prop-key">UI Offset</span><div class="prop-controls"><input id="prop-keypad-offset-x" type="number" step="1" value="${r3(keypadConfig.offsetX, 0)}" style="width:56px"/><input id="prop-keypad-offset-y" type="number" step="1" value="${r3(keypadConfig.offsetY, 0)}" style="width:56px"/><span style="color:var(--muted);font-size:9px">from center</span></div></div>`
+    : '';
+
+  const checkpointControls = isCheckpoint
+    ? `<div class="prop-row"><span class="prop-key">Checkpt</span><div class="prop-controls"><select id="prop-checkpoint-interaction" style="font-size:10px;padding:2px 3px"><option value="touch" ${checkpointConfig.interaction === 'touch' ? 'selected' : ''}>Touch</option><option value="shoot" ${checkpointConfig.interaction === 'shoot' ? 'selected' : ''}>Shoot</option><option value="switch" ${checkpointConfig.interaction === 'switch' ? 'selected' : ''}>Switch</option></select><span style="color:var(--muted);font-size:9px">sets next respawn</span></div></div>`
     : '';
 
   // Target health
@@ -5141,6 +9763,8 @@ function refreshProps() {
     const functionListId = 'prop-control-function-options';
     const fnNames = getKnownControlFunctionNames();
     const functionOptions = renderDatalistOptions(fnNames);
+    const stopConfig = isTrigger ? getMeshTriggerStopConfig(m) : createDefaultTriggerStopConfig();
+    const stopFnValue = stopConfig.functionNames.join(', ');
 
     const rules = m.userData.triggerRules || {};
     const ruleKeys = ['health','jumpHeight','gravity','height','sprintSpeed','maxHealth','fallDamage','fallDamageMinHeight','fallDamageMultiplier'];
@@ -5157,10 +9781,12 @@ function refreshProps() {
     } else {
       const labelOpts = renderDatalistOptions(getKnownLabels());
       const groupOpts = renderDatalistOptions(getKnownGroups());
+      const varOpts = renderDatalistOptions(getKnownVarNames());
+      const boolOpts = renderDatalistOptions(getKnownBoolNames());
 
       const buildCondFields = (cond, ci, di) => {
         const condTypeOpts = CONDITION_TYPES.map(t => {
-          const labels = {none:'always',fnDone:'fn done',touching:'touching',position:'position',distance:'distance',timer:'timer',key:'key held',grounded:'grounded'};
+          const labels = {none:'always',fnDone:'fn done',touching:'touch ref',touchingPlayer:'touching player',position:'position',distance:'distance',timer:'timer',key:'key held',grounded:'grounded',varCmp:'variable',bool:'boolean'};
           return `<option value="${t}" ${cond.type === t ? 'selected' : ''}>${labels[t]}</option>`;
         }).join('');
 
@@ -5174,16 +9800,22 @@ function refreshProps() {
             condFields = `<select class="tr-cond-touch-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="group" ${cond.touchRefType==='group'?'selected':''}>grp</option><option value="name" ${cond.touchRefType==='name'?'selected':''}>name</option></select><input class="tr-cond-touch-ref" ${dc} list="tr-cond-${cond.touchRefType === 'name' ? 'label' : 'group'}-opts-${ci}-${di}" type="text" value="${escapeHtml(cond.touchRef)}" placeholder="target" style="width:60px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="tr-cond-label-opts-${ci}-${di}">${labelOpts}</datalist><datalist id="tr-cond-group-opts-${ci}-${di}">${groupOpts}</datalist>`;
             break;
           case 'position':
-            condFields = `<input class="tr-cond-pos-subj" ${dc} list="tr-cond-pos-subj-opts-${ci}-${di}" type="text" value="${escapeHtml(cond.posSubject)}" style="width:48px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="tr-cond-pos-subj-opts-${ci}-${di}"><option value="player">${labelOpts}</datalist><select class="tr-cond-pos-axis" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_POS_AXES.map(a => `<option value="${a}" ${cond.posAxis===a?'selected':''}>.${a}</option>`).join('')}</select><select class="tr-cond-pos-op" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_OPS.map(o => `<option value="${o}" ${cond.posOp===o?'selected':''}>${escapeHtml(o)}</option>`).join('')}</select><input class="tr-cond-pos-val" ${dc} type="number" step="0.1" value="${cond.posValue}" style="width:42px;font-size:9px;padding:1px 3px"/>`;
+            condFields = `<input class="tr-cond-pos-subj" ${dc} list="tr-cond-pos-subj-opts-${ci}-${di}" type="text" value="${escapeHtml(cond.posSubject)}" style="width:48px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="tr-cond-pos-subj-opts-${ci}-${di}"><option value="player">${labelOpts}</datalist><select class="tr-cond-pos-axis" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_POS_AXES.map(a => `<option value="${a}" ${cond.posAxis===a?'selected':''}>.${a}</option>`).join('')}</select><select class="tr-cond-pos-op" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_OPS.map(o => `<option value="${o}" ${cond.posOp===o?'selected':''}>${escapeHtml(o)}</option>`).join('')}</select><select class="tr-cond-pos-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="digits" ${cond.posValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${cond.posValueType === 'var' ? 'selected' : ''}>var</option></select>${cond.posValueType === 'var' ? `<input class="tr-cond-pos-var" ${dc} list="tr-cond-var-opts-${ci}-${di}" type="text" value="${escapeHtml(cond.posValueVar)}" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="tr-cond-var-opts-${ci}-${di}">${varOpts}</datalist>` : `<input class="tr-cond-pos-val" ${dc} type="number" step="0.1" value="${cond.posValue}" style="width:42px;font-size:9px;padding:1px 3px"/>`}`;
             break;
           case 'distance':
-            condFields = `<input class="tr-cond-dist-target" ${dc} list="tr-cond-dist-opts-${ci}-${di}" type="text" value="${escapeHtml(cond.distTarget)}" placeholder="object" style="width:54px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="tr-cond-dist-opts-${ci}-${di}">${labelOpts}</datalist><select class="tr-cond-dist-op" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_OPS.map(o => `<option value="${o}" ${cond.distOp===o?'selected':''}>${escapeHtml(o)}</option>`).join('')}</select><input class="tr-cond-dist-val" ${dc} type="number" step="0.5" min="0" value="${cond.distValue}" style="width:38px;font-size:9px;padding:1px 3px"/>`;
+            condFields = `<input class="tr-cond-dist-target" ${dc} list="tr-cond-dist-opts-${ci}-${di}" type="text" value="${escapeHtml(cond.distTarget)}" placeholder="object" style="width:54px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="tr-cond-dist-opts-${ci}-${di}">${labelOpts}</datalist><select class="tr-cond-dist-op" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_OPS.map(o => `<option value="${o}" ${cond.distOp===o?'selected':''}>${escapeHtml(o)}</option>`).join('')}</select><select class="tr-cond-dist-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="digits" ${cond.distValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${cond.distValueType === 'var' ? 'selected' : ''}>var</option></select>${cond.distValueType === 'var' ? `<input class="tr-cond-dist-var" ${dc} list="tr-cond-dist-var-opts-${ci}-${di}" type="text" value="${escapeHtml(cond.distValueVar)}" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="tr-cond-dist-var-opts-${ci}-${di}">${varOpts}</datalist>` : `<input class="tr-cond-dist-val" ${dc} type="number" step="0.5" min="0" value="${cond.distValue}" style="width:38px;font-size:9px;padding:1px 3px"/>`}`;
             break;
           case 'timer':
-            condFields = `<input class="tr-cond-timer" ${dc} type="number" step="0.1" min="0" value="${cond.timerSeconds}" style="width:42px;font-size:9px;padding:1px 3px"/><span style="font-size:8px;color:var(--muted)">s</span>`;
+            condFields = `<select class="tr-cond-timer-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="digits" ${cond.timerType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${cond.timerType === 'var' ? 'selected' : ''}>var</option></select>${cond.timerType === 'var' ? `<input class="tr-cond-timer-var" ${dc} list="tr-cond-timer-var-opts-${ci}-${di}" type="text" value="${escapeHtml(cond.timerVar)}" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="tr-cond-timer-var-opts-${ci}-${di}">${varOpts}</datalist>` : `<input class="tr-cond-timer" ${dc} type="number" step="0.1" min="0" value="${cond.timerSeconds}" style="width:42px;font-size:9px;padding:1px 3px"/>`}<span style="font-size:8px;color:var(--muted)">s</span>`;
             break;
           case 'key':
             condFields = `<select class="tr-cond-key" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_KEY_CODES.map(k => `<option value="${k}" ${cond.keyCode===k?'selected':''}>${k.replace('Key','').replace('Digit','').replace('Left','')}</option>`).join('')}</select>`;
+            break;
+          case 'varCmp':
+            condFields = `<input class="tr-cond-var-name" ${dc} list="tr-cond-var-name-opts-${ci}-${di}" type="text" value="${escapeHtml(cond.varCmpName)}" placeholder="var" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="tr-cond-var-name-opts-${ci}-${di}">${varOpts}</datalist><select class="tr-cond-var-op" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_OPS.map(o => `<option value="${o}" ${cond.varCmpOp===o?'selected':''}>${escapeHtml(o)}</option>`).join('')}</select><select class="tr-cond-var-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="digits" ${cond.varCmpValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${cond.varCmpValueType === 'var' ? 'selected' : ''}>var</option></select>${cond.varCmpValueType === 'var' ? `<input class="tr-cond-var-ref" ${dc} list="tr-cond-var-ref-opts-${ci}-${di}" type="text" value="${escapeHtml(cond.varCmpValueVar)}" placeholder="var" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="tr-cond-var-ref-opts-${ci}-${di}">${varOpts}</datalist>` : `<input class="tr-cond-var-val" ${dc} type="number" step="1" value="${cond.varCmpValue}" style="width:42px;font-size:9px;padding:1px 3px"/>`}`;
+            break;
+          case 'bool':
+            condFields = `<input class="tr-cond-bool-name" ${dc} list="tr-cond-bool-opts-${ci}-${di}" type="text" value="${escapeHtml(cond.boolName)}" placeholder="bool" style="width:68px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="tr-cond-bool-opts-${ci}-${di}">${boolOpts}</datalist>`;
             break;
           default:
             condFields = '';
@@ -5218,7 +9850,10 @@ function refreshProps() {
       <div class="prop-row" style="padding:3px 11px"><div class="prop-controls">
         <select id="tr-add-rule-key" style="font-size:10px;padding:2px;flex:1">${ruleKeys.filter(k => !(k in rules)).map(k => `<option value="${k}">${k}</option>`).join('')}</select>
         <button id="tr-add-rule-btn" style="font-size:10px;padding:2px 6px">+</button>
-      </div></div>` : ''}
+      </div></div>
+      <div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Stops</span></div>
+      <div class="prop-row" style="padding:2px 11px"><span class="prop-key" style="font-size:9px;min-width:50px">Mode</span><div class="prop-controls"><select id="prop-trigger-stop-mode" style="font-size:10px;padding:2px 3px"><option value="none" ${stopConfig.mode === 'none' ? 'selected' : ''}>None</option><option value="momentary" ${stopConfig.mode === 'momentary' ? 'selected' : ''}>Momentary</option><option value="permanent" ${stopConfig.mode === 'permanent' ? 'selected' : ''}>Permanent</option></select></div></div>
+      <div class="prop-row" style="padding:2px 11px"><span class="prop-key" style="font-size:9px;min-width:50px">Fns</span><div class="prop-controls"><input id="prop-trigger-stop-fns" list="${functionListId}" type="text" value="${escapeHtml(stopFnValue)}" placeholder="doorOpen, liftDown" style="width:150px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:1px 4px;font-size:10px"/><span style="color:var(--muted);font-size:9px">comma list</span></div></div>` : ''}
       ${canEditControlFunctions ? `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Calls</span></div><datalist id="${functionListId}">${functionOptions}</datalist>
       ${callsHtml}
       <div class="prop-row" style="padding:3px 11px"><div class="prop-controls"><button id="tr-add-call-btn" style="font-size:10px;padding:2px 6px">+ Call</button></div></div>` : ''}`;
@@ -5233,11 +9868,18 @@ function refreshProps() {
     <div class="prop-row"><span class="prop-key">Scale</span><span class="prop-val">${r3(s.x)}, ${r3(s.y)}, ${r3(s.z)}</span></div>
     ${m.userData.editorGroupId ? `<div class="prop-row"><span class="prop-key">Group</span><span class="prop-val" style="font-size:9px;color:var(--accentHi)">${m.userData.editorGroupId} (${getEditorGroupMembers(m).length} objects)</span></div>` : ''}
     ${surfaceControls}
+    ${shapeControls}
     ${solidToggle}
+    ${solidnessControls}
+    ${opacityControls}
     ${tractionToggle}
+    ${collisionControls}
     ${groupControls}
+    ${pathControls}
     ${switchControls}
     ${switchRangeControls}
+    ${keypadControls}
+    ${checkpointControls}
     ${targetControls}
     ${emitToggle}
     ${lightControls}
@@ -5254,17 +9896,26 @@ function refreshProps() {
   }
 
   bindSurfaceProps(m);
+  bindShapeParamProps(m);
   bindSolidToggle(m);
+  bindSolidnessProps(m);
+  bindOpacityProps(m);
   bindTractionToggle(m);
+  bindCollisionProps(m);
   if (hasLight) bindLightProps(m);
   if (!isLightType) bindEmitLightProps(m);
   bindGroupProp(m);
+  if (canEditPath) bindMovementPathProps(m);
+  if (isCheckpoint) bindCheckpointProps(m);
   if (canToggleSwitch) bindSwitchProps(m);
+  if (isKeypad) bindKeypadProps(m);
   if (isTarget) bindTargetHealthProp(m);
   if (isTrigger) {
     bindTriggerRules(m);
+    bindTriggerStopProps(m);
   }
   if (canEditControlFunctions) bindControlActions(m);
+  refreshSelectedPathPreview();
 }
 function hideProps() { propsPanel.style.display = 'none'; }
 
@@ -5286,8 +9937,18 @@ function refreshStatus() {
   let txt = `<span class="s-mode">${modeLabel}</span><span class="s-sep">│</span>Objects: ${sceneObjects.length}`;
   if (state.mode === 'place')
     txt += `<span class="s-sep">│</span>Placing: ${DEFS[state.placingType].label}`;
+  if (state.mode === 'paint')
+    txt += `<span class="s-sep">│</span>Brush: ${colorHexToCss(state.brushColor).toUpperCase()}${state.colorPickArmed ? ' (pick armed)' : ''}`;
+  if (state.mode === 'erase')
+    txt += `<span class="s-sep">│</span>Eraser: ${state.eraserShape} @ ${r3(state.eraserSize, 2)}`;
   if (state.mode === 'place' && state.placingType === 'light')
     txt += `<span class="s-sep">│</span>New Light: ${r3(state.defaultLightIntensity, 1)}`;
+  if (state.mode === 'place' && DEFS[state.placingType]?.usesSides)
+    txt += `<span class="s-sep">│</span>Sides: ${state.placeSides}`;
+  if (state.mode === 'place' && DEFS[state.placingType]?.is2D)
+    txt += `<span class="s-sep">│</span>Depth: ${r3(state.place2DDepth, 2)}`;
+  if (state.mode === 'place')
+    txt += `<span class="s-sep">│</span>Opacity: ${r3(state.placeOpacity, 2)}`;
   txt += `<span class="s-sep">│</span>Sun: ${r3(parseFloat(sunTimeInput.value), 1)}h`;
   txt += `<span class="s-sep">│</span>Grid: ${(state.chunkRenderRadius * 2) + 1}x${(state.chunkRenderRadius * 2) + 1}`;
   if (state.mode === 'select' && state.transformMode === 'scale') {
@@ -5305,15 +9966,140 @@ function refreshStatus() {
   statusText.innerHTML = txt;
 }
 
+function refreshVarPanel() {
+  if (!varsListEl) return;
+  varsListEl.innerHTML = gameVars.map((entry, index) => `
+    <div class="ct-entry" data-var-index="${index}" style="flex-wrap:wrap">
+      <div class="sf-row" style="width:100%;gap:4px">
+        <span style="font-size:8px;color:var(--muted);min-width:34px">Name</span>
+        <input class="var-name" data-var-index="${index}" type="text" value="${escapeHtml(entry.name)}" placeholder="score" style="flex:1;font-size:10px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>
+        <button class="ct-del var-del" data-var-index="${index}" title="Delete variable">✕</button>
+      </div>
+      <div class="sf-row" style="width:100%;gap:4px">
+        <span style="font-size:8px;color:var(--muted);min-width:34px">Start</span>
+        <input class="var-default" data-var-index="${index}" type="number" step="1" value="${entry.defaultValue}" style="width:72px;font-size:10px;padding:2px 4px"/>
+        <span style="font-size:8px;color:var(--muted)">Now</span>
+        <input class="var-runtime" data-var-index="${index}" type="number" step="1" value="${entry.runtimeValue}" style="width:72px;font-size:10px;padding:2px 4px"/>
+      </div>
+    </div>
+  `).join('') || '<div style="font-size:9px;color:var(--muted)">No variables yet.</div>';
+
+  varsListEl.querySelectorAll('.var-name').forEach(input => {
+    input.addEventListener('change', () => {
+      const index = parseInt(input.dataset.varIndex, 10);
+      if (!Number.isFinite(index) || !gameVars[index]) return;
+      const candidate = input.value.trim();
+      if (!isUniqueNamedEntry(gameVars, index, candidate)) {
+        input.value = gameVars[index].name;
+        return;
+      }
+      gameVars[index].name = candidate;
+      refreshVarPanel();
+      refreshCondTriggerUI();
+      refreshControlFunctionsUI();
+    });
+  });
+  varsListEl.querySelectorAll('.var-default').forEach(input => {
+    input.addEventListener('change', () => {
+      const index = parseInt(input.dataset.varIndex, 10);
+      if (!Number.isFinite(index) || !gameVars[index]) return;
+      const value = Math.trunc(parseFloat(input.value) || 0);
+      gameVars[index].defaultValue = value;
+      if (!state.isPlaytest) gameVars[index].runtimeValue = value;
+      refreshVarPanel();
+    });
+  });
+  varsListEl.querySelectorAll('.var-runtime').forEach(input => {
+    input.addEventListener('change', () => {
+      const index = parseInt(input.dataset.varIndex, 10);
+      if (!Number.isFinite(index) || !gameVars[index]) return;
+      gameVars[index].runtimeValue = Math.trunc(parseFloat(input.value) || 0);
+      refreshVarPanel();
+    });
+  });
+  varsListEl.querySelectorAll('.var-del').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const index = parseInt(btn.dataset.varIndex, 10);
+      if (!Number.isFinite(index)) return;
+      gameVars.splice(index, 1);
+      refreshVarPanel();
+      refreshCondTriggerUI();
+      refreshControlFunctionsUI();
+    });
+  });
+}
+
+function refreshBoolPanel() {
+  if (!boolsListEl) return;
+  boolsListEl.innerHTML = gameBools.map((entry, index) => `
+    <div class="ct-entry" data-bool-index="${index}" style="flex-wrap:wrap">
+      <div class="sf-row" style="width:100%;gap:4px">
+        <span style="font-size:8px;color:var(--muted);min-width:34px">Name</span>
+        <input class="bool-name" data-bool-index="${index}" type="text" value="${escapeHtml(entry.name)}" placeholder="doorOpen" style="flex:1;font-size:10px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>
+        <button class="ct-del bool-del" data-bool-index="${index}" title="Delete boolean">✕</button>
+      </div>
+      <div class="sf-row" style="width:100%;gap:8px">
+        <label style="display:flex;align-items:center;gap:4px;font-size:9px;color:var(--muted)"><span>Start</span><input class="bool-default" data-bool-index="${index}" type="checkbox" ${entry.defaultValue ? 'checked' : ''}/></label>
+        <label style="display:flex;align-items:center;gap:4px;font-size:9px;color:var(--muted)"><span>Now</span><input class="bool-runtime" data-bool-index="${index}" type="checkbox" ${entry.runtimeValue ? 'checked' : ''}/></label>
+      </div>
+    </div>
+  `).join('') || '<div style="font-size:9px;color:var(--muted)">No booleans yet.</div>';
+
+  boolsListEl.querySelectorAll('.bool-name').forEach(input => {
+    input.addEventListener('change', () => {
+      const index = parseInt(input.dataset.boolIndex, 10);
+      if (!Number.isFinite(index) || !gameBools[index]) return;
+      const candidate = input.value.trim();
+      if (!isUniqueNamedEntry(gameBools, index, candidate)) {
+        input.value = gameBools[index].name;
+        return;
+      }
+      gameBools[index].name = candidate;
+      refreshBoolPanel();
+      refreshCondTriggerUI();
+      refreshControlFunctionsUI();
+    });
+  });
+  boolsListEl.querySelectorAll('.bool-default').forEach(input => {
+    input.addEventListener('change', () => {
+      const index = parseInt(input.dataset.boolIndex, 10);
+      if (!Number.isFinite(index) || !gameBools[index]) return;
+      gameBools[index].defaultValue = input.checked;
+      if (!state.isPlaytest) gameBools[index].runtimeValue = input.checked;
+      refreshBoolPanel();
+    });
+  });
+  boolsListEl.querySelectorAll('.bool-runtime').forEach(input => {
+    input.addEventListener('change', () => {
+      const index = parseInt(input.dataset.boolIndex, 10);
+      if (!Number.isFinite(index) || !gameBools[index]) return;
+      gameBools[index].runtimeValue = input.checked;
+      refreshBoolPanel();
+    });
+  });
+  boolsListEl.querySelectorAll('.bool-del').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const index = parseInt(btn.dataset.boolIndex, 10);
+      if (!Number.isFinite(index)) return;
+      gameBools.splice(index, 1);
+      refreshBoolPanel();
+      refreshCondTriggerUI();
+      refreshControlFunctionsUI();
+    });
+  });
+}
+
 // ─── Conditional trigger UI ───────────────────────────────────────────────────
 const CT_COND_TYPES = [
   { value: 'health', label: 'Health' },
-  { value: 'touching', label: 'Touching' },
+  { value: 'touching', label: 'Touching Player' },
   { value: 'posY', label: 'Pos Y' },
   { value: 'posX', label: 'Pos X' },
   { value: 'posZ', label: 'Pos Z' },
   { value: 'grounded', label: 'Grounded' },
   { value: 'spawnLanded', label: 'Landed' },
+  { value: 'var', label: 'Variable' },
+  { value: 'bool', label: 'Boolean' },
 ];
 const CT_COND_SENSES = ['is', 'not'];
 const CT_COND_OPS = ['=', '!=', '<', '>', '<=', '>='];
@@ -5327,23 +10113,46 @@ function refreshCondTriggerUI() {
   if (!condTriggersListEl) return;
   const knownGroups = getKnownGroups(conditionalTriggers.map(ct => ct.touchRefType === 'group' ? ct.touchRefValue : ''));
   const touchGroupOptions = renderDatalistOptions(knownGroups);
+  const knownVars = getKnownVarNames(conditionalTriggers.flatMap(ct => [ct.varCondName, ct.valueVarName, ct.actionValueVar]).filter(Boolean));
+  const knownBools = getKnownBoolNames(conditionalTriggers.map(ct => ct.boolCondName).filter(Boolean));
+  const varOptions = renderDatalistOptions(knownVars);
+  const boolOptions = renderDatalistOptions(knownBools);
+  const ruleKeys = [...CT_RULE_KEYS, ...knownVars.map(name => `var:${name}`)];
+  const actionBases = [...CT_ACTION_BASES, ...knownVars.map(name => `var:${name}`)];
   condTriggersListEl.innerHTML = conditionalTriggers.map(ct => {
     const isTouchCondition = ct.conditionType === 'touching';
+    const isVarCondition = ct.conditionType === 'var';
+    const isBoolCondition = ct.conditionType === 'bool';
     const condSense = ct.condSense ?? ((ct.op === 'not') ? 'not' : 'is');
     const condOpRaw = ct.condOp ?? ct.op ?? '=';
     const condOp = condOpRaw === '==' ? '=' : condOpRaw;
     const touchRefType = ct.touchRefType ?? 'group';
     const touchRefValue = ct.touchRefValue ?? '';
+    const varCondName = ct.varCondName ?? '';
+    const boolCondName = ct.boolCondName ?? '';
+    const valueType = ct.valueType === 'var' ? 'var' : 'digits';
+    const valueVarName = ct.valueVarName ?? '';
     const actionBase = ct.actionBase ?? ((ct.ruleValueExpr || '').trim() ? 'none' : (ct.ruleKey ?? 'none'));
     const actionOp = ct.actionOp ?? '+';
+    const actionValueType = ct.actionValueType === 'var' ? 'var' : 'digits';
+    const actionValueVar = ct.actionValueVar ?? '';
     const actionValue = Number.isFinite(parseFloat(ct.actionValue)) ? parseFloat(ct.actionValue) : (Number.isFinite(parseFloat(ct.ruleValue)) ? parseFloat(ct.ruleValue) : 0);
     const intervalHtml = (ct.mode === 'while') ? `<span style="font-size:8px">every</span><input class="ct-interval" type="number" step="0.1" min="0.05" value="${ct.repeatInterval ?? 1}" style="width:34px;font-size:9px;padding:1px 2px"/><span style="font-size:8px">s</span>` : '';
     const conditionDetailHtml = isTouchCondition
       ? `<select class="ct-touch-type" style="font-size:9px;padding:1px 3px">${CT_TOUCH_REF_TYPES.map(type => `<option value="${type}" ${touchRefType === type ? 'selected' : ''}>${type}</option>`).join('')}</select>
       <input class="ct-touch-val" ${touchRefType === 'group' ? 'list="ct-touch-group-options"' : ''} type="text" value="${escapeHtml(touchRefValue)}" style="width:86px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px" placeholder="group or name"/>`
+      : isVarCondition
+      ? `<select class="ct-sense">${CT_COND_SENSES.map(s => `<option value="${s}" ${condSense === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      <input class="ct-var-name" list="ct-var-options" type="text" value="${escapeHtml(varCondName)}" placeholder="var" style="width:68px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>
+      <select class="ct-op">${CT_COND_OPS.map(o => `<option value="${o}" ${condOp === o ? 'selected' : ''}>${o}</option>`).join('')}</select>
+      <select class="ct-val-type" style="font-size:9px;padding:1px 2px"><option value="digits" ${valueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${valueType === 'var' ? 'selected' : ''}>var</option></select>
+      ${valueType === 'var' ? `<input class="ct-val-var" list="ct-var-options" type="text" value="${escapeHtml(valueVarName)}" placeholder="var" style="width:68px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="ct-val" type="number" step="0.1" value="${ct.value}"/>`}`
+      : isBoolCondition
+      ? `<select class="ct-sense">${CT_COND_SENSES.map(s => `<option value="${s}" ${condSense === s ? 'selected' : ''}>${s}</option>`).join('')}</select><input class="ct-bool-name" list="ct-bool-options" type="text" value="${escapeHtml(boolCondName)}" placeholder="bool" style="width:76px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>`
       : `<select class="ct-sense">${CT_COND_SENSES.map(s => `<option value="${s}" ${condSense === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
       <select class="ct-op">${CT_COND_OPS.map(o => `<option value="${o}" ${condOp === o ? 'selected' : ''}>${o}</option>`).join('')}</select>
-      <input class="ct-val" type="number" step="0.1" value="${ct.value}"/>`;
+      <select class="ct-val-type" style="font-size:9px;padding:1px 2px"><option value="digits" ${valueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${valueType === 'var' ? 'selected' : ''}>var</option></select>
+      ${valueType === 'var' ? `<input class="ct-val-var" list="ct-var-options" type="text" value="${escapeHtml(valueVarName)}" placeholder="var" style="width:68px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="ct-val" type="number" step="0.1" value="${ct.value}"/>`}`;
     return `
     <div class="ct-entry" data-ctid="${ct.id}">
       <span style="color:var(--muted);font-size:8px;display:flex;gap:4px;width:100%;align-items:center">
@@ -5354,21 +10163,22 @@ function refreshCondTriggerUI() {
       <select class="ct-cond">${CT_COND_TYPES.map(c => `<option value="${c.value}" ${ct.conditionType === c.value ? 'selected' : ''}>${c.label}</option>`).join('')}</select>
       ${conditionDetailHtml}
       <span class="ct-arrow">\u2192</span>
-      <select class="ct-rk">${CT_RULE_KEYS.map(k => `<option value="${k}" ${ct.ruleKey === k ? 'selected' : ''}>${k}</option>`).join('')}</select>
+      <select class="ct-rk">${ruleKeys.map(k => `<option value="${k}" ${ct.ruleKey === k ? 'selected' : ''}>${k}</option>`).join('')}</select>
       <span style="font-size:9px;color:var(--muted)">=</span>
-      <select class="ct-ab">${CT_ACTION_BASES.map(k => `<option value="${k}" ${actionBase === k ? 'selected' : ''}>${k === 'none' ? '(none)' : k}</option>`).join('')}</select>
+      <select class="ct-ab">${actionBases.map(k => `<option value="${k}" ${actionBase === k ? 'selected' : ''}>${k === 'none' ? '(none)' : k}</option>`).join('')}</select>
       <select class="ct-aop">${CT_ACTION_OPS.map(o => `<option value="${o}" ${actionOp === o ? 'selected' : ''}>${o}</option>`).join('')}</select>
-      <input class="ct-av" type="number" step="0.1" value="${actionValue}" style="width:50px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>
+      <select class="ct-av-type" style="font-size:9px;padding:1px 2px"><option value="digits" ${actionValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${actionValueType === 'var' ? 'selected' : ''}>var</option></select>
+      ${actionValueType === 'var' ? `<input class="ct-av-var" list="ct-var-options" type="text" value="${escapeHtml(actionValueVar)}" placeholder="var" style="width:68px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="ct-av" type="number" step="0.1" value="${actionValue}" style="width:50px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>`}
       <span style="font-size:9px;color:var(--muted);width:100%;margin-top:2px">ELSE \u2192</span>
       <select class="ct-erk">
         <option value="" ${!ct.elseRuleKey ? 'selected' : ''}>(none)</option>
-        ${CT_RULE_KEYS.map(k => `<option value="${k}" ${ct.elseRuleKey === k ? 'selected' : ''}>${k}</option>`).join('')}
+        ${ruleKeys.map(k => `<option value="${k}" ${ct.elseRuleKey === k ? 'selected' : ''}>${k}</option>`).join('')}
       </select>
       <span style="font-size:9px;color:var(--muted)">=</span>
       <input class="ct-ervx" type="text" value="${ct.elseValueExpr ?? ct.elseRuleValue ?? 0}" style="width:60px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px" placeholder="val or var+n"/>
       <button class="ct-del" data-ctid="${ct.id}">\u2715</button>
     </div>
-  `}).join('') + `<datalist id="ct-touch-group-options">${touchGroupOptions}</datalist>`;
+  `}).join('') + `<datalist id="ct-touch-group-options">${touchGroupOptions}</datalist><datalist id="ct-var-options">${varOptions}</datalist><datalist id="ct-bool-options">${boolOptions}</datalist>`;
   // Bind change listeners
   condTriggersListEl.querySelectorAll('.ct-entry').forEach(el => {
     const id = parseInt(el.dataset.ctid);
@@ -5386,8 +10196,16 @@ function refreshCondTriggerUI() {
     if (senseInput) senseInput.addEventListener('change', e => { ct.condSense = e.target.value; });
     const opInput = el.querySelector('.ct-op');
     if (opInput) opInput.addEventListener('change', e => { ct.condOp = e.target.value; ct.op = e.target.value; });
+    const valueTypeInput = el.querySelector('.ct-val-type');
+    if (valueTypeInput) valueTypeInput.addEventListener('change', e => { ct.valueType = e.target.value === 'var' ? 'var' : 'digits'; refreshCondTriggerUI(); });
     const valueInput = el.querySelector('.ct-val');
     if (valueInput) valueInput.addEventListener('change', e => { ct.value = parseFloat(e.target.value) || 0; });
+    const valueVarInput = el.querySelector('.ct-val-var');
+    if (valueVarInput) valueVarInput.addEventListener('change', e => { ct.valueVarName = e.target.value.trim(); });
+    const varNameInput = el.querySelector('.ct-var-name');
+    if (varNameInput) varNameInput.addEventListener('change', e => { ct.varCondName = e.target.value.trim(); });
+    const boolNameInput = el.querySelector('.ct-bool-name');
+    if (boolNameInput) boolNameInput.addEventListener('change', e => { ct.boolCondName = e.target.value.trim(); });
     const touchTypeInput = el.querySelector('.ct-touch-type');
     if (touchTypeInput) touchTypeInput.addEventListener('change', e => { ct.touchRefType = e.target.value; });
     const touchValueInput = el.querySelector('.ct-touch-val');
@@ -5395,7 +10213,12 @@ function refreshCondTriggerUI() {
     el.querySelector('.ct-rk').addEventListener('change', e => { ct.ruleKey = e.target.value; });
     el.querySelector('.ct-ab').addEventListener('change', e => { ct.actionBase = e.target.value; });
     el.querySelector('.ct-aop').addEventListener('change', e => { ct.actionOp = e.target.value; });
-    el.querySelector('.ct-av').addEventListener('change', e => { ct.actionValue = parseFloat(e.target.value) || 0; ct.ruleValue = ct.actionValue; });
+    const actionValueTypeInput = el.querySelector('.ct-av-type');
+    if (actionValueTypeInput) actionValueTypeInput.addEventListener('change', e => { ct.actionValueType = e.target.value === 'var' ? 'var' : 'digits'; refreshCondTriggerUI(); });
+    const actionValueInput = el.querySelector('.ct-av');
+    if (actionValueInput) actionValueInput.addEventListener('change', e => { ct.actionValue = parseFloat(e.target.value) || 0; ct.ruleValue = ct.actionValue; });
+    const actionValueVarInput = el.querySelector('.ct-av-var');
+    if (actionValueVarInput) actionValueVarInput.addEventListener('change', e => { ct.actionValueVar = e.target.value.trim(); });
     el.querySelector('.ct-erk').addEventListener('change', e => { ct.elseRuleKey = e.target.value || ''; });
     el.querySelector('.ct-ervx').addEventListener('change', e => { ct.elseValueExpr = e.target.value.trim(); ct.elseRuleValue = parseFloat(e.target.value) || 0; });
     el.querySelector('.ct-del').addEventListener('click', () => {
@@ -5414,12 +10237,18 @@ btnAddCondTrigger.addEventListener('click', () => {
     condOp: '=',
     op: '=',
     value: 1,
+    valueType: 'digits',
+    valueVarName: '',
     touchRefType: 'group',
     touchRefValue: 'default',
+    varCondName: '',
+    boolCondName: '',
     ruleKey: 'health',
     actionBase: 'health',
     actionOp: '-',
     actionValue: 1,
+    actionValueType: 'digits',
+    actionValueVar: '',
     ruleValue: 1,
     ruleValueExpr: 'health - 1',
     elseRuleKey: '',
@@ -5434,36 +10263,95 @@ btnAddCondTrigger.addEventListener('click', () => {
 });
 
 // ─── Control functions UI (project-level function editor) ────────────────────
-const controlFunctionsListEl = document.getElementById('control-functions-list');
-const btnAddControlFn = document.getElementById('btn-add-control-fn');
-
 function refreshControlFunctionsUI() {
   if (!controlFunctionsListEl) return;
-  const groupOptions = renderDatalistOptions(getKnownGroups());
-  const labelOptions = renderDatalistOptions(getKnownLabels());
 
-  controlFunctionsListEl.innerHTML = controlFunctions.map((fn, fnIdx) => {
+  ensureControlFunctionGroups();
+  const search = String(controlFnSearchInput?.value ?? '').trim().toLowerCase();
+  const visible = controlFunctions
+    .map((fn, fnIdx) => ({ fn, fnIdx }))
+    .filter(({ fn }) => !search || String(fn.name ?? '').toLowerCase().includes(search));
+
+  const groupOptionsHtml = controlFunctionGroups
+    .map(group => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)}</option>`)
+    .join('');
+
+  const renderFunctionCard = (fn, fnIdx) => {
     const actionsHtml = fn.actions.map((action, actIdx) => {
       const isLight = action.actionType === 'light';
-      const moveOpts = getMoveTargetOptions(action.refType, action.refValue);
+      const isRotate = action.actionType === 'rotate';
+      const isAudio = action.actionType === 'audio';
+      const isPath = action.actionType === 'path';
+      const isFunctionControl = action.actionType === 'functionControl';
+      const isPlayerGroup = action.actionType === 'playerGroup';
+      const isSetVar = action.actionType === 'setVar';
+      const isSetBool = action.actionType === 'setBool';
+      const moveOpts = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool) ? '' : getMoveTargetOptions(action.refType, action.refValue);
       const moveListId = `cfn-target-opts-${fnIdx}-${actIdx}`;
-      const primaryHtml = isLight
+      const fnListId = `cfn-fn-opts-${fnIdx}-${actIdx}`;
+      const audioListId = `cfn-audio-opts-${fnIdx}-${actIdx}`;
+      const varListId = `cfn-var-opts-${fnIdx}-${actIdx}`;
+      const boolListId = `cfn-bool-opts-${fnIdx}-${actIdx}`;
+      const knownFnNames = renderDatalistOptions(getKnownControlFunctionNames([action.audioUntilFunction, action.functionControlTarget]));
+      const knownAudioNames = renderDatalistOptions(getKnownAudioNames([action.audioName]));
+      const knownVarNames = renderDatalistOptions(getKnownVarNames([action.setVarName, action.setVarValueVar]));
+      const knownBoolNames = renderDatalistOptions(getKnownBoolNames([action.setBoolName]));
+      const primaryHtml = isPlayerGroup
+        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Groups</span><select class="cfn-pg-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${CONTROL_PLAYER_GROUP_MODES.map(mode => `<option value="${mode}" ${action.playerGroupMode === mode ? 'selected' : ''}>${mode}</option>`).join('')}</select><input class="cfn-pg-value" data-fn="${fnIdx}" data-act="${actIdx}" list="cfn-pg-groups-${fnIdx}-${actIdx}" type="text" value="${escapeHtml(action.playerGroupValue || '')}" placeholder="default, red, blue" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="cfn-pg-groups-${fnIdx}-${actIdx}">${renderDatalistOptions(getKnownGroups())}</datalist></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Random</span><span style="font-size:8px;color:var(--muted)">Use comma list above when mode=random</span></div>`
+        : isFunctionControl
+        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Cmd</span><select class="cfn-fc-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${FUNCTION_CONTROL_COMMANDS.map(cmd => `<option value="${cmd}" ${action.functionControlCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select><input class="cfn-fc-target" data-fn="${fnIdx}" data-act="${actIdx}" list="${fnListId}" type="text" value="${escapeHtml(action.functionControlTarget || '')}" placeholder="doorOpen, musicLoop" style="flex:1;min-width:94px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div><datalist id="${fnListId}">${knownFnNames}</datalist>`
+        : isPath
+        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Path</span><select class="cfn-path-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PATH_CONTROL_COMMANDS.map(cmd => `<option value="${cmd}" ${action.pathCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select><span style="font-size:8px;color:var(--muted)">target path</span></div>`
+        : isSetVar
+        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Var</span><input class="cfn-set-var-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${varListId}" type="text" value="${escapeHtml(action.setVarName || '')}" placeholder="score" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${varListId}">${knownVarNames}</datalist><select class="cfn-set-var-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${['=','+','-','*','/'].map(op => `<option value="${op}" ${action.setVarOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Value</span><select class="cfn-set-var-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="digits" ${action.setVarValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${action.setVarValueType === 'var' ? 'selected' : ''}>var</option></select>${action.setVarValueType === 'var' ? `<input class="cfn-set-var-var" data-fn="${fnIdx}" data-act="${actIdx}" list="${varListId}" type="text" value="${escapeHtml(action.setVarValueVar || '')}" placeholder="var name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="cfn-set-var-value" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="1" value="${action.setVarValue}" style="width:72px;font-size:9px"/>`}</div>`
+        : isSetBool
+        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Bool</span><input class="cfn-set-bool-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${boolListId}" type="text" value="${escapeHtml(action.setBoolName || '')}" placeholder="doorOpen" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${boolListId}">${knownBoolNames}</datalist><select class="cfn-set-bool-value" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="true" ${action.setBoolValue === true ? 'selected' : ''}>true</option><option value="false" ${action.setBoolValue === false ? 'selected' : ''}>false</option><option value="toggle" ${action.setBoolValue === 'toggle' ? 'selected' : ''}>toggle</option></select></div>`
+        : isAudio
+        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Audio</span><input class="cfn-audio-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${audioListId}" type="text" value="${escapeHtml(action.audioName || '')}" placeholder="audio name" style="flex:1;min-width:94px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${audioListId}">${knownAudioNames}</datalist></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Mode</span><select class="cfn-audio-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${AUDIO_PLAY_MODES.map(mode => `<option value="${mode}" ${action.audioMode === mode ? 'selected' : ''}>${mode}</option>`).join('')}</select><span style="font-size:8px;color:var(--muted)">Range</span><input class="cfn-audio-dist" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="1" max="800" step="1" value="${action.audioDistance}" style="width:52px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Until</span><select class="cfn-audio-until" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${AUDIO_UNTIL_EVENTS.map(ev => `<option value="${ev}" ${action.audioUntil === ev ? 'selected' : ''}>${ev}</option>`).join('')}</select><input class="cfn-audio-until-fn" data-fn="${fnIdx}" data-act="${actIdx}" list="${fnListId}" type="text" value="${escapeHtml(action.audioUntilFunction || '')}" placeholder="fn name" style="width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-audio-loop" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.audioLoop ? 'checked' : ''}/> Loop</label></div><datalist id="${fnListId}">${knownFnNames}</datalist>`
+        : isLight
         ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Light</span><select class="cfn-light-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${CONTROL_LIGHT_OPS.map(op => `<option value="${op}" ${action.lightOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select><input class="cfn-light-val" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.lightValue}" style="width:46px;font-size:9px"/></div>`
-        : `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">XYZ</span><input class="cfn-ox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[0]}" style="width:42px;font-size:9px"/><input class="cfn-oy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[1]}" style="width:42px;font-size:9px"/><input class="cfn-oz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[2]}" style="width:42px;font-size:9px"/></div>
+        : isRotate
+          ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To Rot°</span><input class="cfn-rox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-roy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-roz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[2]}" style="width:42px;font-size:9px"/></div>
+          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From Rot°</span><input class="cfn-rsox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-rsoy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-rsoz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[2]}" style="width:42px;font-size:9px"/></div>
+          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">Spin RPM</span><input class="cfn-rrx" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[0]}" style="width:42px;font-size:9px"/><input class="cfn-rry" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[1]}" style="width:42px;font-size:9px"/><input class="cfn-rrz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[2]}" style="width:42px;font-size:9px"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-rotate-repeat" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.rotateRepeat ? 'checked' : ''}/> Loop</label></div>
+          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">Pivot</span><select class="cfn-rotate-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="separate" ${action.rotateGroupMode === 'separate' ? 'selected' : ''}>self</option><option value="together" ${action.rotateGroupMode === 'together' ? 'selected' : ''}>group center</option></select></div>
+          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`
+          : `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To (orig)</span><input class="cfn-ox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[0]}" style="width:42px;font-size:9px"/><input class="cfn-oy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[1]}" style="width:42px;font-size:9px"/><input class="cfn-oz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[2]}" style="width:42px;font-size:9px"/></div>
+          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From (orig)</span><input class="cfn-sox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-soy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-soz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[2]}" style="width:42px;font-size:9px"/></div>
           <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`;
-      const posReadout = !isLight ? `<div class="cfn-pos-readout" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:8px;color:var(--accentHi);margin-left:34px;min-height:12px;font-family:monospace;opacity:0.8"></div>` : '';
+      const posReadout = (!isLight && !isPlayerGroup && !isFunctionControl && !isAudio && !isPath && !isSetVar && !isSetBool) ? `<div class="cfn-pos-readout" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:8px;color:var(--accentHi);margin-left:34px;min-height:12px;font-family:monospace;opacity:0.8"></div>` : '';
+      const targetRefHtml = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool)
+        ? `<span style="font-size:8px;color:var(--muted);min-width:56px">player</span>`
+        : `<select class="cfn-ref-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="group" ${action.refType === 'group' ? 'selected' : ''}>group</option><option value="name" ${action.refType === 'name' ? 'selected' : ''}>name</option></select><input class="cfn-ref-val" data-fn="${fnIdx}" data-act="${actIdx}" list="${moveListId}" type="text" value="${escapeHtml(action.refValue)}" style="width:70px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${moveListId}">${moveOpts}</datalist>`;
       return `<div style="border-left:2px solid var(--border);margin-left:4px;padding-left:6px;margin-bottom:4px">
-        <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">#${actIdx+1}</span><select class="cfn-ref-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="group" ${action.refType === 'group' ? 'selected' : ''}>group</option><option value="name" ${action.refType === 'name' ? 'selected' : ''}>name</option></select><input class="cfn-ref-val" data-fn="${fnIdx}" data-act="${actIdx}" list="${moveListId}" type="text" value="${escapeHtml(action.refValue)}" style="width:70px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><select class="cfn-action-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="move" ${action.actionType === 'move' ? 'selected' : ''}>move</option><option value="light" ${action.actionType === 'light' ? 'selected' : ''}>light</option></select><button class="ct-del cfn-del-act" data-fn="${fnIdx}" data-act="${actIdx}" title="Remove action">✕</button><datalist id="${moveListId}">${moveOpts}</datalist></div>
+        <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">#${actIdx+1}</span>${targetRefHtml}<select class="cfn-action-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="move" ${action.actionType === 'move' ? 'selected' : ''}>move</option><option value="rotate" ${action.actionType === 'rotate' ? 'selected' : ''}>rotate</option><option value="light" ${action.actionType === 'light' ? 'selected' : ''}>light</option><option value="audio" ${action.actionType === 'audio' ? 'selected' : ''}>audio</option><option value="path" ${action.actionType === 'path' ? 'selected' : ''}>path</option><option value="functionControl" ${action.actionType === 'functionControl' ? 'selected' : ''}>function ctrl</option><option value="playerGroup" ${action.actionType === 'playerGroup' ? 'selected' : ''}>player group</option><option value="setVar" ${action.actionType === 'setVar' ? 'selected' : ''}>set var</option><option value="setBool" ${action.actionType === 'setBool' ? 'selected' : ''}>set bool</option></select><button class="ct-del cfn-del-act" data-fn="${fnIdx}" data-act="${actIdx}" title="Remove action">✕</button></div>
         ${primaryHtml}${posReadout}
       </div>`;
     }).join('');
 
     return `<div class="ct-entry" style="flex-wrap:wrap" data-fn-index="${fnIdx}">
-      <div class="sf-row" style="gap:4px;width:100%"><span style="font-size:9px;color:var(--accentHi);font-weight:700">ƒ</span><input class="cfn-name" data-fn="${fnIdx}" type="text" value="${escapeHtml(fn.name)}" placeholder="name" style="flex:1;font-size:10px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><button class="cfn-sim" data-fn="${fnIdx}" title="Simulate" style="background:none;border:none;color:var(--accentHi);cursor:pointer;font-size:11px;padding:0 2px">▶</button><button class="cfn-sim-reset" data-fn="${fnIdx}" title="Reset" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:10px;padding:0 2px">■</button><button class="ct-del cfn-del-fn" data-fn="${fnIdx}" title="Delete function">✕</button></div>
+      <div class="sf-row" style="gap:4px;width:100%"><span style="font-size:9px;color:var(--accentHi);font-weight:700">ƒ</span><input class="cfn-name" data-fn="${fnIdx}" type="text" value="${escapeHtml(fn.name)}" placeholder="name" style="flex:1;font-size:10px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><select class="cfn-group" data-fn="${fnIdx}" style="font-size:9px;padding:1px 3px">${groupOptionsHtml}</select><button class="cfn-sim" data-fn="${fnIdx}" title="Simulate" style="background:none;border:none;color:var(--accentHi);cursor:pointer;font-size:11px;padding:0 2px">▶</button><button class="cfn-sim-reset" data-fn="${fnIdx}" title="Reset" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:10px;padding:0 2px">■</button><button class="ct-del cfn-del-fn" data-fn="${fnIdx}" title="Delete function">✕</button></div>
       ${actionsHtml}
       <button class="cfn-add-act" data-fn="${fnIdx}" style="font-size:8px;padding:1px 5px;margin-left:12px">+ Action</button>
     </div>`;
+  };
+
+  const groupedHtml = controlFunctionGroups.map(group => {
+    const rows = visible.filter(({ fn }) => fn.groupId === group.id);
+    if (!rows.length && search) return '';
+    const body = rows.map(({ fn, fnIdx }) => renderFunctionCard(fn, fnIdx)).join('') || '<div style="font-size:9px;color:var(--muted);padding:5px 2px">No functions in this group.</div>';
+    const caret = group.collapsed ? '▸' : '▾';
+    return `<div class="cfn-group-wrap" data-cfg="${escapeHtml(group.id)}"><button class="cfn-group-toggle" data-cfg="${escapeHtml(group.id)}"><span>${caret} ${escapeHtml(group.name)}</span><span style="opacity:.7">${rows.length}</span></button><div class="cfn-group-body" style="${group.collapsed ? 'display:none' : ''}">${body}</div><button class="cfn-group-add" data-cfg="${escapeHtml(group.id)}">+ Add Function</button></div>`;
   }).join('');
+
+  controlFunctionsListEl.innerHTML = groupedHtml || '<div style="font-size:10px;color:var(--muted);padding:5px 1px">No matching functions.</div>';
+
+  controlFunctionsListEl.querySelectorAll('.cfn-group').forEach(select => {
+    const fnIdx = parseInt(select.dataset.fn, 10);
+    if (Number.isFinite(fnIdx) && controlFunctions[fnIdx]) {
+      select.value = controlFunctions[fnIdx].groupId;
+    }
+  });
 
   bindControlFunctionsUI();
 }
@@ -5482,6 +10370,27 @@ function bindControlFunctionsUI() {
     input.addEventListener('change', () => {
       const idx = parseInt(input.dataset.fn, 10);
       if (controlFunctions[idx]) controlFunctions[idx].name = input.value.trim();
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-group').forEach(select => {
+    select.addEventListener('change', () => {
+      const idx = parseInt(select.dataset.fn, 10);
+      const fn = controlFunctions[idx];
+      if (!fn) return;
+      if (controlFunctionGroups.some(group => group.id === select.value)) {
+        fn.groupId = select.value;
+      }
+      refreshControlFunctionsUI();
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-group-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const group = controlFunctionGroups.find(g => g.id === btn.dataset.cfg);
+      if (!group) return;
+      group.collapsed = !group.collapsed;
+      refreshControlFunctionsUI();
     });
   });
 
@@ -5566,14 +10475,173 @@ function bindControlFunctionsUI() {
   bindCfnNumber('.cfn-ox', (a, v) => { a.offset[0] = v; });
   bindCfnNumber('.cfn-oy', (a, v) => { a.offset[1] = v; });
   bindCfnNumber('.cfn-oz', (a, v) => { a.offset[2] = v; });
+  bindCfnNumber('.cfn-sox', (a, v) => { a.startOffset[0] = v; });
+  bindCfnNumber('.cfn-soy', (a, v) => { a.startOffset[1] = v; });
+  bindCfnNumber('.cfn-soz', (a, v) => { a.startOffset[2] = v; });
+  bindCfnNumber('.cfn-rox', (a, v) => { a.rotateOffset[0] = v; });
+  bindCfnNumber('.cfn-roy', (a, v) => { a.rotateOffset[1] = v; });
+  bindCfnNumber('.cfn-roz', (a, v) => { a.rotateOffset[2] = v; });
+  bindCfnNumber('.cfn-rsox', (a, v) => { a.rotateStartOffset[0] = v; });
+  bindCfnNumber('.cfn-rsoy', (a, v) => { a.rotateStartOffset[1] = v; });
+  bindCfnNumber('.cfn-rsoz', (a, v) => { a.rotateStartOffset[2] = v; });
+  bindCfnNumber('.cfn-rrx', (a, v) => { a.rotateRpm[0] = v; });
+  bindCfnNumber('.cfn-rry', (a, v) => { a.rotateRpm[1] = v; });
+  bindCfnNumber('.cfn-rrz', (a, v) => { a.rotateRpm[2] = v; });
   bindCfnNumber('.cfn-light-val', (a, v) => { a.lightValue = v; });
   bindCfnNumber('.cfn-dur', (a, v) => { a.duration = Math.max(0, v); });
+  bindCfnNumber('.cfn-set-var-value', (a, v) => { a.setVarValue = Math.trunc(v); });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-pg-mode').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => {
+        a.playerGroupMode = CONTROL_PLAYER_GROUP_MODES.includes(sel.value) ? sel.value : 'set';
+      });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-pg-value').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.playerGroupValue = input.value.trim(); });
+    });
+  });
 
   controlFunctionsListEl.querySelectorAll('.cfn-light-op').forEach(sel => {
     sel.addEventListener('change', () => {
       const fnIdx = parseInt(sel.dataset.fn, 10);
       const actIdx = parseInt(sel.dataset.act, 10);
       withFnAction(fnIdx, actIdx, a => { a.lightOp = CONTROL_LIGHT_OPS.includes(sel.value) ? sel.value : 'toggle'; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-audio-name').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.audioName = input.value.trim(); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-audio-mode').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.audioMode = AUDIO_PLAY_MODES.includes(sel.value) ? sel.value : 'global'; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-audio-dist').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.audioDistance = clampAudioDistance(input.value); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-audio-until').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.audioUntil = AUDIO_UNTIL_EVENTS.includes(sel.value) ? sel.value : 'deactivate'; });
+      refreshControlFunctionsUI();
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-audio-until-fn').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.audioUntilFunction = input.value.trim(); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-audio-loop').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.audioLoop = input.checked; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-fc-cmd').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => {
+        a.functionControlCommand = FUNCTION_CONTROL_COMMANDS.includes(sel.value) ? sel.value : 'stop';
+      });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-fc-target').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.functionControlTarget = input.value.trim(); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-path-cmd').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => {
+        a.pathCommand = PATH_CONTROL_COMMANDS.includes(sel.value) ? sel.value : 'start';
+      });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-set-var-name').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.setVarName = input.value.trim(); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-set-var-op').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.setVarOp = ['=', '+', '-', '*', '/'].includes(sel.value) ? sel.value : '='; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-set-var-type').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.setVarValueType = sel.value === 'var' ? 'var' : 'digits'; });
+      refreshControlFunctionsUI();
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-set-var-var').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.setVarValueVar = input.value.trim(); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-set-bool-name').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.setBoolName = input.value.trim(); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-set-bool-value').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => {
+        a.setBoolValue = sel.value === 'toggle' ? 'toggle' : (sel.value === 'true');
+      });
     });
   });
 
@@ -5592,13 +10660,58 @@ function bindControlFunctionsUI() {
       withFnAction(fnIdx, actIdx, a => { a.returnOnDeactivate = input.checked; });
     });
   });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-rotate-repeat').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.rotateRepeat = input.checked; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-rotate-mode').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.rotateGroupMode = sel.value === 'together' ? 'together' : 'separate'; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-group-add').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const groupId = String(btn.dataset.cfg || '').trim();
+      controlFunctions.push(createDefaultControlFunction(groupId));
+      refreshControlFunctionsUI();
+    });
+  });
 }
 
 if (btnAddControlFn) {
   btnAddControlFn.addEventListener('click', () => {
-    controlFunctions.push(createDefaultControlFunction());
+    ensureControlFunctionGroups();
+    const defaultGroupId = controlFunctionGroups[0]?.id || '';
+    controlFunctions.push(createDefaultControlFunction(defaultGroupId));
     refreshControlFunctionsUI();
   });
+}
+if (btnAddControlGroup) {
+  btnAddControlGroup.addEventListener('click', () => {
+    const name = String(controlFnNewGroupInput?.value ?? '').trim();
+    if (!name) return;
+    controlFunctionGroups.push(createDefaultControlFunctionGroup(name));
+    if (controlFnNewGroupInput) controlFnNewGroupInput.value = '';
+    refreshControlFunctionsUI();
+  });
+}
+if (controlFnNewGroupInput) {
+  controlFnNewGroupInput.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    btnAddControlGroup?.click();
+  });
+}
+if (controlFnSearchInput) {
+  controlFnSearchInput.addEventListener('input', () => refreshControlFunctionsUI());
 }
 
 // ─── Quality control helpers ─────────────────────────────────────────────────
@@ -5644,7 +10757,12 @@ function updateVisibility(cam) {
     // Render distance: hide blocks too far away
     if (dist2 > rd2) {
       m.visible = false;
-      if (m.material) m.material.visible = !hideDisplayOnly;
+      if (m.userData._customSkinActive) {
+        if (m.material) m.material.visible = false;
+        if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = false;
+      } else if (m.material) {
+        m.material.visible = !hideDisplayOnly;
+      }
 
       if (m.userData.pointLight) {
         m.userData.pointLight.visible = false;
@@ -5658,7 +10776,12 @@ function updateVisibility(cam) {
     // the centre point, intersectsObject checks the whole bounding sphere).
     const inFrustum = _frustum.intersectsObject(m) || dist2 < 100; // always show nearby
     m.visible = inFrustum;
-    if (m.material) m.material.visible = !hideDisplayOnly;
+    if (m.userData._customSkinActive) {
+      if (m.material) m.material.visible = false;
+      if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = !hideDisplayOnly;
+    } else if (m.material) {
+      m.material.visible = !hideDisplayOnly;
+    }
 
     // Point light distance culling
     if (m.userData.pointLight) {
@@ -5766,12 +10889,15 @@ function animate(t) {
       updateSunShadowCenter(fpsPos);
       updateGridChunks(fpsPos.x, fpsPos.z);
       updateVisibility(fpsCam);
+      updateCheckpointIndicators(t / 1000);
       renderer.render(scene, fpsCam);
       return;
     }
 
     updateRuntimeOptimizer(t, dt);
     updateTriggerMoveAnimations(t / 1000);
+    updateMovementPathAnimations(dt);
+    updateRuntimeAudioInstances();
     const dayCycleEnabled = !!(sunDayCycleEnabledInput && sunDayCycleEnabledInput.checked);
     const dayCycleDuration = clampSunDayDuration(parseFloat(sunDayDurationInput.value));
     if (dayCycleEnabled && dayCycleDuration > 0) {
@@ -5797,90 +10923,68 @@ function animate(t) {
 
     refreshSolids();
     applyTractionCarry();
+    resolveMovingSolidPushes();
 
     // Horizontal movement with ground-following for slopes/ramps
     if (_move.x !== 0 || _move.z !== 0) {
-      // Try both axes combined
-      _next.copy(fpsPos);
-      _next.x += _move.x;
-      _next.z += _move.z;
-      if (fpsGrounded) {
-        let g = findGroundHeight(_next);
-        if (g > _next.y && g <= _next.y + STEP_HEIGHT) _next.y = g;
-      }
-      if (!collidesWalk(_next)) {
-        if (fpsGrounded && _next.y > fpsPos.y) { fpsVelY = 0; }
-        fpsPos.copy(_next);
-      } else {
-        // Wall slide: try X only
-        _next.copy(fpsPos);
-        _next.x += _move.x;
-        if (fpsGrounded) {
-          let g = findGroundHeight(_next);
-          if (g > _next.y && g <= _next.y + STEP_HEIGHT) _next.y = g;
-        }
-        if (!collidesWalk(_next)) {
-          if (fpsGrounded && _next.y > fpsPos.y) { fpsVelY = 0; }
-          fpsPos.copy(_next);
-        }
-        // Try Z only
-        _next.copy(fpsPos);
-        _next.z += _move.z;
-        if (fpsGrounded) {
-          let g = findGroundHeight(_next);
-          if (g > _next.y && g <= _next.y + STEP_HEIGHT) _next.y = g;
-        }
-        if (!collidesWalk(_next)) {
-          if (fpsGrounded && _next.y > fpsPos.y) { fpsVelY = 0; }
-          fpsPos.copy(_next);
-        }
-      }
+      movePlayerHorizontal(_move);
     }
 
     // Gravity and vertical collision
-    fpsVelY -= gameRules.gravity * dt;
-    let nextY = fpsPos.y + fpsVelY * dt;
+    if (gameRules.gravityEnabled) {
+      fpsVelY -= gameRules.gravity * dt;
+      let nextY = fpsPos.y + fpsVelY * dt;
 
-    // Build a test position for vertical checks
-    _next.set(fpsPos.x, nextY, fpsPos.z);
+      // Build a test position for vertical checks
+      _next.set(fpsPos.x, nextY, fpsPos.z);
 
-    if (fpsVelY <= 0) {
-      // Track fall start position
-      if (fpsFallStartY === null && !fpsGrounded) fpsFallStartY = fpsPos.y;
-      // Falling — find ground
-      const groundY = findGroundHeight(fpsPos);
-      if (nextY <= groundY) {
-        nextY = groundY;
-        // Apply fall damage before resetting velocity
-        if (fpsFallStartY !== null) {
-          const fallDist = fpsFallStartY - nextY;
-          applyFallDamage(fallDist);
-          fpsFallStartY = null;
+      if (fpsVelY <= 0) {
+        // Track fall start position
+        if (fpsFallStartY === null && !fpsGrounded) fpsFallStartY = fpsPos.y;
+        // Falling — find ground
+        const groundY = findGroundHeight(fpsPos);
+        if (nextY <= groundY) {
+          nextY = groundY;
+          // Apply fall damage before resetting velocity
+          if (fpsFallStartY !== null) {
+            const fallDist = fpsFallStartY - nextY;
+            applyFallDamage(fallDist);
+            fpsFallStartY = null;
+          }
+          fpsVelY = 0;
+          fpsGrounded = true;
+        } else {
+          fpsGrounded = false;
         }
-        fpsVelY = 0;
-        fpsGrounded = true;
       } else {
+        fpsFallStartY = null; // rising, reset fall tracker
+        // Rising — check if player box at nextY collides with any solid
+        _next.y = nextY;
+        if (collidesAt(_next)) {
+          // Binary search to find exact ceiling contact
+          let lo = fpsPos.y, hi = nextY;
+          for (let i = 0; i < 8; i++) {
+            const mid = (lo + hi) / 2;
+            _next.y = mid;
+            if (collidesAt(_next)) hi = mid; else lo = mid;
+          }
+          nextY = lo;
+          fpsVelY = 0;
+        }
         fpsGrounded = false;
       }
+      fpsPos.y = Math.max(0, nextY);
+      if (fpsPos.y === 0 && fpsVelY === 0) fpsGrounded = true;
     } else {
-      fpsFallStartY = null; // rising, reset fall tracker
-      // Rising — check if player box at nextY collides with any solid
-      _next.y = nextY;
-      if (collidesAt(_next)) {
-        // Binary search to find exact ceiling contact
-        let lo = fpsPos.y, hi = nextY;
-        for (let i = 0; i < 8; i++) {
-          const mid = (lo + hi) / 2;
-          _next.y = mid;
-          if (collidesAt(_next)) hi = mid; else lo = mid;
-        }
-        nextY = lo;
-        fpsVelY = 0;
+      const flyDir = (fpsKeys.has('Space') || fpsKeys.has('KeyE') ? 1 : 0) - (fpsKeys.has('ShiftLeft') || fpsKeys.has('KeyQ') ? 1 : 0);
+      const flySpeed = (fpsSprinting ? gameRules.sprintSpeed : BASE_FPS_SPEED) * dt;
+      if (flyDir !== 0) {
+        movePlayerVertical(flyDir * flySpeed);
       }
+      fpsVelY = 0;
       fpsGrounded = false;
+      fpsFallStartY = null;
     }
-    fpsPos.y = Math.max(0, nextY);
-    if (fpsPos.y === 0 && fpsVelY === 0) fpsGrounded = true;
 
     // Track first ground touch after spawn
     if (!fpsSpawnLanded && fpsGrounded) fpsSpawnLanded = true;
@@ -5890,10 +10994,10 @@ function animate(t) {
 
     // Trigger block overlap detection
     checkTriggerBlocks();
+    checkCheckpointBlocks();
 
-    // Re-evaluate pending trigger calls with continuous conditions
+    // Re-evaluate trigger calls continuously so condition changes can start/stop actions.
     for (const [uuid, calls] of _activeTriggerCalls) {
-      if (!calls.some(c => !c.started)) continue;
       const mesh = sceneObjects.find(m => m.uuid === uuid);
       if (mesh) evaluateTriggerCalls(mesh);
     }
@@ -5906,9 +11010,11 @@ function animate(t) {
     updateSunShadowCenter(fpsPos);
     updateGridChunks(fpsPos.x, fpsPos.z);
     updateVisibility(fpsCam);
+    updateCheckpointIndicators(t / 1000);
     renderer.render(scene, fpsCam);
     for (const m of sceneObjects) {
       _playtestPrevPositions.set(m, m.position.clone());
+      _playtestPrevRotations.set(m, m.quaternion.clone());
       _playtestPrevAABBs.set(m, new THREE.Box3().setFromObject(m));
     }
   } else {
@@ -5920,6 +11026,7 @@ function animate(t) {
     updateSunShadowCenter(editorCam.position);
     updateGridChunks(editorCam.position.x, editorCam.position.z);
     updateVisibility(editorCam);
+    updateCheckpointIndicators(t / 1000);
     renderer.render(scene, editorCam);
   }
 }
@@ -5930,11 +11037,25 @@ onResize();
 setTopMenu(topMenuSelect.value);
 loadEditorSettings();
 applySidebarState({ save: false, reflow: true });
+applyFunctionsPanelState({ save: false, reflow: true });
+setLibraryPane(activeLibraryPane, { save: false });
+refreshAudioLibraryUI();
 setSnap(snapSelect.value);
 setDefaultLightIntensity(lightIntensityInput.value);
+setPlacementSides(state.placeSides);
+setPlacementDepth(state.place2DDepth);
+setPlacementOpacity(state.placeOpacity);
+setBrushColor(colorHexToCss(state.brushColor));
+setEraserShape(state.eraserShape);
+setEraserSize(state.eraserSize);
 applySunUI();
 setChunkRange(chunkRangeSelect.value);
 refreshCondTriggerUI();
+ensureControlFunctionGroups();
+refreshVarPanel();
+refreshBoolPanel();
+refreshPlayerProfileUI();
+refreshControlFunctionsUI();
 refreshStatus();
 
 if (runtimeMode) {

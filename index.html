@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+  <meta http-equiv="Pragma" content="no-cache"/>
+  <meta http-equiv="Expires" content="0"/>
   <title>Flame3D – FPS Level Editor</title>
 
   <script type="importmap">
@@ -30,6 +33,7 @@
       --success:  #3fb950;
       --topH:     46px;
       --sideW:    200px;
+      --fnW:      340px;
     }
 
     body {
@@ -301,6 +305,48 @@
       border-bottom: 1px solid #1a1f26;
     }
     .lib-category:last-child { border-bottom: none; }
+    .lib-top-tabs {
+      display: flex;
+      gap: 6px;
+      padding: 8px 9px;
+      border-bottom: 1px solid var(--border);
+      background: #0f141b;
+    }
+    .lib-top-btn {
+      flex: 1;
+      justify-content: center;
+      font-size: 11px;
+      padding: 5px 8px;
+    }
+    .lib-pane { display: none; }
+    .lib-pane.active { display: block; }
+    .audio-lib-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 6px;
+      max-height: 340px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+    .audio-lib-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid #1d2430;
+      border-radius: 7px;
+      background: #111821;
+      padding: 5px 6px;
+    }
+    .audio-lib-name {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 10px;
+      color: var(--text);
+    }
     .lib-category-title {
       padding: 8px 11px 0;
       color: var(--muted);
@@ -381,6 +427,132 @@
     /* ── Canvas container ─────────────────────────────────── */
     #canvas-container { flex: 1; position: relative; overflow: hidden; }
     #canvas-container canvas { display: block; }
+
+    /* ── Right panel resize/collapse ─────────────────────── */
+    #functions-resizer {
+      width: 14px;
+      flex: 0 0 14px;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(180deg, #121820, #0f141b);
+      border-left: 1px solid var(--border);
+      cursor: col-resize;
+      transition: background .16s ease, border-color .16s ease;
+    }
+    #functions-resizer::before {
+      content: '';
+      width: 4px;
+      height: 42px;
+      border-radius: 999px;
+      background: linear-gradient(180deg, #30363d, #5b6572, #30363d);
+      opacity: .72;
+    }
+    #functions-resizer:hover {
+      background: #19202a;
+      border-color: var(--accentHi);
+    }
+    #functions-toggle {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border-radius: 999px;
+      font-size: 11px;
+      line-height: 1;
+      z-index: 2;
+    }
+    #workspace.functions-collapsed #functions-panel {
+      width: 0;
+      min-width: 0;
+      border-left-color: transparent;
+      overflow: hidden;
+    }
+    #workspace.functions-collapsed #functions-resizer {
+      cursor: default;
+    }
+    #workspace.functions-collapsed #functions-resizer::before {
+      height: 28px;
+      opacity: .55;
+    }
+    #workspace.functions-resizing #functions-panel,
+    #workspace.functions-resizing #functions-resizer {
+      transition: none;
+    }
+
+    /* ── Right Functions panel ───────────────────────────── */
+    #functions-panel {
+      width: var(--fnW);
+      min-width: 260px;
+      max-width: 460px;
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      min-height: 0;
+      overflow: hidden;
+    }
+    #functions-panel .sidebar-form {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+      gap: 8px;
+    }
+    #control-functions-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      flex: 0 0 auto;
+      min-height: auto;
+      overflow-y: visible;
+      overflow-x: hidden;
+      padding-right: 2px;
+    }
+    .cfn-group-add {
+      width: calc(100% - 14px);
+      margin: 0 7px 7px;
+      padding: 2px 6px;
+      font-size: 9px;
+      border-radius: 5px;
+      justify-content: center;
+    }
+    .cfn-group-wrap {
+      border: 1px solid #1d2430;
+      border-radius: 8px;
+      background: #111821;
+      overflow: hidden;
+    }
+    .cfn-group-toggle {
+      width: 100%;
+      background: #172130;
+      border: none;
+      border-bottom: 1px solid #212a37;
+      border-radius: 0;
+      justify-content: space-between;
+      color: var(--text);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 7px 9px;
+      cursor: pointer;
+    }
+    .cfn-group-toggle:hover {
+      background: #1e2a3b;
+      border-color: #212a37;
+    }
+    .cfn-group-body {
+      padding: 7px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
 
     /* ── Crosshair ────────────────────────────────────────── */
     #crosshair {
@@ -542,6 +714,8 @@
       <option value="light">Light</option>
       <option value="grid">Grid</option>
       <option value="player">Player</option>
+      <option value="vars">Vars</option>
+      <option value="bools">Bools</option>
     </select>
   </div>
 
@@ -554,6 +728,8 @@
       <button id="btn-place"  class="active" title="Place objects">⊕ Place</button>
       <button id="btn-select"               title="Select &amp; transform (1/2/3)">↗ Select</button>
       <button id="btn-delete"               title="Delete objects">✕ Delete</button>
+      <button id="btn-paint"                title="Paint object colors">🖌 Paint</button>
+      <button id="btn-erase"                title="Cut holes from meshes">◫ Erase</button>
     </div>
 
     <span class="tb-sep"></span>
@@ -610,6 +786,8 @@
   <div class="top-panel" data-panel="light"></div>
   <div class="top-panel" data-panel="grid"></div>
   <div class="top-panel" data-panel="player"></div>
+  <div class="top-panel" data-panel="vars"></div>
+  <div class="top-panel" data-panel="bools"></div>
 
   <span class="tb-sep"></span>
 
@@ -627,8 +805,8 @@
   <div class="tb-group">
     <button id="btn-save-project" title="Save project">💾 Save</button>
     <button id="btn-save-json" title="Export level as JSON file">📤 Export</button>
-    <button id="btn-export-game" title="Export standalone game HTML">🎮 Game HTML</button>
-    <button id="btn-export-loader" title="Export runtime JSON loader HTML">🧩 Loader HTML</button>
+    <button id="btn-export-game" title="Export runtime game HTML (uses local main.js)">🎮 Game HTML</button>
+    <button id="btn-export-loader" title="Export runtime launcher HTML (uses local main.js)">🧩 Loader HTML</button>
     <button id="btn-load" title="Load level from JSON">📂 Load</button>
     <input  id="load-input" type="file" accept=".json" style="display:none"/>
   </div>
@@ -637,6 +815,8 @@
 
   <button id="btn-playtest" class="play-btn"              title="Start playtest (P)">▶ Play</button>
   <button id="btn-stop"     class="stop-btn" style="display:none" title="Stop playtest (Esc)">⏹ Stop</button>
+  <button id="btn-reset-checkpoints" title="Reset active checkpoint and spawn at world spawn">↺ Reset CP</button>
+  <button id="btn-reset-values" title="Reset all variables and booleans to their starting values">↺ Reset Values</button>
 
   <span class="tb-sep"></span>
   <button id="btn-back-menu" title="Back to main menu">⬅ Menu</button>
@@ -651,6 +831,12 @@
     <!-- BLOCK: Library -->
     <div id="sidebar-block" class="sidebar-section active">
       <div class="panel-hdr">📚 Library</div>
+      <div class="lib-top-tabs">
+        <button id="lib-pane-objects-btn" class="lib-top-btn active" type="button" data-lib-pane="objects">Objects</button>
+        <button id="lib-pane-audio-btn" class="lib-top-btn" type="button" data-lib-pane="audio">Audio</button>
+      </div>
+
+      <div id="library-pane-objects" class="lib-pane active">
       <div class="lib-category">
         <div class="lib-category-title">Objects / Blocks</div>
         <div class="lib-grid">
@@ -659,6 +845,49 @@
           </button>
           <button class="lib-btn" data-type="floor">
             <span class="icon">⬜</span>Floor
+          </button>
+        </div>
+      </div>
+      <div class="lib-category">
+        <div class="lib-category-title">3D Primitives</div>
+        <div class="lib-grid">
+          <button class="lib-btn" data-type="cube">
+            <span class="icon">🧊</span>Cube
+          </button>
+          <button class="lib-btn" data-type="sphere">
+            <span class="icon">⚽</span>Sphere
+          </button>
+          <button class="lib-btn" data-type="cylinder">
+            <span class="icon">🥫</span>Cylinder
+          </button>
+          <button class="lib-btn" data-type="cone">
+            <span class="icon">🔺</span>Cone
+          </button>
+          <button class="lib-btn" data-type="pyramid">
+            <span class="icon">🔻</span>Pyramid
+          </button>
+          <button class="lib-btn" data-type="prism">
+            <span class="icon">⬣</span>Prism
+          </button>
+          <button class="lib-btn" data-type="torus">
+            <span class="icon">⭕</span>Torus
+          </button>
+        </div>
+      </div>
+      <div class="lib-category">
+        <div class="lib-category-title">2D Shapes</div>
+        <div class="lib-grid">
+          <button class="lib-btn" data-type="plane2d">
+            <span class="icon">▭</span>Square
+          </button>
+          <button class="lib-btn" data-type="triangle2d">
+            <span class="icon">△</span>Triangle
+          </button>
+          <button class="lib-btn" data-type="circle2d">
+            <span class="icon">◯</span>Circle
+          </button>
+          <button class="lib-btn" data-type="polygon2d">
+            <span class="icon">⬟</span>Polygon
           </button>
         </div>
       </div>
@@ -676,6 +905,9 @@
           <button class="lib-btn" data-type="target">
             <span class="icon">🎯</span>Target
           </button>
+          <button class="lib-btn" data-type="checkpoint">
+            <span class="icon">🏁</span>Checkpoint
+          </button>
           <button class="lib-btn" data-type="spawn">
             <span class="icon">🚩</span>Spawn
           </button>
@@ -687,6 +919,61 @@
           <button class="lib-btn" data-type="trigger">
             <span class="icon">🎛</span>Control
           </button>
+          <button class="lib-btn" data-type="keypad">
+            <span class="icon">⌨</span>Keypad
+          </button>
+        </div>
+      </div>
+      <div class="panel-hdr">🧰 Shape &amp; Tools</div>
+      <div class="sidebar-form">
+        <div class="sf-row">
+          <span class="sf-label">Sides</span>
+          <input id="shape-sides" type="number" min="3" max="64" step="1" value="12" title="Side count for parametric 3D and 2D shapes"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">2D Depth</span>
+          <input id="shape-depth" type="number" min="0.05" max="8" step="0.05" value="0.2" title="Extrude depth for 2D shapes"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Opacity</span>
+          <input id="place-opacity" type="number" min="0.02" max="1" step="0.01" value="1" title="Opacity for newly placed objects"/>
+        </div>
+        <div class="sf-sub">Paint</div>
+        <div class="sf-row">
+          <span class="sf-label">Brush</span>
+          <input id="paint-color" type="color" value="#4a5568" title="Brush color"/>
+          <button id="btn-pick-color" type="button" title="Pick color from scene">Pick</button>
+        </div>
+        <div class="sf-sub">Eraser</div>
+        <div class="sf-row">
+          <span class="sf-label">Shape</span>
+          <select id="eraser-shape" title="Eraser cutter shape">
+            <option value="box" selected>Box</option>
+            <option value="sphere">Sphere</option>
+            <option value="cylinder">Cylinder</option>
+            <option value="prism">Prism</option>
+            <option value="square2d">Square 2D</option>
+            <option value="triangle2d">Triangle 2D</option>
+            <option value="circle2d">Circle 2D</option>
+            <option value="polygon2d">2D Polygon</option>
+          </select>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Size</span>
+          <input id="eraser-size" type="number" min="0.1" max="12" step="0.1" value="1" title="Eraser cutter size"/>
+        </div>
+      </div>
+      </div>
+
+      <div id="library-pane-audio" class="lib-pane">
+        <div class="panel-hdr">🔊 Audio Library</div>
+        <div class="sidebar-form">
+          <div class="sf-row">
+            <button id="btn-audio-import" type="button" style="width:100%;justify-content:center">+ Import Audio</button>
+            <input id="audio-import-input" type="file" accept="audio/*" multiple style="display:none"/>
+          </div>
+          <div style="font-size:9px;color:var(--muted);line-height:1.35">Imported files are saved inside this project and referenced by name in function actions.</div>
+          <div id="audio-lib-list" class="audio-lib-list"></div>
         </div>
       </div>
     </div>
@@ -791,6 +1078,10 @@
           <input id="gr-gravity" type="number" min="0" max="100" step="0.5" value="24" title="Gravity strength"/>
         </div>
         <div class="sf-row">
+          <span class="sf-label">Gravity On</span>
+          <input id="gr-gravity-enabled" type="checkbox" checked title="Toggle gravity for flying in playtest"/>
+        </div>
+        <div class="sf-row">
           <span class="sf-label">Height</span>
           <input id="gr-height" type="number" min="0.5" max="5" step="0.1" value="1.75" title="Player height"/>
         </div>
@@ -834,13 +1125,38 @@
           </select>
         </div>
 
+        <div class="sf-sub">Player Profile</div>
+        <div class="sf-row">
+          <span class="sf-label">Name</span>
+          <input id="player-name" type="text" value="Player" title="Player identity name" style="width:100%"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Groups</span>
+          <input id="player-groups" type="text" list="player-groups-options" value="default" title="Comma separated groups used for team spawn matching" style="width:100%"/>
+          <datalist id="player-groups-options"></datalist>
+        </div>
+
         <div class="sf-sub">Conditional Triggers</div>
         <div id="cond-triggers-list"></div>
         <button id="btn-add-cond-trigger" style="margin-top:4px;width:100%;font-size:10px;padding:3px 6px">+ Add Trigger</button>
+      </div>
+    </div>
 
-        <div class="sf-sub">Functions</div>
-        <div id="control-functions-list"></div>
-        <button id="btn-add-control-fn" style="margin-top:4px;width:100%;font-size:10px;padding:3px 6px">+ Add Function</button>
+    <div id="sidebar-vars" class="sidebar-section">
+      <div class="panel-hdr">📊 Variables</div>
+      <div class="sidebar-form">
+        <div style="font-size:9px;color:var(--muted);line-height:1.35">Named integer values. They keep their latest playtest value until you reset them.</div>
+        <div id="vars-list"></div>
+        <button id="btn-add-var" style="margin-top:4px;width:100%;font-size:10px;padding:3px 6px">+ Add Variable</button>
+      </div>
+    </div>
+
+    <div id="sidebar-bools" class="sidebar-section">
+      <div class="panel-hdr">🔵 Booleans</div>
+      <div class="sidebar-form">
+        <div style="font-size:9px;color:var(--muted);line-height:1.35">Named true/false values. They keep their latest playtest state until you reset them.</div>
+        <div id="bools-list"></div>
+        <button id="btn-add-bool" style="margin-top:4px;width:100%;font-size:10px;padding:3px 6px">+ Add Boolean</button>
       </div>
     </div>
 
@@ -871,8 +1187,30 @@
     <div id="status-bar"><span id="status-text">Edit Mode</span></div>
   </div>
 
+  <div id="functions-resizer" title="Drag to resize functions panel">
+    <button id="functions-toggle" type="button" title="Collapse functions panel" aria-label="Collapse functions panel" aria-pressed="false">❯</button>
+  </div>
+
+  <div id="functions-panel">
+    <div class="panel-hdr">🧠 Functions</div>
+    <div class="sidebar-form">
+      <div class="sf-row">
+        <span class="sf-label">Find</span>
+        <input id="control-fn-search" type="text" placeholder="Search functions" style="width:100%"/>
+      </div>
+      <div class="sf-row">
+        <span class="sf-label">Group</span>
+        <input id="control-fn-new-group" type="text" placeholder="Add group" style="width:100%"/>
+        <button id="btn-add-control-group" type="button" style="padding:2px 7px">+</button>
+      </div>
+      <div style="font-size:9px;color:var(--muted);line-height:1.35;margin:-1px 0 1px 0">Organize functions into expandable groups. Each function can be assigned to a group.</div>
+      <div id="control-functions-list"></div>
+      <button id="btn-add-control-fn" style="margin-top:2px;width:100%;font-size:10px;padding:4px 6px">+ Add Function</button>
+    </div>
+  </div>
+
 </div>
 
-<script type="module" src="./main.js"></script>
+<script type="module" src="./main.js?v=from-to-orig-2"></script>
 </body>
 </html>

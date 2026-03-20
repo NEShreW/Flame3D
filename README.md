@@ -258,6 +258,8 @@ The `Touching` condition supports:
 - `group`: Match against block group names.
 - `name`: Match against block labels.
 
+The condition represents the player touching the matched object(s), and appears in the UI as `Touching Player`.
+
 Objects can belong to multiple groups. A group match passes if any assigned group matches the condition value.
 
 When `group` is selected, the input shows existing group suggestions while still allowing a new group value to be typed manually.
@@ -354,6 +356,7 @@ Available on visible object/block types.
 - `Switch`: Makes the selected object shootable during playtest.
 - `Var`: Chooses which runtime value gates the switch.
 - `Range`: Inclusive min/max range that must be met before the switch fires its functions.
+- `Mode`: `One Shot` stops after function completion, `Repeat` allows repeated runs.
 
 ### Light Properties
 
@@ -379,7 +382,7 @@ Functions support:
 - Named function IDs such as `1`, `2`, or `raiseLift`.
 - `IF` checks against another function name before the command runs.
 - Targeting by `group` or `name`.
-- `move` commands with `Move XYZ`, optional `Else XYZ`, animation style, and duration.
+- `move` commands with `From XYZ` and `To XYZ`, both relative to the target object's original playtest-start position, plus animation style and duration.
 - Move coordinates are relative to the target object's playtest-start position, not world origin.
 - `light` commands that can `toggle`, `enable`, `disable`, set `intensity`, or set `distance` on target objects.
 - `Copy` so you can duplicate and tweak existing functions quickly.
