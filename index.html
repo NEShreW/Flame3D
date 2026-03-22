@@ -354,6 +354,28 @@
       font-weight: 700;
       letter-spacing: .08em;
       text-transform: uppercase;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      user-select: none;
+    }
+    .lib-category-title::after {
+      content: '▾';
+      margin-left: auto;
+      font-size: 10px;
+      transition: transform .15s;
+    }
+    .lib-category-title.collapsed::after {
+      transform: rotate(-90deg);
+    }
+    .lib-category-body {
+      overflow: hidden;
+      transition: max-height .2s ease;
+      max-height: 600px;
+    }
+    .lib-category-body.collapsed {
+      max-height: 0;
+      padding: 0;
     }
     .lib-btn {
       flex-direction: column;
@@ -377,7 +399,11 @@
       color: var(--muted); font-size: 9px; padding: 6px 0 2px;
       letter-spacing: .08em; text-transform: uppercase; font-weight: 700;
       border-bottom: 1px solid var(--border); margin-bottom: 2px;
+      cursor: pointer; user-select: none;
     }
+    .sf-sub:hover { color: var(--text); }
+    .sf-sub::before { content: '▾ '; font-size: 8px; }
+    .sf-sub.collapsed::before { content: '▸ '; }
 
     /* Conditional trigger entries */
     .ct-entry {
@@ -390,6 +416,17 @@
     .ct-del { background: none; border: none; color: var(--danger); cursor: pointer; font-size: 12px; padding: 0 3px; }
 
     #props-panel { flex: 0 0 auto; overflow: visible; border-top: 1px solid var(--border); }
+    .props-category { border-bottom: 1px solid var(--border); }
+    .props-cat-hdr {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--accentHi);
+      padding: 5px 11px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .props-cat-hdr:hover { background: var(--surface2); }
+    .props-cat-body.collapsed { display: none; }
     .prop-row {
       display: flex;
       align-items: flex-start;
@@ -497,6 +534,53 @@
       min-height: 0;
       overflow: hidden;
     }
+    .fn-panel-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      background: #0f141b;
+      flex-shrink: 0;
+    }
+    .fn-panel-tab {
+      flex: 1;
+      text-align: center;
+      font-size: 11px;
+      padding: 6px 8px;
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+    }
+    .fn-panel-tab:hover { color: var(--text); background: var(--surface2); }
+    .fn-panel-tab.active { color: var(--accentHi); border-bottom-color: var(--accentHi); }
+    .fn-pane { display: none; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
+    .fn-pane.active { display: flex; }
+    .objlib-item {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 7px;
+      border-radius: 4px;
+      cursor: pointer;
+      border: 1px solid transparent;
+      margin-bottom: 2px;
+    }
+    .objlib-item:hover { background: var(--surface2); }
+    .objlib-item.selected { background: var(--accent); border-color: var(--accentHi); }
+    .objlib-swatch {
+      width: 26px;
+      height: 26px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+    }
+    .objlib-info { flex: 1; min-width: 0; }
+    .objlib-name { font-size: 10px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+    .objlib-detail { font-size: 9px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
     #functions-panel .sidebar-form {
       flex: 1;
       display: flex;
@@ -605,6 +689,23 @@
       backdrop-filter: blur(4px);
       z-index: 10;
     }
+    /* ── Coordinate HUD ───────────────────────────────────── */
+    #coord-hud {
+      position: absolute;
+      top: 10px; right: 11px;
+      background: rgba(13,17,23,.88);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 11px;
+      font-family: monospace;
+      color: #c9d1d9;
+      pointer-events: none;
+      white-space: pre;
+      backdrop-filter: blur(4px);
+      z-index: 20;
+      line-height: 1.5;
+    }
     .s-mode  { color: var(--accentHi); font-weight: 600; }
     .s-play  { color: var(--success);  font-weight: 600; }
     .s-sep   { opacity: .4; margin: 0 5px; }
@@ -710,12 +811,20 @@
   <div class="tb-group">
     <span class="tb-label">Menu</span>
     <select id="top-menu-select" title="Switch toolbar controls">
-      <option value="block" selected>Block</option>
-      <option value="light">Light</option>
-      <option value="grid">Grid</option>
-      <option value="player">Player</option>
-      <option value="vars">Vars</option>
-      <option value="bools">Bools</option>
+      <optgroup label="Scene">
+        <option value="block" selected>Block</option>
+        <option value="light">Light</option>
+        <option value="grid">Grid</option>
+      </optgroup>
+      <optgroup label="Gameplay">
+        <option value="player">Player</option>
+        <option value="vars">Vars</option>
+        <option value="bools">Bools</option>
+      </optgroup>
+      <optgroup label="Project">
+        <option value="worlds">Worlds</option>
+        <option value="files">Files</option>
+      </optgroup>
     </select>
   </div>
 
@@ -725,21 +834,25 @@
   <div class="top-panel active" data-panel="block">
     <div class="tb-group">
       <span class="tb-label">Mode</span>
-      <button id="btn-place"  class="active" title="Place objects">⊕ Place</button>
-      <button id="btn-select"               title="Select &amp; transform (1/2/3)">↗ Select</button>
-      <button id="btn-delete"               title="Delete objects">✕ Delete</button>
-      <button id="btn-paint"                title="Paint object colors">🖌 Paint</button>
-      <button id="btn-erase"                title="Cut holes from meshes">◫ Erase</button>
+      <select id="mode-select" title="Editor mode">
+        <option value="place" selected>⊕ Place</option>
+        <option value="select">↗ Select</option>
+        <option value="delete">✕ Delete</option>
+        <option value="paint">🖌 Paint</option>
+        <option value="erase">◫ Erase</option>
+      </select>
     </div>
 
     <span class="tb-sep"></span>
 
     <div class="tb-group" id="transform-group" style="opacity:.4;pointer-events:none">
       <span class="tb-label">Gizmo</span>
-      <button id="btn-translate" class="active" title="Move (1)">↔ Move</button>
-      <button id="btn-rotate"                   title="Rotate (2)">↻ Rot</button>
-      <button id="btn-scale"                    title="Scale (3)">⤡ Scale</button>
-      <button id="btn-select-all"              title="Select all objects (Ctrl+A)">☷ All</button>
+      <select id="gizmo-select" title="Transform gizmo">
+        <option value="translate" selected>↔ Move</option>
+        <option value="rotate">↻ Rot</option>
+        <option value="scale">⤡ Scale</option>
+      </select>
+      <button id="btn-select-all" title="Select all objects (Ctrl+A)">☷ All</button>
       <span class="tb-mini">Sides</span>
       <label class="axis-side-wrap" title="Scale side for X axis (X hotkey)">
         <span class="axis-side-lbl">X</span>
@@ -788,27 +901,29 @@
   <div class="top-panel" data-panel="player"></div>
   <div class="top-panel" data-panel="vars"></div>
   <div class="top-panel" data-panel="bools"></div>
+  <div class="top-panel" data-panel="files">
+    <div class="tb-group">
+      <button id="btn-save-project" title="Save project to library">💾 Save Project</button>
+      <button id="btn-save-json" title="Export level as JSON file">📤 Export JSON</button>
+      <button id="btn-load" title="Load level from JSON">📂 Load JSON</button>
+      <input  id="load-input" type="file" accept=".json" style="display:none"/>
+    </div>
+    <span class="tb-sep"></span>
+    <div class="tb-group">
+      <button id="btn-export-game" title="Export runtime game HTML (uses local main.js)">🎮 Game HTML</button>
+      <button id="btn-export-loader" title="Export runtime launcher HTML (uses local main.js)">🧩 Loader HTML</button>
+    </div>
+    <span class="tb-sep"></span>
+    <div class="tb-group">
+      <button id="btn-clear" class="danger-btn" title="Clear all objects">🗑 Clear</button>
+    </div>
+  </div>
 
   <span class="tb-sep"></span>
 
   <div class="tb-group">
     <button id="btn-undo" disabled title="Undo (Ctrl+Z)">↩ Undo</button>
     <button id="btn-redo" disabled title="Redo (Ctrl+Y)">↪ Redo</button>
-  </div>
-
-  <span class="tb-sep"></span>
-
-  <button id="btn-clear" class="danger-btn" title="Clear all objects">🗑 Clear</button>
-
-  <span class="tb-sep"></span>
-
-  <div class="tb-group">
-    <button id="btn-save-project" title="Save project">💾 Save</button>
-    <button id="btn-save-json" title="Export level as JSON file">📤 Export</button>
-    <button id="btn-export-game" title="Export runtime game HTML (uses local main.js)">🎮 Game HTML</button>
-    <button id="btn-export-loader" title="Export runtime launcher HTML (uses local main.js)">🧩 Loader HTML</button>
-    <button id="btn-load" title="Load level from JSON">📂 Load</button>
-    <input  id="load-input" type="file" accept=".json" style="display:none"/>
   </div>
 
   <span class="tb-sep"></span>
@@ -839,18 +954,18 @@
       <div id="library-pane-objects" class="lib-pane active">
       <div class="lib-category">
         <div class="lib-category-title">Objects / Blocks</div>
-        <div class="lib-grid">
+        <div class="lib-category-body"><div class="lib-grid">
           <button class="lib-btn active" data-type="wall">
             <span class="icon">🧱</span>Wall
           </button>
           <button class="lib-btn" data-type="floor">
             <span class="icon">⬜</span>Floor
           </button>
-        </div>
+        </div></div>
       </div>
       <div class="lib-category">
         <div class="lib-category-title">3D Primitives</div>
-        <div class="lib-grid">
+        <div class="lib-category-body"><div class="lib-grid">
           <button class="lib-btn" data-type="cube">
             <span class="icon">🧊</span>Cube
           </button>
@@ -872,11 +987,11 @@
           <button class="lib-btn" data-type="torus">
             <span class="icon">⭕</span>Torus
           </button>
-        </div>
+        </div></div>
       </div>
       <div class="lib-category">
         <div class="lib-category-title">2D Shapes</div>
-        <div class="lib-grid">
+        <div class="lib-category-body"><div class="lib-grid">
           <button class="lib-btn" data-type="plane2d">
             <span class="icon">▭</span>Square
           </button>
@@ -889,19 +1004,19 @@
           <button class="lib-btn" data-type="polygon2d">
             <span class="icon">⬟</span>Polygon
           </button>
-        </div>
+        </div></div>
       </div>
       <div class="lib-category">
         <div class="lib-category-title">Lighting</div>
-        <div class="lib-grid">
+        <div class="lib-category-body"><div class="lib-grid">
           <button class="lib-btn" data-type="light">
             <span class="icon">💡</span>Light
           </button>
-        </div>
+        </div></div>
       </div>
       <div class="lib-category">
         <div class="lib-category-title">Gameplay</div>
-        <div class="lib-grid">
+        <div class="lib-category-body"><div class="lib-grid">
           <button class="lib-btn" data-type="target">
             <span class="icon">🎯</span>Target
           </button>
@@ -911,18 +1026,18 @@
           <button class="lib-btn" data-type="spawn">
             <span class="icon">🚩</span>Spawn
           </button>
-        </div>
+        </div></div>
       </div>
       <div class="lib-category">
         <div class="lib-category-title">Control</div>
-        <div class="lib-grid">
+        <div class="lib-category-body"><div class="lib-grid">
           <button class="lib-btn" data-type="trigger">
             <span class="icon">🎛</span>Control
           </button>
           <button class="lib-btn" data-type="keypad">
             <span class="icon">⌨</span>Keypad
           </button>
-        </div>
+        </div></div>
       </div>
       <div class="panel-hdr">🧰 Shape &amp; Tools</div>
       <div class="sidebar-form">
@@ -939,6 +1054,14 @@
           <input id="place-opacity" type="number" min="0.02" max="1" step="0.01" value="1" title="Opacity for newly placed objects"/>
         </div>
         <div class="sf-sub">Paint</div>
+        <div class="sf-row">
+          <span class="sf-label">Mode</span>
+          <select id="paint-mode" title="Paint sub-mode">
+            <option value="draw" selected>Draw</option>
+            <option value="erase-paint">Erase Paint</option>
+            <option value="fill">Fill</option>
+          </select>
+        </div>
         <div class="sf-row">
           <span class="sf-label">Brush</span>
           <input id="paint-color" type="color" value="#4a5568" title="Brush color"/>
@@ -1016,6 +1139,58 @@
           <span class="sf-label">Cycle</span>
           <input id="sun-day-cycle-enabled" type="checkbox" title="Enable automatic day/night cycle during playtest"/>
         </div>
+        <div class="sf-row">
+          <span class="sf-label">Sun Size</span>
+          <input id="sun-size" type="number" min="100" max="10000" step="50" value="800" title="Apparent sun disk size"/>
+        </div>
+        <div class="sf-sub">Sky</div>
+        <div class="sf-row">
+          <span class="sf-label">Color</span>
+          <input id="sky-color" type="color" value="#5588cc" title="Base sky zenith color"/>
+        </div>
+        <div class="sf-sub">Clouds</div>
+        <div class="sf-row">
+          <span class="sf-label">Enabled</span>
+          <input id="clouds-enabled" type="checkbox" title="Show procedural clouds"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Wind Spd</span>
+          <input id="cloud-wind-speed" type="number" min="0" max="50" step="0.5" value="3" title="Cloud wind speed"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Wind Dir°</span>
+          <input id="cloud-wind-dir" type="number" min="0" max="360" step="5" value="45" title="Wind direction in degrees"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Opacity</span>
+          <input id="cloud-opacity" type="number" min="0" max="1" step="0.05" value="0.6" title="Cloud opacity"/>
+        </div>
+        <div class="sf-sub">Stars</div>
+        <div class="sf-row">
+          <span class="sf-label">Enabled</span>
+          <input id="stars-enabled" type="checkbox" checked title="Show stars at night"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Count</span>
+          <input id="stars-count" type="number" min="100" max="5000" step="100" value="1500" title="Number of stars"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Brightness</span>
+          <input id="stars-brightness" type="number" min="0.1" max="3" step="0.1" value="1" title="Star brightness"/>
+        </div>
+        <div class="sf-sub">Moon</div>
+        <div class="sf-row">
+          <span class="sf-label">Enabled</span>
+          <input id="moon-enabled" type="checkbox" checked title="Show moon at night"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Brightness</span>
+          <input id="moon-brightness" type="number" min="0.1" max="5" step="0.1" value="1.5" title="Moon brightness"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Aura</span>
+          <input id="moon-aura" type="number" min="0" max="3" step="0.1" value="0.8" title="Moon glow aura intensity"/>
+        </div>
         <div class="sf-sub">Quality</div>
         <div class="sf-row">
           <span class="sf-label">Shadows</span>
@@ -1029,6 +1204,23 @@
         <div class="sf-row">
           <span class="sf-label">Light Dist</span>
           <input id="quality-light-dist" type="number" min="10" max="200" step="5" value="60" title="Point light render distance"/>
+        </div>
+        <div class="sf-sub">Fog</div>
+        <div class="sf-row">
+          <span class="sf-label">Enabled</span>
+          <input id="fog-enabled" type="checkbox" title="Enable distance fog"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Color</span>
+          <input id="fog-color" type="color" value="#0d1117" title="Fog color"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Density</span>
+          <input id="fog-density" type="number" min="0.001" max="1" step="0.001" value="0.025" title="Fog density (exponential)"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Brightness</span>
+          <input id="fog-brightness" type="number" min="0" max="5" step="0.1" value="1" title="Fog brightness multiplier"/>
         </div>
       </div>
     </div>
@@ -1056,10 +1248,36 @@
           <span class="sf-label">Enabled</span>
           <input id="grid-fill-enabled" type="checkbox" title="Toggle grid floor fill"/>
         </div>
+        <div class="sf-sub">World Border</div>
+        <div class="sf-row">
+          <span class="sf-label">Enabled</span>
+          <input id="world-border-enabled" type="checkbox" title="Enable world boundaries that prevent the player from leaving the area"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Min X</span>
+          <input id="world-border-min-x" type="number" step="1" value="-50" style="width:64px" title="Minimum X boundary"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Max X</span>
+          <input id="world-border-max-x" type="number" step="1" value="50" style="width:64px" title="Maximum X boundary"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Min Z</span>
+          <input id="world-border-min-z" type="number" step="1" value="-50" style="width:64px" title="Minimum Z boundary"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Max Z</span>
+          <input id="world-border-max-z" type="number" step="1" value="50" style="width:64px" title="Maximum Z boundary"/>
+        </div>
         <div class="sf-sub">Quality</div>
         <div class="sf-row">
           <span class="sf-label">Render Dist</span>
           <input id="quality-render-dist" type="number" min="20" max="500" step="10" value="150" title="Block render distance"/>
+        </div>
+        <div class="sf-sub">Editor</div>
+        <div class="sf-row">
+          <span class="sf-label">Orbit Dot</span>
+          <input id="orbit-indicator-toggle" type="checkbox" checked title="Show the orbit pivot point indicator"/>
         </div>
       </div>
     </div>
@@ -1088,6 +1306,26 @@
         <div class="sf-row">
           <span class="sf-label">Sprint</span>
           <input id="gr-sprint" type="number" min="1" max="30" step="0.5" value="12" title="Sprint speed"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Duration</span>
+          <input id="gr-sprint-duration" type="number" min="0" max="60" step="0.5" value="0" title="How long a player can sprint before needing to recharge (0 = unlimited)"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Recharge</span>
+          <input id="gr-sprint-recharge" type="number" min="0.1" max="60" step="0.1" value="3" title="Time in seconds to fully recharge sprint from empty"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Air Sprint</span>
+          <input id="gr-allow-air-sprint" type="checkbox" title="Allow sprinting in the air without momentum (if off, must be sprinting on ground first)"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Air Dash</span>
+          <input id="gr-airdash-enabled" type="checkbox" title="Allow a one-time air sprint dash while airborne"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Dash Time</span>
+          <input id="gr-airdash-duration" type="number" min="0.1" max="10" step="0.1" value="0.5" title="How long in seconds the air dash lasts"/>
         </div>
 
         <div class="sf-sub">Health</div>
@@ -1125,6 +1363,12 @@
           </select>
         </div>
 
+        <div class="sf-sub">Ground Touch</div>
+        <div class="sf-row">
+          <span class="sf-label">Function</span>
+          <input id="gr-ground-touch-fn" type="text" value="" placeholder="function name" title="Function to call when the player touches the ground/grid" style="width:100%"/>
+        </div>
+
         <div class="sf-sub">Player Profile</div>
         <div class="sf-row">
           <span class="sf-label">Name</span>
@@ -1134,6 +1378,16 @@
           <span class="sf-label">Groups</span>
           <input id="player-groups" type="text" list="player-groups-options" value="default" title="Comma separated groups used for team spawn matching" style="width:100%"/>
           <datalist id="player-groups-options"></datalist>
+        </div>
+
+        <div class="sf-sub">Field of View</div>
+        <div class="sf-row">
+          <span class="sf-label">Editor FOV</span>
+          <input id="fov-editor" type="number" min="30" max="150" step="1" value="60" title="Editor camera field of view"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Playtest FOV</span>
+          <input id="fov-playtest" type="number" min="30" max="150" step="1" value="75" title="First-person playtest field of view"/>
         </div>
 
         <div class="sf-sub">Conditional Triggers</div>
@@ -1160,6 +1414,31 @@
       </div>
     </div>
 
+    <div id="sidebar-worlds" class="sidebar-section">
+      <div class="panel-hdr">🌍 Worlds</div>
+      <div class="sidebar-form">
+        <div style="font-size:9px;color:var(--muted);line-height:1.35">Manage multiple worlds within one project. Objects belong to the active world.</div>
+        <div id="worlds-tab-bar" style="display:flex;gap:2px;flex-wrap:wrap;margin:4px 0"></div>
+        <button id="btn-add-world" style="margin-top:4px;width:100%;font-size:10px;padding:3px 6px">+ Add World</button>
+      </div>
+    </div>
+
+    <div id="sidebar-files" class="sidebar-section">
+      <div class="panel-hdr">📁 Files</div>
+      <div class="sidebar-form">
+        <div style="font-size:9px;color:var(--muted);line-height:1.35">Save, load, and export your project.</div>
+        <div class="sf-sub">💾 Save &amp; Load</div>
+        <div class="sf-row"><button id="sb-save-project" style="width:100%;font-size:10px;padding:4px 6px">💾 Save Project to Library</button></div>
+        <div class="sf-row"><button id="sb-save-json" style="width:100%;font-size:10px;padding:4px 6px">📤 Export Level as JSON</button></div>
+        <div class="sf-row"><button id="sb-load-json" style="width:100%;font-size:10px;padding:4px 6px">📂 Load Level from JSON</button></div>
+        <div class="sf-sub">🎮 Export</div>
+        <div class="sf-row"><button id="sb-export-game" style="width:100%;font-size:10px;padding:4px 6px">🎮 Export Game HTML</button></div>
+        <div class="sf-row"><button id="sb-export-loader" style="width:100%;font-size:10px;padding:4px 6px">🧩 Export Loader HTML</button></div>
+        <div class="sf-sub">⚠️ Danger Zone</div>
+        <div class="sf-row"><button id="sb-clear-all" class="danger-btn" style="width:100%;font-size:10px;padding:4px 6px">🗑 Clear All Objects</button></div>
+      </div>
+    </div>
+
     <!-- Properties panel -->
     <div id="props-panel" style="display:none">
       <div class="panel-hdr">⚙ Properties</div>
@@ -1174,6 +1453,7 @@
   <!-- 3-D viewport -->
   <div id="canvas-container">
     <div id="crosshair"></div>
+    <div id="coord-hud"></div>
     <div id="play-hint">WASD · Move &nbsp;│&nbsp; R · Sprint &nbsp;│&nbsp; Space · Jump &nbsp;│&nbsp; Mouse · Look &nbsp;│&nbsp; LMB · Shoot &nbsp;│&nbsp; Esc · Exit</div>
     <div id="health-hud" style="display:none;position:absolute;top:12px;left:12px;z-index:20;pointer-events:none">
       <div style="display:flex;align-items:center;gap:6px">
@@ -1182,6 +1462,12 @@
           <div id="health-bar-fill" style="width:100%;height:100%;background:linear-gradient(90deg,#e04040,#f06060);border-radius:4px;transition:width .2s"></div>
         </div>
         <span id="health-text" style="font-size:11px;color:#e6edf3;min-width:36px">100</span>
+      </div>
+      <div id="sprint-hud" style="display:none;margin-top:4px;align-items:center;gap:6px">
+        <span style="color:#40a0ff;font-size:12px;font-weight:700">⚡</span>
+        <div style="width:140px;height:6px;background:rgba(255,255,255,.12);border-radius:3px;overflow:hidden;border:1px solid rgba(255,255,255,.12)">
+          <div id="sprint-bar-fill" style="width:100%;height:100%;background:linear-gradient(90deg,#3090e0,#50b0ff);border-radius:3px;transition:width .1s"></div>
+        </div>
       </div>
     </div>
     <div id="status-bar"><span id="status-text">Edit Mode</span></div>
@@ -1192,25 +1478,72 @@
   </div>
 
   <div id="functions-panel">
-    <div class="panel-hdr">🧠 Functions</div>
-    <div class="sidebar-form">
-      <div class="sf-row">
-        <span class="sf-label">Find</span>
-        <input id="control-fn-search" type="text" placeholder="Search functions" style="width:100%"/>
+    <div class="fn-panel-tabs">
+      <button class="fn-panel-tab active" data-fn-pane="functions" type="button">🧠 Functions</button>
+      <button class="fn-panel-tab" data-fn-pane="objlib" type="button">📋 Objects</button>
+    </div>
+
+    <!-- Functions pane (existing) -->
+    <div class="fn-pane active" id="fn-pane-functions">
+      <div class="sidebar-form">
+        <div class="sf-row">
+          <span class="sf-label">Find</span>
+          <input id="control-fn-search" type="text" placeholder="Search functions" style="width:100%"/>
+        </div>
+        <div class="sf-row">
+          <span class="sf-label">Group</span>
+          <input id="control-fn-new-group" type="text" placeholder="Add group" style="width:100%"/>
+          <button id="btn-add-control-group" type="button" style="padding:2px 7px">+</button>
+        </div>
+        <div style="font-size:9px;color:var(--muted);line-height:1.35;margin:-1px 0 1px 0">Organize functions into expandable groups. Each function can be assigned to a group.</div>
+        <div id="control-functions-list"></div>
+        <button id="btn-add-control-fn" style="margin-top:2px;width:100%;font-size:10px;padding:4px 6px">+ Add Function</button>
       </div>
-      <div class="sf-row">
-        <span class="sf-label">Group</span>
-        <input id="control-fn-new-group" type="text" placeholder="Add group" style="width:100%"/>
-        <button id="btn-add-control-group" type="button" style="padding:2px 7px">+</button>
+    </div>
+
+    <!-- Objects Library pane (new) -->
+    <div class="fn-pane" id="fn-pane-objlib">
+      <div style="padding:6px 9px;display:flex;flex-direction:column;gap:5px">
+        <input id="objlib-search" type="text" placeholder="Search by name, group, type…" style="width:100%;font-size:10px;padding:3px 6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px"/>
+        <div style="display:flex;gap:4px;align-items:center">
+          <span style="font-size:9px;color:var(--muted);white-space:nowrap">Filter</span>
+          <select id="objlib-filter-cat" style="flex:1;font-size:9px;padding:2px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px">
+            <option value="">All Categories</option>
+            <option value="structure">Structure</option>
+            <option value="shapes">Shapes</option>
+            <option value="flat">Flat / 2D</option>
+            <option value="gameplay">Gameplay</option>
+            <option value="grouped">In a Group</option>
+            <option value="named">Has Name</option>
+            <option value="has-function">Has Function</option>
+          </select>
+          <select id="objlib-filter-type" style="flex:1;font-size:9px;padding:2px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px">
+            <option value="">All Types</option>
+          </select>
+          <select id="objlib-filter-world" style="flex:1;font-size:9px;padding:2px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px">
+            <option value="">All Worlds</option>
+          </select>
+        </div>
+        <div style="display:flex;gap:4px;align-items:center">
+          <span style="font-size:9px;color:var(--muted);white-space:nowrap">Sort</span>
+          <select id="objlib-sort" style="flex:1;font-size:9px;padding:2px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px">
+            <option value="name-asc">Name A→Z</option>
+            <option value="name-desc">Name Z→A</option>
+            <option value="newest">Newest First</option>
+            <option value="oldest">Oldest First</option>
+            <option value="type">By Type</option>
+            <option value="world">By World</option>
+            <option value="distance">Distance from Camera</option>
+          </select>
+          <span id="objlib-count" style="font-size:9px;color:var(--muted);white-space:nowrap"></span>
+        </div>
       </div>
-      <div style="font-size:9px;color:var(--muted);line-height:1.35;margin:-1px 0 1px 0">Organize functions into expandable groups. Each function can be assigned to a group.</div>
-      <div id="control-functions-list"></div>
-      <button id="btn-add-control-fn" style="margin-top:2px;width:100%;font-size:10px;padding:4px 6px">+ Add Function</button>
+      <div id="objlib-list" style="flex:1;overflow-y:auto;overflow-x:hidden;padding:0 4px 6px 4px"></div>
     </div>
   </div>
 
 </div>
 
-<script type="module" src="./main.js?v=from-to-orig-2"></script>
+<script type="module" src="./main.js?v=20260320b"></script>
 </body>
 </html>
