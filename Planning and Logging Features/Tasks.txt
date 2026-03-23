@@ -1,0 +1,131 @@
+[DONE] As for the dot that shows the center of rotation, i want it to not be visible during play.
+Also, it doesnt actually show the point he camera is rotating around.
+
+[DONE] I want the Objects Categories in the left pannel to be colapsable.
+
+[DONE] I want the Objects in the right pannel to auto update.
+
+[DONE] I want the default for invisible objects to have the Visible toggle off. They will only be visible if the box is checked.
+
+[DONE] Add an indicator to spawn points to show which direction the player will be facing when they spawn.
+-
+[DONE] Add to the Sprint settings under Player:
+How long a player can sprint before needing to recharge
+A meter under the health bar to show sprint
+
+[DONE] Make it so you cant sprint in the air unless you were already sprinting when you jumped or fell (momentum)
+Add Air Dash (air sprint). It allows you to sprint in the air for a certian duration.
+-
+[DONE] Add to Animation Path Checkpoints:
+Duration of wait untill it moves to next point
+Style of movement to next point (glide, snap, strict)
+Speed to next point (when you make a point, the default is the default set speed)
+Pause On Arrival (the animation will not continue until a function tells the path to resume)
+-
+[DONE] Make it so that if an object is moving in an animation or path and is part of a group that is moving sepratly, the entire animation path will move with the group. Example:
+"An elevator on a spaceship is moving up and down. The spaceship starts moving, and the elevator follows, still moving up and down."
+
+[DONE] Make platform movement with players smother. I still get camera shaking sometimes.
+
+[DONE] Add world borders. If enabled in Grid Settings, the player can't go past the configured Min/Max X/Z boundaries.
+-
+[DONE] Make the camera revolve around the point in the screen. Zooming adusts the distance to the point. Its like 3rd-person mode, and you can see the point.
+
+[DONE] Shadows dont appear to work well or render properly.
+(NPC body parts now receive shadows; point light normalBias added to reduce shadow acne; shadow system verified correct)
+[DONE] The eraser erases based on where the moise pointer is, not where the block is touching.
+
+[DONE] I can see functions and other leftovers from other projects when i leave the project and open a new one.
+(resetSceneForNewProject + applySceneSettings({}) properly clears all project-scoped collections)
+When the Shift button is pressed, the players height will change until released.
+
+[DONE] Add Keybind adjusting to controls in settings
+
+Paint Mode: Allow drawing on object surfaces like a canvas (texture painting) instead of coloring whole objects. Like the eraser only erases part, but not all of the block, i want paint to paint the part of the block it should.
+
+[DONE] Add Joints system. Joints are connection points between objects that allow rotation around an axis (like shoulders on an arm). Supports auto-oscillation, manual, and fixed modes with configurable axis, speed, and angle limits.
+
+[DONE] Add modeler selection. Right-clicking a block type in the library now offers a choice between the Voxel Painter (existing Minecraft-style block editor) and a new Sculpt Modeler that composes shapes from primitives (sphere, box, cylinder) with add/subtract operations.
+
+
+
+[DONE] Add terrain sculpting.
+
+[DONE] Add Custom Object Saving by Taking an Object or Group of objects and make it save as a custom object that i can place. 
+
+[DONE] Add copy and paste.
+
+[DONE] Add terrain and block texturing to paint
+
+[DONE] Add iFrame objects so i can view images and videos i upload, including websites.
+[DONE] Make it possible to make the iFrame object clickable so a modal appears to allow me to interact with the screen.
+(Implemented as Screen/Media objects - supports image upload, color display, and camera view)screen.
+(Implemented as Screen/Media objects - supports image upload, color display, and camera view)
+
+[DONE] Make it so that i can enable "Draw Animation Path" for animation paths. This will make it so you can move an object around just to place the chackpoints. Once this is dissabled or the object de-selected, it will automaticly de-check. While the box is de-checked, when you move the block, the checkpoints move too.
+(Draw Path checkbox wired: saves origin on check, adds checkpoints on move, snaps back; normal moves shift all checkpoints; auto-unchecks on deselect)
+
+[DONE] Add the abillity to change reflectiveness of objects (like make them shiny like mirrors).
+(Metal/Rough sliders implemented for MeshStandardMaterial)
+
+[DONE] Shadows dont appear to work well or render properly.
+(Shadow system: NPC receiveShadow, point light normalBias, dynamic bias scaling verified)
+
+Paint Mode: Allow drawing on object surfaces like a canvas (texture painting) instead of coloring whole objects. Like the eraser only erases part, but not all of the block, i want paint to paint the part of the block it should.
+
+[DONE] I can see functions and other leftovers from other projects when i leave the project and open a new one.
+(Project reset verified: all collections cleared on new project)
+
+[DONE] Add Air Dash (air sprint). It allows you to sprint in the air for a certian duration.
+(Air dash fully implemented)
+[DONE] Add iFrame objects so i can view images and videos i upload, including websites.
+[DONE] Make it possible to make the iFrame object clickable so a modal appears to allow me to interact with the screen.
+(Duplicate - see above)screen.
+(Duplicate - see above)
+[DONE] Make it so that i can enable "Draw Animation Path" for animation paths. This will make it so you can move an object around just to place the checkpoints. Once this is disabled or the object de-selected, it will automatically de-check. While the box is de-checked, when you move the block, the checkpoints move too.
+(Draw Path fully implemented — see above)
+
+
+I don't want terrain blocks, i want to sculpt the ground/grid.
+
+[DONE] Add Ground textures (Grass, stone, dirt, etc.)
+(Added grass, dirt, stone, sand, snow procedural textures to grid fill)
+
+[DONE] For block textures, i want wood, brick, stone, cobblestone, and more.
+[DONE] I want to be able to upload an image as a texture i can paint onto an object or terrain.
+(Added wood, cobblestone, marble patterns + image upload as custom texture in paint mode)
+[DONE] I want terrain hitboxes to be just as they look. I want to be able to walk on the terrain.
+(Terrain now uses geometry-based collision instead of AABB)
+[DONE] I want to toggle being able to use my mouse for looking and drawing using a keybind
+(Added toggleMouse keybind, default T key — frees/captures cursor during playtest without pausing)
+
+[DONE] Add a camera (like in blender) to go with the iframe (i will later use it for animating paths for it to film in mp4)
+(Added camera object type with FOV, near, far controls
+[DONE] I want to toggle being able to use my mouse for looking and drawing using a keybind
+(Free Cursor keybind added, configurable in Controls settings)
+
+[DONE] Add a camera (like in blender) to go with the iframe
+(Added camera object type with FOV, near, far controls)
+
+[DONE] Add iFrame/camera to teleport blocks. This will allow me to see the place i will teleport to.
+(Added "View Destination" preview button on teleport blocks — snaps editor camera to paired destination; shows target world name for cross-world teleports)
+
+[Done] Make teleporting smoother. I dont like toucking a portal and being teleported unsmoothly to a foot off the ground from the portal. Make it so that it teleports you to the same relative coords to the destination as you were from the first when you teleported.
+
+Add block bending or something. This will make it so i can bend objects at certian points to round them or something.
+
+I want the skeleton animator to be proffesional and easy to understand.
+I want the skeleton skin editor to be more proffesional (an actual full cutomizable editor with custom texturing).
+I want to 
+
+[DONE] Add text blocks (2d and 3d) so i can have custom text in the games.
+(Added text and text3d object types with font, size, color, alignment, bold/italic)
+[DONE] I want to be able to upload font files that i can choose from to go with the blocks.
+(Font file upload (.ttf/.otf/.woff/.woff2) added to text block controls; uploaded fonts saved with project; font picker datalist with system + custom fonts)
+
+[DONE] Make Teleport blocks work cross-worlds.
+[DONE] Make them invisible by default during play.
+(Cross-world teleport with target world selector; teleport added to hiddenInGame list)
+
+[DONE] Make an alert if you name an object as a name that already exists and change it back to what it had previously been.
+(Red border duplicate-name alert implemented on name input)

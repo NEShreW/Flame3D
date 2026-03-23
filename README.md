@@ -1,6 +1,6 @@
 # Flame3D
 
-Flame3D is a browser-based 3D FPS level editor built with Three.js. It combines a block placement workflow, object properties editing, lighting controls, atmosphere systems, grid tools, player game rules, variables, conditional triggers, save/load support, multi-world editing, and an in-editor playtest mode.
+Flame3D is a browser-based 3D level editor and game engine built with Three.js. It combines block placement, object sculpting, terrain modeling, texture painting, skeleton animation, copy/paste/duplicate workflows, teleport blocks, multi-world editing, a full atmosphere system, and in-editor playtesting into a single-file application.
 
 ## Table Of Contents
 
@@ -13,30 +13,41 @@ Flame3D is a browser-based 3D FPS level editor built with Three.js. It combines 
 7. Block Types
 8. Object Properties
 9. Editing Controls
-10. Playtest Controls
-11. Player Systems
-12. Control Systems
-13. Variables And Booleans
-14. Functions Panel
-15. Multi-World System
-16. Atmosphere And Sky
-17. Saving And Loading
-18. Runtime Mode
-19. Building The Editor
-20. Tips And Workflow
-21. Troubleshooting
-22. Current Scope
+10. Terrain System
+11. Texture Paint
+12. Custom Objects
+13. Sculpt Editor
+14. Skeleton Animation Editor
+15. Playtest Controls
+16. Player Systems
+17. Control Systems
+18. Variables And Booleans
+19. Functions Panel
+20. Multi-World System
+21. Atmosphere And Sky
+22. Saving And Loading
+23. Runtime Mode
+24. Building The Editor
+25. Tips And Workflow
+26. Troubleshooting
+27. Current Scope
 
 ## Overview
 
 Flame3D lets you:
 
-- Create block-based FPS levels in a live 3D viewport.
-- Place walls, floors, targets, lights, spawn points, and control blocks.
-- Place custom polygon shapes with configurable sides and depth.
-- Select, move, rotate, scale, group, and ungroup objects.
-- Paint object surfaces with a color brush and erase painted faces.
-- Edit per-object properties such as color, solidity, groups, label, visibility, light emission, target health, switch behavior, and control rules/functions.
+- Create block-based 3D levels in a live 3D viewport.
+- Place walls, floors, terrain, targets, lights, spawn points, teleport blocks, and control blocks.
+- Place 3D primitives (cube, sphere, cylinder, cone, pyramid, prism, torus) and 2D shapes (square, triangle, circle, polygon) with configurable sides and depth.
+- Sculpt terrain with raise, lower, flatten, and smooth brushes.
+- Paint object surfaces with color brushes and texture patterns (checker, brick, stripe, grid, noise, gradient).
+- Copy, paste, and duplicate objects with Ctrl+C, Ctrl+V, and Ctrl+D.
+- Save selections as reusable custom objects and place them from the sidebar.
+- Select, move, rotate, scale, group, and ungroup objects with transform gizmos.
+- Edit per-object properties such as color, solidity, groups, label, visibility, light emission, target health, switch behavior, traction, and control rules/functions.
+- Add teleport blocks that transport the player between paired locations.
+- Create and edit skeleton animations with a dedicated skeleton editor.
+- Create custom sculpted objects with a dedicated sculpt editor and CSG operations.
 - Configure sun, moon, stars, clouds, fog, sky color, day cycle, grid visuals, render quality, and player movement rules.
 - Define project-level variables and booleans for use in conditional logic.
 - Build conditional player logic such as health checks, position checks, and touching a named object or group.
@@ -100,6 +111,10 @@ The top bar is the primary editing command strip.
 - `Light`: Light and sun settings.
 - `Grid`: Grid display and render distance settings.
 - `Player`: Player movement, health, fall damage, spawn protection, and conditional triggers.
+- `Vars`: Project-level numeric variables.
+- `Bools`: Project-level boolean flags.
+- `Worlds`: Multi-world management.
+- `Files`: Save, load, and export options.
 
 ### Block Panel
 
@@ -153,14 +168,27 @@ Available while in Paint mode.
 - `Color`: Active brush color.
 - `Mode`: `Draw`, `Erase Paint`, or `Fill`.
 - `Pick`: Eyedropper tool to sample a color from an existing object.
+- `Pattern`: Texture pattern to paint (checker, brick, stripe, grid, noise, gradient).
+- `Color 2`: Secondary color for texture patterns.
+- `Scale`: Texture pattern scale.
+
+#### Clipboard Controls
+
+- `Copy`: Copy selected objects (also `Ctrl+C`).
+- `Paste`: Paste copied objects (also `Ctrl+V`).
+- `Duplicate`: Duplicate selected objects in place (also `Ctrl+D`).
+
+#### Custom Objects
+
+- `Save Selection as Custom Object`: Save the current selection as a reusable template.
+- Saved templates are listed below and can be placed by clicking them.
 
 #### Eraser Controls
 
 Available while in Erase mode.
 
-- `Shape`: Eraser shape (`box` or other options).
+- `Shape`: Eraser cutter shape (box, sphere, cylinder, prism, square 2D, triangle 2D, circle 2D, polygon 2D).
 - `Size`: Eraser radius.
-- Also drives surface and ground placement snapping.
 
 ### Undo And Redo
 
@@ -189,10 +217,12 @@ Available while in Erase mode.
 
 The Block menu is a categorized library of placeable objects.
 
-- `Objects / Blocks`: `Wall`, `Floor`
+- `Objects / Blocks`: `Wall`, `Floor`, `Terrain`
+- `3D Primitives`: `Cube`, `Sphere`, `Cylinder`, `Cone`, `Pyramid`, `Prism`, `Torus`
+- `2D Shapes`: `Square`, `Triangle`, `Circle`, `Polygon`
 - `Lighting`: `Light`
-- `Gameplay`: `Target`, `Spawn`
-- `Control`: `Control`
+- `Gameplay`: `Target`, `Checkpoint`, `Spawn`, `Joint`, `Skeleton`, `Pivot`, `Teleport`
+- `Control`: `Control`, `Keypad`
 
 The selected block type is used by Place mode.
 
@@ -373,44 +403,97 @@ When `group` is selected, the input shows existing group suggestions while still
 
 ## Block Types
 
-## Wall
+### Wall
 
 - Tall rectangular solid block.
 - Solid by default.
 - Good for structure and collision.
 
-## Floor
+### Floor
 
 - Flat rectangular solid block.
 - Solid by default.
 - Good for walkable surfaces and platforms.
 
-## Target
+### Terrain
+
+- Deformable terrain block with sculpting support.
+- Solid by default.
+- Supports raise, lower, flatten, and smooth brush operations.
+- Vertex-based sculpting in Paint mode with sculpt enabled.
+
+### Cube, Sphere, Cylinder, Cone, Pyramid, Prism, Torus
+
+- 3D primitive shapes with configurable parameters.
+- Can be solid or non-solid.
+- Cylinder, cone, prism, and torus respect the `Sides` setting.
+
+### Square, Triangle, Circle, Polygon (2D Shapes)
+
+- Flat 2D shapes extruded to configurable depth.
+- Circle and polygon respect the `Sides` setting.
+- Depth is set by the `2D Depth` control.
+
+### Target
 
 - Spherical target block.
 - Supports target health.
 - Can be shot during playtest.
 
-## Light
+### Light
 
 - Small visible point-light marker.
 - Carries a real point light.
 - Hidden visually during playtest while the light remains active.
 
-## Spawn
+### Spawn
 
 - Defines player spawn and respawn location.
 - Supports `Groups` assignment.
 - First available spawn block is used for playtest start and death respawn.
 - Includes a directional indicator showing which way the player will face on spawn.
 
-## Control
+### Checkpoint
+
+- Saves the player's respawn position when touched during playtest.
+- Activates on player overlap.
+
+### Joint
+
+- Invisible connection point for linking objects together.
+- Used for mechanical linkages and pivot systems.
+
+### Skeleton
+
+- Animated skeleton model with keyframe-based bone animation.
+- Edit bone structures and animations in the dedicated Skeleton Editor.
+
+### Pivot
+
+- Rotation pivot point for grouped objects.
+- Objects in the same group rotate around the pivot during function-driven movement.
+
+### Teleport
+
+- Transports the player to a paired teleport block during playtest.
+- Configured with a `Pair` name in the Properties panel.
+- Two teleport blocks with the same pair name form a link.
+- Player overlap triggers teleportation to the paired block.
+- Includes a cooldown to prevent ping-pong teleportation.
+
+### Control
 
 - A visible editor block that becomes hidden during playtest.
 - Uses overlap detection with the player.
 - Can apply control rules when entered.
 - Can run named functions that move objects or change their lighting.
 - Supports `Groups` assignment.
+
+### Keypad
+
+- An interactive keypad overlay that appears during playtest.
+- Player enters a numeric code to trigger functions.
+- Configurable with correct code, display style, and offset position.
 
 ## Object Properties
 
@@ -451,6 +534,12 @@ Available on all placeable objects.
 Available on solid-capable objects.
 
 - `Traction`: When enabled, a grounded player standing on the object is carried along the object movement on `X` and `Z` during playtest.
+
+### Teleport Property
+
+Available on teleport blocks.
+
+- `Pair`: A text label that links two teleport blocks together. Two teleports with the same pair name form a bidirectional link.
 
 ### Target Property
 
@@ -525,6 +614,9 @@ Supported control rule targets:
 - `3`: Scale gizmo.
 - `Ctrl+Z` or `Cmd+Z`: Undo.
 - `Ctrl+Y` or `Cmd+Y`: Redo.
+- `Ctrl+C` or `Cmd+C`: Copy selected objects.
+- `Ctrl+V` or `Cmd+V`: Paste copied objects.
+- `Ctrl+D` or `Cmd+D`: Duplicate selected objects in place.
 - `Ctrl+G` or `Cmd+G`: Group selected objects.
 - `Ctrl+Shift+G` or `Cmd+Shift+G`: Ungroup selected objects.
 - `Ctrl+A` or `Cmd+A`: Select all placeable objects.
@@ -549,6 +641,102 @@ Supported control rule targets:
 - Left click: Lock pointer or shoot.
 - `Escape`: Exit playtest (editor) or pause game (runtime).
 - `P`: Pause or resume game in runtime mode.
+
+## Terrain System
+
+Flame3D includes a vertex-based terrain sculpting system.
+
+### Placing Terrain
+
+1. Select `Terrain` from the Objects / Blocks category in the sidebar library.
+2. Place terrain blocks in the scene like any other object.
+
+### Sculpting Terrain
+
+1. Switch to `Paint` mode in the top bar.
+2. Enable `Sculpt Mode` in the sidebar under Terrain Sculpt.
+3. Select a brush type: `Raise`, `Lower`, `Flatten`, or `Smooth`.
+4. Adjust `Radius` and `Strength` to control the brush size and effect intensity.
+5. Click and drag on a placed terrain block to sculpt it.
+
+### Brush Types
+
+- `Raise`: Push vertices upward to create hills and ridges.
+- `Lower`: Push vertices downward to create valleys and depressions.
+- `Flatten`: Level vertices to a consistent height.
+- `Smooth`: Average nearby vertex heights to reduce jagged surfaces.
+
+## Texture Paint
+
+Texture Paint lets you apply procedural patterns to object surfaces in addition to flat colors.
+
+### Using Texture Paint
+
+1. Switch to `Paint` mode.
+2. In the sidebar under Texture Paint, select a `Pattern`.
+3. Optionally set `Color 2` for the secondary pattern color.
+4. Adjust `Scale` to control pattern density.
+5. Click on objects to apply the texture.
+
+### Available Patterns
+
+- `None`: Color only (default flat color painting).
+- `Checker`: Alternating color checkerboard.
+- `Brick`: Brick wall pattern.
+- `Stripe`: Horizontal stripes.
+- `Grid`: Grid line pattern.
+- `Noise`: Procedural noise texture.
+- `Gradient`: Smooth gradient between two colors.
+
+## Custom Objects
+
+You can save object selections as reusable templates and place them later.
+
+### Saving a Custom Object
+
+1. Select one or more objects in the scene.
+2. Click `Save Selection as Custom Object` in the sidebar under Custom Objects.
+3. Enter a name for the template.
+
+### Placing Custom Objects
+
+- Saved templates appear in the Custom Objects list in the sidebar.
+- Click a template to place a copy of it in the scene.
+- Templates include all object properties, positions, rotations, and scales relative to the selection center.
+
+### Managing Custom Objects
+
+- Custom objects are saved with the project.
+- Delete templates from the list when no longer needed.
+
+## Sculpt Editor
+
+The Sculpt Editor is a dedicated overlay for creating custom sculpted objects using CSG (Constructive Solid Geometry) boolean operations.
+
+### Opening the Sculpt Editor
+
+- Select a terrain or sculpted object and open its sculpt editor from the Properties panel.
+
+### Features
+
+- Add primitive shapes (box, sphere, cylinder) as sculpt operations.
+- Boolean operations: Union, Subtract, Intersect.
+- Full TransformControls with Move, Rotate, and Scale gizmos (keyboard shortcuts `1`, `2`, `3`).
+- Click to select primitives in the 3D viewport.
+- Real-time preview of the combined CSG result.
+- Undo support for transform changes.
+
+## Skeleton Animation Editor
+
+The Skeleton Animation Editor lets you create bone-based character animations.
+
+### Features
+
+- Visual bone hierarchy editor with add/remove/rename controls.
+- 3D preview of the skeleton with interactive bone manipulation.
+- Timeline with keyframe support for bone rotations.
+- Play, pause, and scrub through animations.
+- Animations are saved with the skeleton object and exported with the project.
 
 ## Player Systems
 
@@ -857,7 +1045,14 @@ Flame3D currently focuses on:
 - In-browser 3D level editing with multi-world support
 - Immediate FPS playtesting with sprint, air dash, and world borders
 - Block/object property editing including visibility, traction, and switches
-- Shape placement with configurable polygon sides and depth
+- 3D primitive and 2D shape placement with configurable polygon sides and depth
+- Terrain placement and vertex-based sculpting with multiple brush types
+- Texture painting with procedural patterns (checker, brick, stripe, grid, noise, gradient)
+- Copy, paste, and duplicate workflows for rapid level building
+- Custom object templates for saving and reusing selections
+- Sculpt editor with CSG boolean operations and full transform gizmos
+- Skeleton animation editor with bone hierarchy and keyframe timeline
+- Teleport blocks for player transportation between paired locations
 - Paint and eraser tools for surface editing
 - Full atmosphere system: sun, moon, stars, clouds, fog, sky color
 - Project-level variables and booleans for game logic

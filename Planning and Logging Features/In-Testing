@@ -1,0 +1,51 @@
+== Features In Testing ==
+(Added in current implementation session - not yet runtime tested)
+
+1. Text Blocks (2D & 3D)
+   - New object types: text, text3d
+   - Properties: content, font family, font size, color, background, alignment, bold, italic
+   - Canvas-based text rendering applied as texture
+   - Full serialization/deserialization support
+
+2. Screen/Media Objects
+   - New object type: screen
+   - Supports solid color or uploaded image display
+   - FileReader-based image upload in properties panel
+   - Full serialization/deserialization support
+
+3. Camera Objects
+   - New object type: camera
+   - Properties: FOV, near clip, far clip
+   - Appears in Object Library under "Media" category
+   - Full serialization/deserialization support
+
+4. Cross-World Teleport
+   - Teleport config expanded with crossWorld toggle and targetWorld selector
+   - checkTeleportBlocks() rewritten to search stored world data
+   - Switches worlds and repositions player with relative offset
+
+5. Teleport Invisible by Default During Play
+   - 'teleport' added to hiddenInGame list in createMesh()
+   - Teleports are hidden when entering playtest mode
+
+6. Ground/Grid Textures
+   - 5 procedural textures: grass, dirt, stone, sand, snow
+   - Dropdown selector in Grid Settings panel
+   - Procedural canvas generation (256x256 with noise patches)
+   - Full serialization/deserialization of texture selection
+
+7. New Block Texture Patterns
+   - Wood (wavy grain pattern)
+   - Cobblestone (irregular rounded shapes with mortar)
+   - Marble (veined pattern)
+   - Added to texture paint pattern dropdown
+
+8. Image Upload as Custom Texture
+   - Upload button in Texture Paint panel
+   - FileReader loads image, applies as THREE.Texture
+   - Works with paint mode click-to-apply system
+   - Custom image cleared when selecting a built-in pattern
+
+9. Terrain Walkability Fix
+   - Terrain objects now default to geometry-based collision mode
+   - Players can walk on sculpted terrain surfaces properly

@@ -1,0 +1,49 @@
+--Come up with ideas to add, change, or improve features--
+
+=== Gameplay & Interaction ===
+
+- NPC System: Add basic NPC objects with dialogue trees, patrol paths, and interaction triggers. NPCs could reference animation paths and trigger conditional events.
+
+- Inventory System: Let players pick up, carry, and use items. Objects could be marked as "collectible" with inventory slots shown in the HUD during playtest.
+
+- Pressure Plates & Switches: Objects that activate when the player stands on them or interacts with them - wire them to doors, elevators, or triggers.
+
+- Day/Night Gameplay Effects: Tie game rules to the day cycle - e.g. enemies spawn at night, lights auto-toggle, doors lock at certain times.
+
+- Multiplayer Preview: Even if full multiplayer is far off, add a "ghost player" that follows a recorded path so you can test how multi-player interactions would feel.
+
+=== Visual & Audio ===
+
+- Particle System: Add emitter objects for fire, smoke, sparks, rain, snow, magic effects. Configure color, size, lifetime, spread, gravity.
+
+- Sound Zones: Objects that play ambient audio (loops) when the player enters their area - wind, water, music, custom uploaded audio.
+
+- Post-Processing Effects: Add optional bloom, vignette, chromatic aberration, and depth-of-field as world settings.
+
+- Water Planes: Flat transparent planes with animated wave shaders. Players could swim (reduced speed, floating physics) when below the surface.
+
+- Skybox Import: Let users upload a 6-face cubemap or equirectangular image as a custom skybox.
+
+=== Editor & Workflow ===
+
+- Blueprint/Wireframe View: Toggle to see all objects as wireframes for easier editing of complex scenes.
+
+- Object Snapping Guides: When dragging objects, show alignment lines to nearby objects (like Figma/Photoshop smart guides).
+
+- Timeline Editor: Visual timeline for animation paths and triggers - scrub through time to preview animations without entering playtest.
+
+- Version History: Auto-save snapshots of the project at intervals. Let users browse and restore previous versions.
+
+- Multi-Select Properties: When multiple objects are selected, show shared properties and allow batch editing (color, solid, opacity, etc.).
+
+=== Advanced ===
+
+- Physics Simulation: Add rigid body physics to objects - they can fall, bounce, stack. Toggle per-object. Useful for puzzles and destruction effects.
+
+- Procedural Generation: A "scatter" tool that places objects randomly within a defined area with configurable density, scale variation, and rotation jitter - great for forests, rocks, debris.
+
+- Scripting Blocks: Visual node-based scripting (like Unreal Blueprints) for complex game logic without needing to touch code.
+
+- LOD System: Automatically reduce geometry detail for distant objects to improve performance on large worlds.
+
+- Reflection Probes: Place probes in the scene to generate environment maps for realistic reflections on shiny/metallic surfaces.

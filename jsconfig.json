@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "checkJs": false,
+    "maxNodeModuleJsDepth": 0
+  },
+  "include": ["main.js", "build-editor.js"],
+  "exclude": ["node_modules", "test-results"]
+}

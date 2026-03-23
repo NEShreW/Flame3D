@@ -51,26 +51,7 @@
       font-size: 13px;
       overflow: hidden;
       user-select: none;
-      -webkit-font-smoothing: antialiased;
-      -moz-osx-font-smoothing: grayscale;
-    }
-
-    /* ── Scrollbars ───────────────────────────────────────── */
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb {
-      background: rgba(139,148,158,.25);
-      border-radius: 4px;
-      border: 2px solid transparent;
-      background-clip: content-box;
-    }
-    ::-webkit-scrollbar-thumb:hover { background: rgba(139,148,158,.4); background-clip: content-box; }
-    ::-webkit-scrollbar-corner { background: transparent; }
-
-    /* ── Top bar ──────────────────────────────────────────── */
-    #topbar {
-      height: var(--topH);
-      background: linear-gradient(180deg, #1a2030, var(--surface));
+      -webkit-fontlinear-gradient(180deg, #1a2030, var(--surface));
       border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
@@ -92,7 +73,26 @@
       white-space: nowrap;
       background: linear-gradient(135deg, #f97316, #fbbf24);
       -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-      background-clip: text;
+      background-clip: text
+      height: var(--topH);
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      gap: 4px;
+      flex-shrink: 0;
+      overflow-x: auto;
+      overflow-y: hidden;
+    }
+    #topbar::-webkit-scrollbar { height: 0; }
+
+    .tb-title {
+      font-weight: 700;
+      font-size: 14px;
+      letter-spacing: .05em;
+      padding: 0 6px;
+      white-space: nowrap;
     }
     .tb-sep {
       width: 1px; height: 24px;
@@ -119,31 +119,7 @@
       letter-spacing: .06em;
       padding-left: 4px;
       white-space: nowrap;
-    }
-    .axis-side-wrap {
-      display: inline-flex;
-      align-items: center;
-      gap: 3px;
-      margin-left: 2px;
-    }
-    .axis-side-lbl {
-      color: var(--muted);
-      font-size: 9px;
-      letter-spacing: .04em;
-    }
-    .axis-side-select {
-      font-size: 10px;
-      padding: 2px 4px;
-      border-radius: 4px;
-      min-width: 42px;
-    }
-
-    /* ── Buttons ──────────────────────────────────────────── */
-    button {
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      color: var(--text);
-      border-radius: var(--radius);
+    }var(--radius);
       padding: 4px 9px;
       cursor: pointer;
       font-family: inherit;
@@ -261,12 +237,36 @@
 
     input[type="checkbox"] {
       accent-color: var(--accentHi);
+      cursor: pointer
+    input[type="number"]:hover,
+    input[type="number"]:focus {
+      border-color: var(--accentHi);
+      outline: none;
+    }
+
+    input[type="range"] {
+      accent-color: var(--accentHi);
+      width: 100%;
+    }
+
+    input[type="color"] {2s cubic-bezier(.4,0,.2,1), border-color .2
+      width: 34px;
+      height: 24px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface2);
+      padding: 2px;
       cursor: pointer;
+    }
+    input[type="color"]:hover,
+    input[type="color"]:focus {
+      border-color: var(--accentHi);
+      outline: none;
     }
 
     /* ── Workspace ────────────────────────────────────────── */
     #workspace {
-      flex: 1;
+      flex: 1;2s ease, border-color .2
       display: flex;
       overflow: hidden;
       position: relative;
@@ -285,7 +285,7 @@
       overflow-y: auto;
       overflow-x: hidden;
       overscroll-behavior: contain;
-      transition: width .2s cubic-bezier(.4,0,.2,1), border-color .2s ease;
+      transition: width .16s ease, border-color .16s ease;
     }
     #sidebar-resizer {
       width: 14px;
@@ -297,7 +297,7 @@
       background: linear-gradient(180deg, #121820, #0f141b);
       border-right: 1px solid var(--border);
       cursor: col-resize;
-      transition: background .2s ease, border-color .2s ease;
+      transition: background .16s ease, border-color .16s ease;
     }
     #sidebar-resizer::before {
       content: '';
@@ -484,10 +484,7 @@
     }
     .ct-entry select { font-size: 10px; padding: 2px 3px; }
     .ct-entry input[type="number"] { width: 44px; font-size: 10px; padding: 2px 4px; }
-    .ct-entry .ct-arrow { color: var(--accentHi); font-weight: 700; }
-    .ct-del { background: none; border: none; color: var(--danger); cursor: pointer; font-size: 12px; padding: 0 3px; }
-
-    #props-panel { flex: 0 0 auto; overflow: visible; border-top: 1px solid var(--border); background: var(--surface); }
+    .ct-entry .ct-arrow { color: var(--accentHi); font-weight: 700; }background: var(--surface); }
     .props-category { border-bottom: 1px solid var(--border); }
     .props-cat-hdr {
       font-size: 10px;
@@ -496,7 +493,10 @@
       padding: 6px 11px;
       cursor: pointer;
       user-select: none;
-      transition: background var(--transition);
+      transition: background var(--transition)ntHi);
+      padding: 5px 11px;
+      cursor: pointer;
+      user-select: none;
     }
     .props-cat-hdr:hover { background: var(--surface2); }
     .props-cat-body.collapsed { display: none; }
@@ -606,11 +606,7 @@
       flex-shrink: 0;
       min-height: 0;
       overflow: hidden;
-    }
-    .fn-panel-tabs {
-      display: flex;
-      border-bottom: 1px solid var(--border);
-      background: linear-gradient(180deg, #121820, #0f141b);
+    }linear-gradient(180deg, #121820, #0f141b);
       flex-shrink: 0;
     }
     .fn-panel-tab {
@@ -626,22 +622,26 @@
       transition: color var(--transition), background var(--transition), border-color var(--transition);
     }
     .fn-panel-tab:hover { color: var(--text); background: rgba(33,38,45,.6); }
-    .fn-panel-tab.active { color: var(--accentHi); border-bottom-color: var(--accentHi); background: rgba(31,111,235,.06); }
+    .fn-panel-tab.active { color: var(--accentHi); border-bottom-color: var(--accentHi); background: rgba(31,111,235,.06
+      border-bottom: 2px solid transparent;
+    }
+    .fn-panel-tab:hover { color: var(--text); background: var(--surface2); }
+    .fn-panel-tab.active { color: var(--accentHi); border-bottom-color: var(--accentHi); }
     .fn-pane { display: none; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
     .fn-pane.active { display: flex; }
-    .objlib-item {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      padding: 5px 7px;
-      border-radius: var(--radius);
+    .objlib-item {var(--radius);
       cursor: pointer;
       border: 1px solid transparent;
       margin-bottom: 2px;
       transition: background var(--transition), border-color var(--transition), box-shadow var(--transition);
     }
     .objlib-item:hover { background: var(--surface2); box-shadow: var(--shadow-sm); }
-    .objlib-item.selected { background: var(--accent); border-color: var(--accentHi); box-shadow: 0 0 8px rgba(31,111,235,.2); }
+    .objlib-item.selected { background: var(--accent); border-color: var(--accentHi); box-shadow: 0 0 8px rgba(31,111,235,.2
+      border: 1px solid transparent;
+      margin-bottom: 2px;
+    }
+    .objlib-item:hover { background: var(--surface2); }
+    .objlib-item.selected { background: var(--accent); border-color: var(--accentHi); }
     .objlib-swatch {
       width: 26px;
       height: 26px;
@@ -685,9 +685,6 @@
     }
     .cfn-group-wrap {
       border: 1px solid #1d2430;
-      border-radius: 8px;
-      background: #111821;
-      overflow: hidden;
       transition: border-color var(--transition);
     }
     .cfn-group-wrap:hover { border-color: #283040; }
@@ -705,7 +702,10 @@
       cursor: pointer;
     }
     .cfn-group-toggle:hover {
-      background: linear-gradient(180deg, #223040, #1e2a3b);
+      background: linear-gradient(180deg, #223040, #1e2a3b)
+    }
+    .cfn-group-toggle:hover {
+      background: #1e2a3b;
       border-color: #212a37;
     }
     .cfn-group-body {
@@ -754,12 +754,7 @@
       box-shadow: var(--shadow-md);
       letter-spacing: .02em;
     }
-
-    /* ── Status bar ───────────────────────────────────────── */
-    #status-bar {
-      position: absolute;
-      bottom: 9px; right: 11px;
-      background: rgba(13,17,23,.92);
+2);
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 5px 12px;
@@ -789,7 +784,12 @@
       -webkit-backdrop-filter: blur(8px);
       z-index: 20;
       line-height: 1.5;
-      box-shadow: var(--shadow-md);
+      box-shadow: var(--shadow-md)
+      pointer-events: none;
+      white-space: pre;
+      backdrop-filter: blur(4px);
+      z-index: 20;
+      line-height: 1.5;
     }
     .s-mode  { color: var(--accentHi); font-weight: 600; }
     .s-play  { color: var(--success);  font-weight: 600; }
@@ -925,7 +925,7 @@
   <div class="top-panel active" data-panel="block">
     <div class="tb-group">
       <span class="tb-label">Mode</span>
-      <select id="mode-select" title="Choose what happens when you click in the scene">
+      <select id="mode-select" title="Editor mode">
         <option value="place" selected>⊕ Place</option>
         <option value="select">↗ Select</option>
         <option value="delete">✕ Delete</option>
@@ -937,8 +937,8 @@
     <span class="tb-sep"></span>
 
     <div class="tb-group" id="transform-group" style="opacity:.4;pointer-events:none">
-      <span class="tb-label">Tool</span>
-      <select id="gizmo-select" title="Choose how to transform the selected object: Move, Rotate, or Scale">
+      <span class="tb-label">Gizmo</span>
+      <select id="gizmo-select" title="Transform gizmo">
         <option value="translate" selected>↔ Move</option>
         <option value="rotate">↻ Rot</option>
         <option value="scale">⤡ Scale</option>
@@ -975,7 +975,7 @@
 
     <div class="tb-group">
       <span class="tb-label">Snap</span>
-      <select id="snap-select" title="Grid snap distance — objects will snap to this grid size when moved">
+      <select id="snap-select">
         <option value="0">None</option>
         <option value="0.25">0.25</option>
         <option value="0.5">0.5</option>
@@ -1043,7 +1043,6 @@
       </div>
 
       <div id="library-pane-objects" class="lib-pane active">
-      <div style="padding:6px 9px 4px;"><input id="lib-search" type="text" placeholder="🔍 Search objects..." style="width:100%;box-sizing:border-box;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:4px 8px;font-size:11px;font-family:inherit" /></div>
       <div class="lib-category">
         <div class="lib-category-title">Objects / Blocks</div>
         <div class="lib-category-body"><div class="lib-grid">
@@ -1146,31 +1145,6 @@
           </button>
         </div></div>
       </div>
-      <div class="lib-category">
-        <div class="lib-category-title">Characters</div>
-        <div class="lib-category-body"><div class="lib-grid">
-          <button class="lib-btn" data-type="npc">
-            <span class="icon">🧑</span>NPC
-          </button>
-        </div></div>
-      </div>
-      <div class="lib-category">
-        <div class="lib-category-title">Media</div>
-        <div class="lib-category-body"><div class="lib-grid">
-          <button class="lib-btn" data-type="text">
-            <span class="icon">📝</span>Text
-          </button>
-          <button class="lib-btn" data-type="text3d">
-            <span class="icon">🔤</span>3D Text
-          </button>
-          <button class="lib-btn" data-type="screen">
-            <span class="icon">🖥️</span>Screen
-          </button>
-          <button class="lib-btn" data-type="camera">
-            <span class="icon">🎥</span>Camera
-          </button>
-        </div></div>
-      </div>
       <div class="panel-hdr">🧰 Shape &amp; Tools</div>
       <div class="sidebar-form">
         <div class="sf-row">
@@ -1210,9 +1184,6 @@
             <option value="grid">Grid</option>
             <option value="noise">Noise</option>
             <option value="gradient">Gradient</option>
-            <option value="wood">🪵 Wood</option>
-            <option value="cobblestone">🧱 Cobblestone</option>
-            <option value="marble">⬜ Marble</option>
           </select>
         </div>
         <div class="sf-row">
@@ -1223,14 +1194,9 @@
           <span class="sf-label">Scale</span>
           <input id="texture-scale" type="number" min="0.25" max="4" step="0.25" value="1" title="Texture pattern scale"/>
         </div>
-        <div class="sf-row">
-          <span class="sf-label">Custom</span>
-          <button id="texture-upload-btn" style="font-size:10px;padding:2px 8px" title="Upload an image to use as a texture">📁 Upload Image</button>
-          <input id="texture-upload-file" type="file" accept="image/*" style="display:none"/>
-        </div>
         <div class="sf-sub" style="margin-top:8px;font-weight:700;color:#8be9a8">🏔️ Terrain Sculpt</div>
         <div style="font-size:10px;color:#8b949e;line-height:1.5;padding:4px 6px;background:rgba(139,233,168,0.06);border-radius:4px;margin-bottom:4px">
-          <b>How to sculpt:</b> 1) Switch to <b>Paint</b> mode. 2) Enable sculpt below. 3) Click &amp; drag on the ground or on a terrain block to sculpt. A terrain block is created automatically if you click empty ground.
+          <b>How to sculpt:</b> 1) Place a <b>Terrain</b> block from Objects &gt; Structure. 2) Switch to <b>Paint</b> mode. 3) Enable sculpt below. 4) Click &amp; drag on the terrain to shape it.
         </div>
         <div class="sf-row">
           <label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">
@@ -1444,17 +1410,6 @@
           <input id="grid-fill-color" type="color" value="#1a2636" title="Grid fill color"/>
         </div>
         <div class="sf-row">
-          <span class="sf-label">Texture</span>
-          <select id="grid-fill-texture" title="Ground texture pattern">
-            <option value="none">None (Solid Color)</option>
-            <option value="grass">🌿 Grass</option>
-            <option value="dirt">🟫 Dirt</option>
-            <option value="stone">🪨 Stone</option>
-            <option value="sand">🏖️ Sand</option>
-            <option value="snow">❄️ Snow</option>
-          </select>
-        </div>
-        <div class="sf-row">
           <span class="sf-label">Enabled</span>
           <input id="grid-fill-enabled" type="checkbox" title="Toggle grid floor fill"/>
         </div>
@@ -1617,7 +1572,6 @@
         <div class="sf-row"><span class="sf-label">Sprint</span><button class="keybind-btn" data-action="sprint" title="Click to rebind">R</button></div>
         <div class="sf-row"><span class="sf-label">Crouch</span><button class="keybind-btn" data-action="crouch" title="Click to rebind">Shift</button></div>
         <div class="sf-row"><span class="sf-label">Shoot</span><button class="keybind-btn" data-action="shoot" title="Click to rebind">LMB</button></div>
-        <div class="sf-row"><span class="sf-label">Free Cursor</span><button class="keybind-btn" data-action="toggleMouse" title="Click to rebind">T</button></div>
         <div class="sf-row" style="margin-top:4px"><button id="btn-reset-keybinds" style="width:100%;font-size:10px;padding:3px 6px">Reset to Defaults</button></div>
       </div>
     </div>

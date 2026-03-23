@@ -21,31 +21,40 @@ function _openIDB() {
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
+    req.onblocked = () => reject(new Error('IndexedDB blocked by another connection'));
   });
 }
 
 /** Read a value from IndexedDB by key. */
 async function _idbGet(key) {
   const db = await _openIDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(_IDB_STORE, 'readonly');
-    const store = tx.objectStore(_IDB_STORE);
-    const req = store.get(key);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(_IDB_STORE, 'readonly');
+      const store = tx.objectStore(_IDB_STORE);
+      const req = store.get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  } finally {
+    db.close();
+  }
 }
 
 /** Write a value to IndexedDB by key. */
 async function _idbSet(key, value) {
   const db = await _openIDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(_IDB_STORE, 'readwrite');
-    const store = tx.objectStore(_IDB_STORE);
-    const req = store.put(value, key);
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error);
-  });
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(_IDB_STORE, 'readwrite');
+      const store = tx.objectStore(_IDB_STORE);
+      const req = store.put(value, key);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  } finally {
+    db.close();
+  }
 }
 
 /**
@@ -83,8 +92,23 @@ function _flushRestore() {
   try {
     const payload = buildLevelPayload();
     const data = { projectId: currentProjectId, projectName: currentProjectName, payload, savedAt: new Date().toISOString() };
-    _idbSet(_RESTORE_IDB_KEY, data).catch(() => {});
-  } catch { /* ignore serialization failures */ }
+    _idbSet(_RESTORE_IDB_KEY, data).then(() => {
+      // Also update the project in the project list if it was previously saved
+      if (currentProjectId) {
+        const projects = getStoredProjects();
+        const idx = projects.findIndex(p => p.id === currentProjectId);
+        if (idx >= 0) {
+          projects[idx].payload = payload;
+          projects[idx].updatedAt = data.savedAt;
+          _flushProjects();
+        }
+      }
+    }).catch(err => {
+      console.warn('[Autosave] IDB write failed:', err);
+    });
+  } catch (err) {
+    console.warn('[Autosave] Serialization failed:', err);
+  }
   _restoreDirty = false;
 }
 
@@ -93,7 +117,7 @@ function markRestoreDirty() {
   if (runtimeMode) return;
   _restoreDirty = true;
   if (!_restoreTimer) {
-    _restoreTimer = setTimeout(() => { _restoreTimer = null; if (_restoreDirty) _flushRestore(); }, 30000);
+    _restoreTimer = setTimeout(() => { _restoreTimer = null; if (_restoreDirty) _flushRestore(); }, 2000);
   }
 }
 
@@ -102,6 +126,44 @@ function clearRestoreSlot() {
   _restoreDirty = false;
   if (_restoreTimer) { clearTimeout(_restoreTimer); _restoreTimer = null; }
   _idbSet(_RESTORE_IDB_KEY, null).catch(() => {});
+}
+
+/** Pending auto-restore data (set at boot, consumed when entering studio). */
+let _pendingRestore = null;
+
+/** Show restore banner if unsaved data exists. Called when entering studio. */
+function _offerRestore() {
+  const data = _pendingRestore;
+  if (!data?.payload) return;
+  _pendingRestore = null;
+  const when = data.savedAt ? new Date(data.savedAt).toLocaleString() : 'unknown time';
+  const projLabel = data.projectName ? ` ("${data.projectName}")` : '';
+  // Build banner
+  const banner = document.createElement('div');
+  banner.id = 'restore-banner';
+  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:linear-gradient(135deg,#1a3050,#1d3860);color:#fff;padding:12px 18px;display:flex;align-items:center;gap:12px;font:13px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;box-shadow:0 2px 12px rgba(0,0,0,.6);backdrop-filter:blur(8px)';
+  banner.innerHTML = `<span style="flex:1">📦 Unsaved progress found${projLabel} from ${when}.</span>`;
+  const btnRestore = document.createElement('button');
+  btnRestore.textContent = 'Restore';
+  btnRestore.style.cssText = 'padding:5px 16px;background:linear-gradient(135deg,#2080d0,#388bfd);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;transition:background .15s';
+  const btnDiscard = document.createElement('button');
+  btnDiscard.textContent = 'Discard';
+  btnDiscard.style.cssText = 'padding:5px 16px;background:#3a3f48;color:#e6edf3;border:none;border-radius:6px;cursor:pointer;font-size:13px;transition:background .15s';
+  const remove = () => { banner.remove(); };
+  btnRestore.onclick = () => {
+    const json = typeof data.payload === 'string' ? data.payload : JSON.stringify(data.payload);
+    currentProjectId = data.projectId || null;
+    currentProjectName = data.projectName || '';
+    loadLevelJSON(json, { pushHistory: false });
+    clearRestoreSlot();
+    remove();
+  };
+  btnDiscard.onclick = () => { clearRestoreSlot(); remove(); };
+  banner.appendChild(btnRestore);
+  banner.appendChild(btnDiscard);
+  document.body.appendChild(banner);
+  // Auto-dismiss after 30 seconds
+  setTimeout(() => { if (banner.parentNode) remove(); }, 30000);
 }
 
 /**
@@ -159,6 +221,13 @@ const coordHud        = document.getElementById('coord-hud');
 const playHint        = document.getElementById('play-hint');
 const propsPanel      = document.getElementById('props-panel');
 const propsContent    = document.getElementById('props-content');
+
+// --- Auto-persist ANY property change made in the inspector panel ---
+propsContent.addEventListener('change', () => markRestoreDirty());
+propsContent.addEventListener('input', e => {
+  if (e.target.matches('input[type="color"]')) markRestoreDirty();
+});
+
 const topMenuSelect   = document.getElementById('top-menu-select');
 const topPanels       = Array.from(document.querySelectorAll('.top-panel'));
 const snapSelect      = document.getElementById('snap-select');
@@ -226,6 +295,7 @@ const grJumpInput    = document.getElementById('gr-jump');
 const grGravityInput = document.getElementById('gr-gravity');
 const grGravityEnabledInput = document.getElementById('gr-gravity-enabled');
 const grHeightInput  = document.getElementById('gr-height');
+const grCrouchHeightInput = document.getElementById('gr-crouch-height');
 const grSprintInput  = document.getElementById('gr-sprint');
 const grSprintDurationInput  = document.getElementById('gr-sprint-duration');
 const grSprintRechargeInput  = document.getElementById('gr-sprint-recharge');
@@ -337,6 +407,32 @@ let _nextEditorGroupId = 1;
 let _nextPlacedOrder = 1;
 let currentProjectId = null;
 let currentProjectName = '';
+
+// ─── Clipboard (Copy/Paste) ──────────────────────────────────────────────────
+let _clipboard = [];  // array of serialized objects for paste
+let _clipboardCenter = new THREE.Vector3();
+
+// ─── Custom Object Templates ─────────────────────────────────────────────────
+const customObjectTemplates = [];  // { id, name, objects: [serialized], thumbnail? }
+let _nextCustomTemplateId = 1;
+
+// ─── Terrain Sculpt State ────────────────────────────────────────────────────
+const terrainSculptState = {
+  active: false,
+  brush: 'raise',     // raise | lower | flatten | smooth
+  radius: 3,
+  strength: 0.3,
+  _painting: false,
+};
+
+// ─── Texture Paint State ─────────────────────────────────────────────────────
+const texturePaintState = {
+  enabled: false,
+  pattern: 'none',   // none | checker | brick | stripe | grid | noise | gradient | wood | cobblestone | marble | custom
+  scale: 1,
+  color2: 0x222222,  // secondary colour for patterns
+  customImage: null,  // HTMLImageElement for uploaded texture
+};
 
 // ─── World system ────────────────────────────────────────────────────────────
 let worlds = [{ id: 'world_1', name: 'World 1', objects: [] }];
@@ -472,6 +568,7 @@ const functionsPanelState = {
 };
 
 const audioLibrary = [];
+const customFonts = [];
 let activeLibraryPane = 'objects';
 let libraryPreviewAudio = null;
 let libraryPreviewAudioId = null;
@@ -479,6 +576,13 @@ let libraryPreviewAudioId = null;
 const CUSTOM_SKIN_GRID_DEFAULT = Object.freeze({ x: 8, y: 6, z: 8 });
 const CUSTOM_SKIN_GRID_MIN = 1;
 const customBlockSkins = {};
+const customSculptSkins = {};
+const skeletonDefinitions = {};
+let skeletonEditorOverlayEl = null;
+let skeletonEditorState = null;
+let skeleton3DState = null;
+const _skeletonRuntimeStates = new Map();
+let sculptEditorOverlayEl = null;
 let libraryContextMenuEl = null;
 let keypadContextMenuEl = null;
 let worldContextMenuEl = null;
@@ -508,6 +612,10 @@ const _hitboxWorldPoint = new THREE.Vector3();
 const _runtimeNumericOverrides = new Map();
 let runtimeKeypadOverlayEl = null;
 let activeRuntimeKeypadMesh = null;
+let runtimeScreenOverlayEl = null;
+
+// ─── Portal view (render-through teleport) ────────────────────────────────────
+const PORTAL_MAX_DIST = 40;
 
 // ─── Quality settings ────────────────────────────────────────────────────────
 const quality = {
@@ -555,8 +663,8 @@ scene.add(ambientLight);
 
 const LIGHT_BLOCK_DISTANCE = 24;
 const LIGHT_BLOCK_DECAY = 1.4;
-const LIGHT_BLOCK_SHADOW_MAP = 512;
-const LIGHT_BLOCK_SHADOW_BIAS = -0.0008;
+const LIGHT_BLOCK_SHADOW_MAP = 1024;
+const LIGHT_BLOCK_SHADOW_BIAS = -0.0005;
 
 // ─── Sun / Sky defaults ──────────────────────────────────────────────────────
 const SUN_INTENSITY_DEFAULT  = 22;
@@ -585,6 +693,10 @@ const NIGHT_SKY_COLOR = new THREE.Color(0x0a0e24); // deep navy blue night
 const sky = new Sky();
 sky.scale.setScalar(450000);
 sky.material.fog = false;
+sky.frustumCulled = false;
+sky.renderOrder = -1;
+sky.material.depthWrite = false;
+sky.material.depthTest = false;
 scene.add(sky);
 
 const skyUniforms = sky.material.uniforms;
@@ -596,6 +708,7 @@ skyUniforms['mieDirectionalG'].value  = 0.75;    // bright sun-halo forward scat
 // ─── Cloud layer ─────────────────────────────────────────────────────────────
 const _cloudGroup = new THREE.Group();
 _cloudGroup.renderOrder = 1;
+_cloudGroup.frustumCulled = false;
 scene.add(_cloudGroup);
 let _cloudParticles = null;
 let _cloudMaterial = null;
@@ -628,6 +741,7 @@ function _buildClouds() {
     mesh.scale.set(1 + Math.random() * 2, 1 + Math.random() * 1.5, 1);
     mesh.userData._cloudBaseX = mesh.position.x;
     mesh.userData._cloudBaseZ = mesh.position.z;
+    mesh.frustumCulled = false;
     _cloudGroup.add(mesh);
   }
   _cloudGroup.visible = CLOUDS_ENABLED_DEFAULT;
@@ -689,17 +803,20 @@ function _buildStars(count) {
   });
   _starsMesh = new THREE.Points(geo, _starsMaterial);
   _starsMesh.renderOrder = 0;
+  _starsMesh.frustumCulled = false;
   scene.add(_starsMesh);
 }
 _buildStars(STARS_COUNT_DEFAULT);
 
 // ─── Moon ────────────────────────────────────────────────────────────────────
 const _moonGroup = new THREE.Group();
+_moonGroup.frustumCulled = false;
 scene.add(_moonGroup);
 
 const _moonGeo = new THREE.SphereGeometry(6, 32, 32);
 const _moonMat = new THREE.MeshBasicMaterial({ color: 0xe8e8e0, fog: false, transparent: true, opacity: 0 });
 const _moonMesh = new THREE.Mesh(_moonGeo, _moonMat);
+_moonMesh.frustumCulled = false;
 _moonGroup.add(_moonMesh);
 
 // Moon aura (glow sprite)
@@ -724,6 +841,7 @@ const _moonAuraMat = new THREE.SpriteMaterial({
 });
 const _moonAuraSprite = new THREE.Sprite(_moonAuraMat);
 _moonAuraSprite.scale.set(30, 30, 1);
+_moonAuraSprite.frustumCulled = false;
 _moonGroup.add(_moonAuraSprite);
 
 // ─── Sun light ───────────────────────────────────────────────────────────────
@@ -732,9 +850,9 @@ scene.add(sunTarget);
 
 const sunLight = new THREE.DirectionalLight(0xffffff, SUN_INTENSITY_DEFAULT);
 sunLight.castShadow = true;
-sunLight.shadow.mapSize.set(4096, 4096);  // high-res shadows (UE-quality)
-sunLight.shadow.bias       = -0.0001;
-sunLight.shadow.normalBias = 0.01;
+sunLight.shadow.mapSize.set(4096, 4096);
+sunLight.shadow.bias       = -0.00015;
+sunLight.shadow.normalBias = 0.015;
 sunLight.shadow.camera.near = 0.5;
 sunLight.shadow.camera.far  = SUN_DISTANCE * 2;
 sunLight.target = sunTarget;
@@ -938,22 +1056,20 @@ function updateSunSky() {
     }
   }
 
+  // ── Apply sky color to renderer clear color ──
+  renderer.setClearColor(userSkyColor);
+
   // ── Atmospheric perspective fog ──
-  if (scene.fog && scene.fog.isFogExp2) {
-    const baseFogDensity = 0.0006;
-    const fogDensityBoost = THREE.MathUtils.lerp(0.002, 0, ambientDayFactor);
-    scene.fog.density = baseFogDensity + fogDensityBoost;
-    const horizonColor = new THREE.Color().copy(sunCol);
+  // Tint fog with a blend of the sun color and the user sky color so the
+  // horizon / distant haze actually reflects the sky colour the user chose.
+  if (scene.fog) {
+    const horizonColor = new THREE.Color().copy(sunCol).lerp(userSkyColor, 0.5);
     const fogBright = THREE.MathUtils.lerp(0.005, 0.55, ambientDayFactor);
     scene.fog.color.copy(horizonColor).multiplyScalar(fogBright);
     if (ambientDayFactor > 0.5) {
       const aerialBlend = THREE.MathUtils.mapLinear(ambientDayFactor, 0.5, 1, 0, 0.3);
-      scene.fog.color.lerp(new THREE.Color(0.55, 0.62, 0.72), aerialBlend);
+      scene.fog.color.lerp(new THREE.Color().copy(userSkyColor).multiplyScalar(0.7), aerialBlend);
     }
-  } else if (scene.fog) {
-    const horizonColor = new THREE.Color().copy(sunCol);
-    const fogBright = THREE.MathUtils.lerp(0.005, 0.55, ambientDayFactor);
-    scene.fog.color.copy(horizonColor).multiplyScalar(fogBright);
   }
 
   // ── Clouds ──
@@ -1002,9 +1118,37 @@ function updateSunShadowCenter(pos) {
   sunLight.shadow.camera.updateProjectionMatrix();
 }
 
+/** Keep sky dome, clouds, stars, and moon centered on the active camera so
+ *  the player can never walk to the edge of the sky. */
+function syncSkyToCamera(cam) {
+  const p = cam.position;
+  sky.position.set(p.x, p.y, p.z);
+  _cloudGroup.position.set(p.x, 0, p.z);
+  if (_starsMesh) _starsMesh.position.set(p.x, p.y, p.z);
+  _moonGroup.position.set(p.x, p.y, p.z);
+}
+
 const EDIT_SPEED = 12;
 const EDIT_VERTICAL_SPEED = 9;
 const editKeys = new Set();
+
+// ─── Editor free-look mode (toggle with F key) ──────────────────────────────
+let editorFreeLook = false;
+function startEditorFreeLook() {
+  if (state.isPlaytest || editorFreeLook) return;
+  editorFreeLook = true;
+  orbitControls.enabled = false;
+  renderer.domElement.requestPointerLock();
+}
+function stopEditorFreeLook() {
+  if (!editorFreeLook) return;
+  editorFreeLook = false;
+  orbitControls.enabled = true;
+  if (document.pointerLockElement === renderer.domElement) {
+    suppressPointerUnlockStop = true;
+    document.exitPointerLock();
+  }
+}
 
 const PLAYER_RADIUS = 0.35;
 const STEP_HEIGHT = 0.55;
@@ -1016,6 +1160,7 @@ const gameRules = {
   gravityEnabled: true,
   height: 1.75,
   eyeHeight: 1.6,
+  crouchHeight: 1.0,
   fallDamage: false,
   fallDamageMinHeight: 4,
   fallDamageMultiplier: 1,
@@ -1034,6 +1179,31 @@ const playerProfile = {
   name: 'Player',
   groups: ['default'],
 };
+
+// ─── Keybinds ────────────────────────────────────────────────────────────────
+const DEFAULT_KEYBINDS = {
+  forward: 'KeyW',
+  backward: 'KeyS',
+  left: 'KeyA',
+  right: 'KeyD',
+  jump: 'Space',
+  sprint: 'KeyR',
+  crouch: 'ShiftLeft',
+  shoot: 'mouse0',
+  toggleMouse: 'KeyT',
+};
+
+const keybinds = { ...DEFAULT_KEYBINDS };
+
+function keybindLabel(code) {
+  if (code === 'mouse0') return 'LMB';
+  if (code === 'mouse2') return 'RMB';
+  return code.replace('Key', '').replace('Digit', '').replace('Left', '').replace('Right', '').replace('Arrow', '');
+}
+
+function keybindMatch(action, code) {
+  return keybinds[action] === code;
+}
 const BASE_FPS_SPEED = 7;
 let _groundTouchFnActive = false; // tracks whether ground-touch function is currently active
 
@@ -1043,6 +1213,7 @@ const gridChunks  = new Map();
 const gridFillPlanes = new Map();
 let gridFillColor   = 0x1a2636;
 let gridFillEnabled = false;
+let gridFillTexture = 'none'; // none, grass, dirt, stone, sand, snow
 let worldBorderEnabled = false;
 let worldBorderMinX = -50;
 let worldBorderMaxX = 50;
@@ -1051,6 +1222,56 @@ let worldBorderMaxZ = 50;
 let lastChunkX = Infinity;
 let lastChunkZ = Infinity;
 let lastChunkRange = Infinity;
+
+// ─── Procedural ground textures ──────────────────────────────────────────────
+const GROUND_TEXTURES = {
+  grass: { base: [0x4a8c3c, 0x3d7a30, 0x5ca04a], detail: [0x3a6c28, 0x6ab85a] },
+  dirt:  { base: [0x8b6b47, 0x7a5c3a, 0x9c7b55], detail: [0x6a4e30, 0xa08560] },
+  stone: { base: [0x808080, 0x707070, 0x909090], detail: [0x606060, 0xa0a0a0] },
+  sand:  { base: [0xd4b878, 0xc4a868, 0xe4c888], detail: [0xb49858, 0xf0d898] },
+  snow:  { base: [0xe8e8f0, 0xd8d8e8, 0xf0f0f8], detail: [0xc8c8e0, 0xffffff] },
+};
+
+function _generateGroundTexture(texName) {
+  const config = GROUND_TEXTURES[texName];
+  if (!config) return null;
+  const size = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  // Fill with base color
+  const baseIdx = Math.floor(Math.random() * config.base.length);
+  ctx.fillStyle = '#' + config.base[baseIdx].toString(16).padStart(6, '0');
+  ctx.fillRect(0, 0, size, size);
+  // Add noise patches
+  for (let i = 0; i < 800; i++) {
+    const x = Math.random() * size;
+    const y = Math.random() * size;
+    const r = 1 + Math.random() * 4;
+    const cIdx = Math.floor(Math.random() * (config.base.length + config.detail.length));
+    const c = cIdx < config.base.length ? config.base[cIdx] : config.detail[cIdx - config.base.length];
+    ctx.fillStyle = '#' + c.toString(16).padStart(6, '0');
+    ctx.globalAlpha = 0.15 + Math.random() * 0.35;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(2, 2);
+  return tex;
+}
+
+function _getGridFillMaterial() {
+  if (gridFillTexture && gridFillTexture !== 'none' && GROUND_TEXTURES[gridFillTexture]) {
+    const tex = _generateGroundTexture(gridFillTexture);
+    return new THREE.MeshStandardMaterial({ map: tex, side: THREE.DoubleSide, roughness: 0.95, metalness: 0 });
+  }
+  return new THREE.MeshStandardMaterial({ color: gridFillColor, side: THREE.DoubleSide, roughness: 1, metalness: 0 });
+}
+
 
 function updateGridChunks(wx, wz) {
   const cx = Math.floor(wx / CHUNK_SIZE);
@@ -1085,10 +1306,11 @@ function updateGridChunks(wx, wz) {
     if (gridFillEnabled && !gridFillPlanes.has(key)) {
       const [kx, kz] = key.split(',').map(Number);
       const geo = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE);
-      const mat = new THREE.MeshBasicMaterial({ color: gridFillColor, side: THREE.DoubleSide });
+      const mat = _getGridFillMaterial();
       const plane = new THREE.Mesh(geo, mat);
       plane.rotation.x = -Math.PI / 2;
       plane.position.set(kx * CHUNK_SIZE + CHUNK_SIZE / 2, -0.01, kz * CHUNK_SIZE + CHUNK_SIZE / 2);
+      plane.receiveShadow = true;
       if (state.isPlaytest) plane.visible = false;
       scene.add(plane);
       gridFillPlanes.set(key, plane);
@@ -1395,6 +1617,66 @@ const DEFS = {
     makeMat: () => new THREE.MeshStandardMaterial({ color: 0xff6600, emissive: 0xff6600, emissiveIntensity: 1.2, transparent: true, opacity: 0.85 }),
     placedY: 0.15,
   },
+  joint: {
+    label: 'Joint',
+    makeGeo: () => new THREE.SphereGeometry(0.18, 14, 10),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x00ccff, emissive: 0x00ccff, emissiveIntensity: 1.0, transparent: true, opacity: 0.8 }),
+    placedY: 0.18,
+  },
+  skeleton: {
+    label: 'Skeleton',
+    makeGeo: () => new THREE.SphereGeometry(0.22, 16, 12),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0xffaa22, emissive: 0xffaa22, emissiveIntensity: 0.8, transparent: true, opacity: 0.85 }),
+    placedY: 0.22,
+  },
+  terrain: {
+    label: 'Terrain',
+    makeGeo: params => {
+      const seg = params?.segments ?? 64;
+      const sz  = params?.terrainSize ?? 20;
+      const geo = new THREE.PlaneGeometry(sz, sz, seg, seg);
+      geo.rotateX(-Math.PI / 2);
+      return geo;
+    },
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x5a8c3c, roughness: 0.95, metalness: 0, side: THREE.DoubleSide, flatShading: true }),
+    placedY: 0,
+  },
+  teleport: {
+    label: 'Teleport',
+    makeGeo: () => new THREE.TorusGeometry(0.7, 0.12, 12, 24),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x9b59ff, emissive: 0x9b59ff, emissiveIntensity: 0.75, transparent: true, opacity: 0.8 }),
+    placedY: 0.7,
+  },
+  text: {
+    label: 'Text',
+    makeGeo: () => new THREE.PlaneGeometry(3, 1),
+    makeMat: () => new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, side: THREE.DoubleSide }),
+    placedY: 1.5,
+  },
+  text3d: {
+    label: '3D Text',
+    makeGeo: () => new THREE.BoxGeometry(3, 1, 0.15),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true }),
+    placedY: 1.5,
+  },
+  screen: {
+    label: 'Screen',
+    makeGeo: () => new THREE.BoxGeometry(4, 2.25, 0.05),
+    makeMat: () => new THREE.MeshBasicMaterial({ color: 0x222222, side: THREE.DoubleSide }),
+    placedY: 2,
+  },
+  camera: {
+    label: 'Camera',
+    makeGeo: () => new THREE.ConeGeometry(0.25, 0.5, 8),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x3498db, emissive: 0x3498db, emissiveIntensity: 0.4 }),
+    placedY: 2,
+  },
+  npc: {
+    label: 'NPC',
+    makeGeo: () => new THREE.BoxGeometry(0.6, 1.8, 0.4),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0xf0c8a0, roughness: 0.85 }),
+    placedY: 0.9,
+  },
 };
 
 function normalizeSkinGridSize(gridSize = {}) {
@@ -1678,7 +1960,17 @@ function getMeshLocalHitboxBox(mesh, outCenter = _hitboxLocalCenter, outSize = _
 
 function computeMeshCollisionAABB(mesh, out) {
   if (getMeshCollisionMode(mesh) === 'geometry') {
-    return out.setFromObject(mesh);
+    // Cache AABB for terrain — only recompute if geometry changed
+    if (mesh.userData.type === 'terrain' && mesh.userData._cachedCollisionAABB) {
+      out.copy(mesh.userData._cachedCollisionAABB);
+      return out;
+    }
+    out.setFromObject(mesh);
+    if (mesh.userData.type === 'terrain') {
+      if (!mesh.userData._cachedCollisionAABB) mesh.userData._cachedCollisionAABB = new THREE.Box3();
+      mesh.userData._cachedCollisionAABB.copy(out);
+    }
+    return out;
   }
 
   const { center, size } = getMeshLocalHitboxBox(mesh);
@@ -1701,6 +1993,13 @@ function computeMeshCollisionAABB(mesh, out) {
 function applyCustomSkinToMesh(mesh) {
   if (!mesh?.userData) return;
   clearCustomSkinVisual(mesh);
+
+  // Try sculpt skin first
+  const sculptSkinRaw = customSculptSkins[mesh.userData.type];
+  if (sculptSkinRaw?.primitives?.length) {
+    applySculptSkinToMesh(mesh);
+    return;
+  }
 
   const skinRaw = customBlockSkins[mesh.userData.type];
   if (!skinRaw?.voxels?.length) {
@@ -1774,6 +2073,1144 @@ function closeSkinEditorOverlay() {
   disposeSkin3DScene();
 }
 
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SKELETON EDITOR OVERLAY                                                    ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+function openSkeletonEditor(definitionName) {
+  if (skeletonEditorOverlayEl) closeSkeletonEditor();
+
+  // Resolve or create definition
+  let defName = String(definitionName || '').trim();
+  if (!defName) defName = 'Skeleton_' + Date.now().toString(36);
+  if (!skeletonDefinitions[defName]) {
+    skeletonDefinitions[defName] = createDefaultSkeletonDefinition(defName);
+  }
+  const def = skeletonDefinitions[defName];
+
+  // Editor state
+  skeletonEditorState = {
+    defName,
+    selectedBoneId: null,
+    mode: 'select', // select | addBone
+    currentClipName: '',
+    playheadTime: 0,
+    isPlaying: false,
+    playStartWall: 0,
+    playStartTime: 0,
+    _animFrameId: null,
+  };
+
+  // Build overlay DOM
+  const overlay = document.createElement('div');
+  overlay.id = 'skeleton-editor-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:20010;display:flex;background:#080c10;font-family:inherit;color:#d4d8dd';
+  overlay.innerHTML = `
+    <div id="skel-left-panel" style="width:240px;min-width:200px;background:#101418;display:flex;flex-direction:column;border-right:1px solid #222">
+      <div style="padding:8px 10px;border-bottom:1px solid #222;display:flex;align-items:center;gap:6px">
+        <span style="font-size:12px;font-weight:700;color:#ffaa22">☠ Skeleton Editor</span>
+        <span id="skel-def-name" style="font-size:10px;color:#889;margin-left:auto;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${defName}">${defName}</span>
+      </div>
+      <div style="padding:6px 10px;border-bottom:1px solid #222;display:flex;gap:4px;flex-wrap:wrap">
+        <button id="skel-btn-add-bone" style="font-size:10px;padding:2px 6px;background:#225;border:1px solid #447;color:#aad;border-radius:3px;cursor:pointer" title="Add child bone to selected (or root)">+ Bone</button>
+        <button id="skel-btn-del-bone" style="font-size:10px;padding:2px 6px;background:#422;border:1px solid #744;color:#daa;border-radius:3px;cursor:pointer" title="Delete selected bone">✕ Bone</button>
+        <button id="skel-btn-humanoid" style="font-size:10px;padding:2px 6px;background:#332200;border:1px solid #664;color:#ffcc66;border-radius:3px;cursor:pointer" title="Load humanoid template">🦴 Humanoid</button>
+      </div>
+      <div style="padding:4px 10px;font-size:9px;font-weight:700;color:#889;border-bottom:1px solid #1a1a1a">BONE TREE</div>
+      <div id="skel-bone-tree" style="flex:1;overflow-y:auto;padding:4px 0;font-size:11px"></div>
+      <div id="skel-bone-props" style="border-top:1px solid #222;padding:6px 10px;font-size:10px;display:none">
+        <div style="font-size:9px;font-weight:700;color:#889;margin-bottom:4px">BONE PROPERTIES</div>
+        <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px"><span style="width:40px;color:#889">Name</span><input id="skel-bone-name" type="text" style="flex:1;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/></div>
+        <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px"><span style="width:40px;color:#889">Length</span><input id="skel-bone-length" type="number" min="0.01" step="0.05" style="width:55px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/></div>
+        <div style="font-size:9px;color:#667;margin:4px 0 2px">Position (offset from parent)</div>
+        <div style="display:flex;gap:3px;margin-bottom:3px">
+          <span style="color:#e44;font-size:9px">X</span><input id="skel-bone-px" type="number" step="0.05" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
+          <span style="color:#4e4;font-size:9px">Y</span><input id="skel-bone-py" type="number" step="0.05" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
+          <span style="color:#48f;font-size:9px">Z</span><input id="skel-bone-pz" type="number" step="0.05" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
+        </div>
+        <div style="font-size:9px;color:#667;margin:4px 0 2px">Rotation (degrees)</div>
+        <div style="display:flex;gap:3px;margin-bottom:3px">
+          <span style="color:#e44;font-size:9px">X</span><input id="skel-bone-rx" type="number" step="1" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
+          <span style="color:#4e4;font-size:9px">Y</span><input id="skel-bone-ry" type="number" step="1" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
+          <span style="color:#48f;font-size:9px">Z</span><input id="skel-bone-rz" type="number" step="1" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
+        </div>
+        <button id="skel-bone-edit-skin" style="font-size:10px;padding:2px 6px;background:#224;border:1px solid #446;color:#aaf;border-radius:3px;cursor:pointer;margin-top:2px" title="Edit voxel skin for this bone">🎨 Edit Bone Skin</button>
+      </div>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;position:relative;overflow:hidden;min-width:0;min-height:0">
+      <canvas id="skel-3d-canvas" style="flex:1;display:block;min-height:0"></canvas>
+      <div id="skel-timeline" style="height:120px;min-height:80px;max-height:180px;background:#0c0e12;border-top:1px solid #222;display:flex;flex-direction:column;flex-shrink:0">
+        <div style="padding:4px 10px;display:flex;align-items:center;gap:6px;border-bottom:1px solid #1a1a1a">
+          <button id="skel-tl-play" style="font-size:11px;padding:1px 6px;background:#1a2a1a;border:1px solid #2a4a2a;color:#8f8;border-radius:3px;cursor:pointer">▶</button>
+          <button id="skel-tl-stop" style="font-size:11px;padding:1px 6px;background:#2a1a1a;border:1px solid #4a2a2a;color:#f88;border-radius:3px;cursor:pointer">⏹</button>
+          <span style="font-size:9px;color:#889">Time:</span>
+          <input id="skel-tl-time" type="number" min="0" step="0.05" value="0" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:1px 4px;font-size:10px"/>
+          <span style="font-size:9px;color:#889">/ Dur:</span>
+          <input id="skel-tl-duration" type="number" min="0.1" step="0.1" value="1" style="width:45px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:1px 4px;font-size:10px"/>
+          <label style="display:flex;align-items:center;gap:2px;font-size:9px;color:#889;cursor:pointer"><input id="skel-tl-loop" type="checkbox" checked style="margin:0"/>Loop</label>
+          <button id="skel-tl-add-kf" style="font-size:10px;padding:1px 6px;background:#222;border:1px solid #444;color:#ddd;border-radius:3px;cursor:pointer">◆ Add Keyframe</button>
+          <button id="skel-tl-del-kf" style="font-size:10px;padding:1px 6px;background:#322;border:1px solid #544;color:#daa;border-radius:3px;cursor:pointer">✕ Keyframe</button>
+          <select id="skel-tl-clip" style="font-size:10px;padding:1px 4px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;margin-left:auto"></select>
+          <button id="skel-tl-new-clip" style="font-size:10px;padding:1px 6px;background:#222;border:1px solid #444;color:#ddd;border-radius:3px;cursor:pointer">+ Clip</button>
+          <button id="skel-tl-del-clip" style="font-size:10px;padding:1px 6px;background:#322;border:1px solid #544;color:#daa;border-radius:3px;cursor:pointer">✕ Clip</button>
+        </div>
+        <div id="skel-tl-track" style="flex:1;position:relative;overflow:hidden;cursor:crosshair">
+          <canvas id="skel-tl-canvas" style="width:100%;height:100%;display:block"></canvas>
+        </div>
+      </div>
+    </div>
+    <div id="skel-right-panel" style="width:180px;min-width:140px;background:#101418;display:flex;flex-direction:column;border-left:1px solid #222">
+      <div style="padding:6px 10px;border-bottom:1px solid #222;font-size:9px;font-weight:700;color:#889">POSES</div>
+      <div id="skel-pose-list" style="flex:1;overflow-y:auto;padding:4px 0;font-size:10px"></div>
+      <div style="padding:4px 10px;border-top:1px solid #222;display:flex;gap:4px">
+        <button id="skel-pose-save" style="font-size:10px;padding:2px 6px;background:#1a2a1a;border:1px solid #2a4a2a;color:#8f8;border-radius:3px;cursor:pointer;flex:1">Save Pose</button>
+        <button id="skel-pose-load" style="font-size:10px;padding:2px 6px;background:#222;border:1px solid #444;color:#ddd;border-radius:3px;cursor:pointer;flex:1">Load Pose</button>
+      </div>
+      <div style="padding:6px 10px;border-top:1px solid #222;border-bottom:1px solid #222;font-size:9px;font-weight:700;color:#889">ACTIONS</div>
+      <div style="padding:4px 10px;display:flex;flex-direction:column;gap:3px">
+        <button id="skel-btn-close" style="font-size:11px;padding:4px 8px;background:#2a1a1a;border:1px solid #4a2a2a;color:#f88;border-radius:3px;cursor:pointer">✕ Close Editor</button>
+      </div>
+      <div style="padding:6px 10px;border-top:1px solid #222;font-size:9px;color:#667;line-height:1.6;overflow-y:auto">
+        <div style="font-weight:700;color:#889;margin-bottom:4px">📖 How to Use</div>
+        <div><b style="color:#ffaa22">1.</b> Click <b>🦴 Humanoid</b> to load a template skeleton, or <b>+ Bone</b> to add bones manually.</div>
+        <div><b style="color:#ffaa22">2.</b> Click a bone in the <b>Bone Tree</b> to select it. Edit its Name, Length, Position, and Rotation in the properties below.</div>
+        <div><b style="color:#ffaa22">3.</b> Click <b>🎨 Edit Bone Skin</b> to paint voxels onto the selected bone.</div>
+        <div><b style="color:#ffaa22">4.</b> Use the <b>Timeline</b> at the bottom to animate: click <b>+ Clip</b> to create an animation clip, set the time, pose the bones, then click <b>◆ Add Keyframe</b>.</div>
+        <div><b style="color:#ffaa22">5.</b> Press <b>▶</b> to preview the animation. Use <b>Loop</b> and <b>Speed</b> controls.</div>
+        <div><b style="color:#ffaa22">6.</b> Use <b>Save Pose</b> to store a pose snapshot and <b>Load Pose</b> to apply it.</div>
+        <div style="margin-top:4px;color:#556">🖱 Drag to orbit, scroll to zoom in the 3D view.</div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  skeletonEditorOverlayEl = overlay;
+
+  // ─── 3D Scene Setup ─────────────────────────────────────────────────────────
+  const skelCanvas = document.getElementById('skel-3d-canvas');
+  const skelRenderer = new THREE.WebGLRenderer({ canvas: skelCanvas, antialias: true });
+  skelRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  skelRenderer.setClearColor(0x12161c);
+
+  const skelScene = new THREE.Scene();
+  const skelCamera = new THREE.PerspectiveCamera(50, 1, 0.01, 100);
+  skelCamera.position.set(0, 1.2, 3);
+
+  const skelControls = new OrbitControls(skelCamera, skelCanvas);
+  skelControls.target.set(0, 0.6, 0);
+  skelControls.enableDamping = true;
+  skelControls.dampingFactor = 0.12;
+  skelControls.update();
+
+  // Lights
+  const skelAmbient = new THREE.AmbientLight(0x445566, 0.6);
+  skelScene.add(skelAmbient);
+  const skelDirLight = new THREE.DirectionalLight(0xffeedd, 1.2);
+  skelDirLight.position.set(3, 5, 4);
+  skelScene.add(skelDirLight);
+
+  // Ground grid
+  const skelGrid = new THREE.GridHelper(4, 16, 0x333, 0x222);
+  skelScene.add(skelGrid);
+
+  // Bone visual group
+  const boneVisualGroup = new THREE.Group();
+  skelScene.add(boneVisualGroup);
+
+  // Bone skin visual group
+  const boneSkinGroup = new THREE.Group();
+  skelScene.add(boneSkinGroup);
+
+  // Shared geometry for bone markers
+  const boneSphereGeo = new THREE.SphereGeometry(0.04, 8, 6);
+  const boneLineMaterial = new THREE.LineBasicMaterial({ color: 0xcccccc, linewidth: 1 });
+  const BONE_COLORS = {
+    default: 0xcccccc, selected: 0xffee44, root: 0x44ff88, hasSkin: 0x6688ff,
+  };
+
+  let skeletonResult = null; // { skeleton, rootGroup, boneMap, allBones }
+
+  skeleton3DState = {
+    renderer: skelRenderer, scene: skelScene, camera: skelCamera, controls: skelControls,
+    boneVisualGroup, boneSkinGroup, boneMap: null,
+  };
+
+  function skel3DResize() {
+    const container = skelCanvas.parentElement;
+    if (!container) return;
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    if (w < 1 || h < 1) return;
+    skelRenderer.setSize(w, h, false);
+    skelCamera.aspect = w / h;
+    skelCamera.updateProjectionMatrix();
+  }
+
+  // Use ResizeObserver for layout changes instead of per-frame resize
+  const _skelResizeObserver = new ResizeObserver(() => skel3DResize());
+  _skelResizeObserver.observe(skelCanvas.parentElement);
+  overlay._skelResizeObserver = _skelResizeObserver;
+
+  // ─── Rebuild bone visuals from definition ──────────────────────────────────
+  function rebuildBoneVisuals() {
+    // Clear old
+    while (boneVisualGroup.children.length) {
+      const c = boneVisualGroup.children[0];
+      boneVisualGroup.remove(c);
+      c.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+    }
+    if (skeletonResult?.rootGroup) {
+      skelScene.remove(skeletonResult.rootGroup);
+    }
+
+    const result = buildThreeBonesFromDef(def);
+    if (!result) { skeletonResult = null; skeleton3DState.boneMap = null; return; }
+    skeletonResult = result;
+    skeleton3DState.boneMap = result.boneMap;
+
+    skelScene.add(result.rootGroup);
+    result.rootGroup.updateMatrixWorld(true);
+
+    // Draw bone markers and connecting lines
+    for (const bd of def.bones) {
+      const threeBone = result.boneMap.get(bd.id);
+      if (!threeBone) continue;
+
+      const worldPos = new THREE.Vector3();
+      threeBone.getWorldPosition(worldPos);
+
+      // Sphere marker
+      const isSelected = skeletonEditorState.selectedBoneId === bd.id;
+      const isRoot = bd.parent === null;
+      const hasSkin = !!def.boneSkins[bd.id]?.voxels?.length;
+      let color = BONE_COLORS.default;
+      if (isSelected) color = BONE_COLORS.selected;
+      else if (hasSkin) color = BONE_COLORS.hasSkin;
+      else if (isRoot) color = BONE_COLORS.root;
+
+      const markerMat = new THREE.MeshBasicMaterial({ color });
+      const marker = new THREE.Mesh(boneSphereGeo, markerMat);
+      marker.position.copy(worldPos);
+      marker.userData._boneId = bd.id;
+      boneVisualGroup.add(marker);
+
+      // Line to parent
+      if (bd.parent) {
+        const parentBone = result.boneMap.get(bd.parent);
+        if (parentBone) {
+          const parentPos = new THREE.Vector3();
+          parentBone.getWorldPosition(parentPos);
+          const lineGeo = new THREE.BufferGeometry().setFromPoints([parentPos, worldPos]);
+          const lineColor = isSelected ? 0xffee44 : 0x667788;
+          const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: lineColor }));
+          boneVisualGroup.add(line);
+        }
+      }
+
+      // Bone length indicator (small line extending from bone)
+      const endPos = new THREE.Vector3(0, bd.length, 0);
+      endPos.applyQuaternion(threeBone.getWorldQuaternion(new THREE.Quaternion()));
+      endPos.add(worldPos);
+      const lenGeo = new THREE.BufferGeometry().setFromPoints([worldPos, endPos]);
+      const lenLine = new THREE.Line(lenGeo, new THREE.LineBasicMaterial({ color: color, linewidth: 1, opacity: 0.5, transparent: true }));
+      boneVisualGroup.add(lenLine);
+    }
+
+    rebuildBoneSkinVisuals();
+  }
+
+  // ─── Rebuild per-bone voxel skins ───────────────────────────────────────────
+  function rebuildBoneSkinVisuals() {
+    while (boneSkinGroup.children.length) {
+      const c = boneSkinGroup.children[0];
+      boneSkinGroup.remove(c);
+      c.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+    }
+    if (!skeletonResult) return;
+
+    for (const [boneId, skinDef] of Object.entries(def.boneSkins)) {
+      if (!skinDef?.voxels?.length) continue;
+      const threeBone = skeletonResult.boneMap.get(boneId);
+      if (!threeBone) continue;
+
+      const boneDef = def.bones.find(b => b.id === boneId);
+      const boneLen = boneDef?.length || 0.3;
+
+      // Build voxel group for this bone
+      const gridSize = normalizeSkinGridSize(skinDef.gridSize || { x: 4, y: 4, z: 4 });
+      const voxels = skinDef.voxels;
+      const cellSize = boneLen / Math.max(gridSize.x, gridSize.y, gridSize.z);
+
+      // Group voxels by color
+      const byColor = new Map();
+      for (const v of voxels) {
+        const col = v.color ?? 0x7f8ea0;
+        if (!byColor.has(col)) byColor.set(col, []);
+        byColor.get(col).push(v);
+      }
+
+      const boneGroup = new THREE.Group();
+      const sharedGeo = new THREE.BoxGeometry(cellSize * 0.95, cellSize * 0.95, cellSize * 0.95);
+
+      for (const [color, colorVoxels] of byColor) {
+        const mat = new THREE.MeshStandardMaterial({ color });
+        const instMesh = new THREE.InstancedMesh(sharedGeo, mat, colorVoxels.length);
+        const mtx = new THREE.Matrix4();
+        for (let i = 0; i < colorVoxels.length; i++) {
+          const v = colorVoxels[i];
+          mtx.makeTranslation(
+            (v.x - gridSize.x / 2 + 0.5) * cellSize,
+            (v.y - gridSize.y / 2 + 0.5) * cellSize + boneLen / 2,
+            (v.z - gridSize.z / 2 + 0.5) * cellSize
+          );
+          instMesh.setMatrixAt(i, mtx);
+        }
+        instMesh.instanceMatrix.needsUpdate = true;
+        boneGroup.add(instMesh);
+      }
+
+      // Attach to bone world transform
+      const boneWorldPos = new THREE.Vector3();
+      const boneWorldQuat = new THREE.Quaternion();
+      threeBone.getWorldPosition(boneWorldPos);
+      threeBone.getWorldQuaternion(boneWorldQuat);
+      boneGroup.position.copy(boneWorldPos);
+      boneGroup.quaternion.copy(boneWorldQuat);
+      boneGroup.userData._skinBoneId = boneId;
+      boneSkinGroup.add(boneGroup);
+    }
+  }
+
+  // ─── Bone tree UI ──────────────────────────────────────────────────────────
+  const boneTreeEl = document.getElementById('skel-bone-tree');
+
+  function refreshBoneTree() {
+    const bones = def.bones;
+    const childrenMap = new Map();
+    const rootBones = [];
+    for (const b of bones) {
+      if (b.parent && bones.some(p => p.id === b.parent)) {
+        if (!childrenMap.has(b.parent)) childrenMap.set(b.parent, []);
+        childrenMap.get(b.parent).push(b);
+      } else {
+        rootBones.push(b);
+      }
+    }
+
+    function renderBone(b, depth) {
+      const indent = depth * 14;
+      const isSel = skeletonEditorState.selectedBoneId === b.id;
+      const hasSkin = !!def.boneSkins[b.id]?.voxels?.length;
+      const skinIcon = hasSkin ? '🎨' : '';
+      const children = childrenMap.get(b.id) || [];
+      let html = `<div class="skel-bone-item" data-bone-id="${b.id}" style="padding:2px 6px 2px ${6 + indent}px;cursor:pointer;background:${isSel ? '#2a3040' : 'transparent'};border-left:2px solid ${isSel ? '#ffaa22' : 'transparent'};display:flex;align-items:center;gap:3px" title="${b.id}">
+        <span style="color:${!b.parent ? '#4f8' : '#aaa'};font-size:9px">${!b.parent ? '◉' : '○'}</span>
+        <span style="color:${isSel ? '#ffcc44' : '#ccc'};font-size:10px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.name}</span>
+        ${skinIcon ? `<span style="font-size:9px">${skinIcon}</span>` : ''}
+      </div>`;
+      for (const child of children) {
+        html += renderBone(child, depth + 1);
+      }
+      return html;
+    }
+
+    boneTreeEl.innerHTML = rootBones.length
+      ? rootBones.map(b => renderBone(b, 0)).join('')
+      : '<div style="padding:8px 10px;color:#667;font-size:10px;text-align:center">No bones yet.<br>Click "+ Bone" or "🦴 Humanoid"</div>';
+
+    // Click handlers
+    boneTreeEl.querySelectorAll('.skel-bone-item').forEach(el => {
+      el.addEventListener('click', () => {
+        skeletonEditorState.selectedBoneId = el.dataset.boneId;
+        refreshBoneTree();
+        refreshBoneProps();
+        rebuildBoneVisuals();
+      });
+    });
+  }
+
+  // ─── Bone properties panel ──────────────────────────────────────────────────
+  const bonePropsEl = document.getElementById('skel-bone-props');
+
+  function refreshBoneProps() {
+    const bid = skeletonEditorState.selectedBoneId;
+    const boneDef = bid ? def.bones.find(b => b.id === bid) : null;
+    if (!boneDef) {
+      bonePropsEl.style.display = 'none';
+      return;
+    }
+    bonePropsEl.style.display = '';
+    document.getElementById('skel-bone-name').value = boneDef.name;
+    document.getElementById('skel-bone-length').value = boneDef.length;
+    document.getElementById('skel-bone-px').value = boneDef.position[0];
+    document.getElementById('skel-bone-py').value = boneDef.position[1];
+    document.getElementById('skel-bone-pz').value = boneDef.position[2];
+
+    // Convert quaternion to euler for display
+    const euler = new THREE.Euler().setFromQuaternion(
+      new THREE.Quaternion(boneDef.rotation[0], boneDef.rotation[1], boneDef.rotation[2], boneDef.rotation[3])
+    );
+    const R2D = 180 / Math.PI;
+    document.getElementById('skel-bone-rx').value = Math.round(euler.x * R2D * 10) / 10;
+    document.getElementById('skel-bone-ry').value = Math.round(euler.y * R2D * 10) / 10;
+    document.getElementById('skel-bone-rz').value = Math.round(euler.z * R2D * 10) / 10;
+  }
+
+  function applyBoneProps() {
+    const bid = skeletonEditorState.selectedBoneId;
+    const boneDef = bid ? def.bones.find(b => b.id === bid) : null;
+    if (!boneDef) return;
+
+    boneDef.name = document.getElementById('skel-bone-name').value.trim() || 'Bone';
+    boneDef.length = Math.max(0.01, parseFloat(document.getElementById('skel-bone-length').value) || 0.3);
+    boneDef.position[0] = parseFloat(document.getElementById('skel-bone-px').value) || 0;
+    boneDef.position[1] = parseFloat(document.getElementById('skel-bone-py').value) || 0;
+    boneDef.position[2] = parseFloat(document.getElementById('skel-bone-pz').value) || 0;
+
+    const D2R = Math.PI / 180;
+    const rx = (parseFloat(document.getElementById('skel-bone-rx').value) || 0) * D2R;
+    const ry = (parseFloat(document.getElementById('skel-bone-ry').value) || 0) * D2R;
+    const rz = (parseFloat(document.getElementById('skel-bone-rz').value) || 0) * D2R;
+    const euler = new THREE.Euler(rx, ry, rz);
+    const quat = new THREE.Quaternion().setFromEuler(euler);
+    boneDef.rotation = quat.toArray();
+
+    refreshBoneTree();
+    rebuildBoneVisuals();
+  }
+
+  // Wire bone property inputs
+  ['skel-bone-name', 'skel-bone-length', 'skel-bone-px', 'skel-bone-py', 'skel-bone-pz',
+   'skel-bone-rx', 'skel-bone-ry', 'skel-bone-rz'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', applyBoneProps);
+  });
+
+  // ─── Add / Delete bone ─────────────────────────────────────────────────────
+  document.getElementById('skel-btn-add-bone').addEventListener('click', () => {
+    const parentId = skeletonEditorState.selectedBoneId || null;
+    const newBone = createDefaultBone({
+      name: 'Bone_' + (def.bones.length + 1),
+      parent: parentId,
+      position: parentId ? [0, 0.2, 0] : [0, 0, 0],
+      length: 0.2,
+    });
+    def.bones.push(newBone);
+    skeletonEditorState.selectedBoneId = newBone.id;
+    refreshBoneTree();
+    refreshBoneProps();
+    rebuildBoneVisuals();
+  });
+
+  document.getElementById('skel-btn-del-bone').addEventListener('click', () => {
+    const bid = skeletonEditorState.selectedBoneId;
+    if (!bid) return;
+    // Find all descendants
+    const toRemove = new Set([bid]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const b of def.bones) {
+        if (b.parent && toRemove.has(b.parent) && !toRemove.has(b.id)) {
+          toRemove.add(b.id);
+          changed = true;
+        }
+      }
+    }
+    def.bones = def.bones.filter(b => !toRemove.has(b.id));
+    // Remove bone skins for deleted bones
+    for (const id of toRemove) delete def.boneSkins[id];
+    // Remove from poses
+    for (const pose of Object.values(def.poses)) {
+      for (const id of toRemove) delete pose[id];
+    }
+    // Remove from animation keyframes
+    for (const anim of Object.values(def.animations)) {
+      for (const kf of anim.keyframes) {
+        for (const id of toRemove) delete kf.bones[id];
+      }
+    }
+    skeletonEditorState.selectedBoneId = null;
+    refreshBoneTree();
+    refreshBoneProps();
+    rebuildBoneVisuals();
+  });
+
+  // ─── Humanoid template ──────────────────────────────────────────────────────
+  document.getElementById('skel-btn-humanoid').addEventListener('click', () => {
+    if (def.bones.length > 0 && !confirm('This will replace all current bones. Continue?')) return;
+    const humanoid = createHumanoidSkeleton(def.name);
+    def.bones = humanoid.bones;
+    def.poses = humanoid.poses;
+    def.animations = {};
+    def.boneSkins = {};
+    skeletonEditorState.selectedBoneId = 'root';
+    refreshBoneTree();
+    refreshBoneProps();
+    rebuildBoneVisuals();
+    refreshPoseList();
+    refreshClipSelect();
+  });
+
+  // ─── 3D bone click selection (raycasting) ──────────────────────────────────
+  const _skelRaycaster = new THREE.Raycaster();
+  const _skelMouse = new THREE.Vector2();
+
+  skelCanvas.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    const rect = skelCanvas.getBoundingClientRect();
+    _skelMouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    _skelMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    _skelRaycaster.setFromCamera(_skelMouse, skelCamera);
+
+    const hits = _skelRaycaster.intersectObjects(boneVisualGroup.children, false);
+    const boneHit = hits.find(h => h.object.userData._boneId);
+    if (boneHit) {
+      skeletonEditorState.selectedBoneId = boneHit.object.userData._boneId;
+      refreshBoneTree();
+      refreshBoneProps();
+      rebuildBoneVisuals();
+    }
+  });
+
+  // ─── Pose system ───────────────────────────────────────────────────────────
+  const poseListEl = document.getElementById('skel-pose-list');
+
+  function refreshPoseList() {
+    const names = Object.keys(def.poses);
+    poseListEl.innerHTML = names.length
+      ? names.map(name => `<div class="skel-pose-item" data-pose="${name}" style="padding:3px 10px;cursor:pointer;display:flex;align-items:center;gap:4px;font-size:10px">
+          <span style="flex:1;color:#ccc">${name}</span>
+          <button class="skel-pose-del" data-pose="${name}" style="font-size:8px;background:#322;border:1px solid #544;color:#daa;border-radius:2px;padding:0 3px;cursor:pointer">✕</button>
+        </div>`).join('')
+      : '<div style="padding:8px 10px;color:#667;font-size:10px;text-align:center">No poses saved.</div>';
+
+    poseListEl.querySelectorAll('.skel-pose-item').forEach(el => {
+      el.addEventListener('click', (e) => {
+        if (e.target.classList.contains('skel-pose-del')) {
+          const poseName = e.target.dataset.pose;
+          delete def.poses[poseName];
+          refreshPoseList();
+          return;
+        }
+        const poseName = el.dataset.pose;
+        if (def.poses[poseName] && skeletonResult?.boneMap) {
+          applyPoseToSkeleton(skeletonResult.boneMap, def.poses[poseName]);
+          skeletonResult.rootGroup.updateMatrixWorld(true);
+          rebuildBoneVisuals();
+        }
+      });
+    });
+  }
+
+  document.getElementById('skel-pose-save').addEventListener('click', () => {
+    if (!skeletonResult?.boneMap) return;
+    const name = prompt('Pose name:', 'Pose_' + (Object.keys(def.poses).length + 1));
+    if (!name?.trim()) return;
+    def.poses[name.trim()] = capturePoseFromSkeleton(skeletonResult.boneMap);
+    refreshPoseList();
+  });
+
+  document.getElementById('skel-pose-load').addEventListener('click', () => {
+    const names = Object.keys(def.poses);
+    if (!names.length) return;
+    const name = prompt('Load pose name:\n' + names.join(', '));
+    if (!name?.trim() || !def.poses[name.trim()]) return;
+    if (skeletonResult?.boneMap) {
+      applyPoseToSkeleton(skeletonResult.boneMap, def.poses[name.trim()]);
+      skeletonResult.rootGroup.updateMatrixWorld(true);
+      rebuildBoneVisuals();
+    }
+  });
+
+  // ─── Per-bone voxel skin editing ───────────────────────────────────────────
+  document.getElementById('skel-bone-edit-skin').addEventListener('click', () => {
+    const bid = skeletonEditorState.selectedBoneId;
+    if (!bid) return;
+    const boneDef = def.bones.find(b => b.id === bid);
+    if (!boneDef) return;
+
+    // Initialize bone skin if missing
+    if (!def.boneSkins[bid]) {
+      def.boneSkins[bid] = { gridSize: { x: 4, y: 4, z: 4 }, voxels: [] };
+    }
+    const skinDef = def.boneSkins[bid];
+
+    // Open mini voxel editor as a sub-overlay
+    const subOverlay = document.createElement('div');
+    subOverlay.id = 'skel-bone-skin-overlay';
+    subOverlay.style.cssText = 'position:fixed;inset:40px;z-index:20020;background:#0c0e12;border:2px solid #ffaa22;border-radius:8px;display:flex;flex-direction:column;box-shadow:0 0 40px rgba(0,0,0,0.8)';
+    subOverlay.innerHTML = `
+      <div style="padding:8px 12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #222">
+        <span style="font-size:12px;font-weight:700;color:#ffaa22">🎨 Bone Skin: ${boneDef.name}</span>
+        <span style="font-size:9px;color:#667">Grid: </span>
+        <input id="bskin-gx" type="number" min="1" max="16" value="${skinDef.gridSize.x}" style="width:32px;font-size:10px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:2px;padding:1px 3px"/>
+        <span style="color:#667">×</span>
+        <input id="bskin-gy" type="number" min="1" max="16" value="${skinDef.gridSize.y}" style="width:32px;font-size:10px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:2px;padding:1px 3px"/>
+        <span style="color:#667">×</span>
+        <input id="bskin-gz" type="number" min="1" max="16" value="${skinDef.gridSize.z}" style="width:32px;font-size:10px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:2px;padding:1px 3px"/>
+        <input id="bskin-color" type="color" value="#7f8ea0" style="width:28px;height:22px;border:none;cursor:pointer;margin-left:8px"/>
+        <select id="bskin-mode" style="font-size:10px;padding:1px 4px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px">
+          <option value="paint">Paint</option>
+          <option value="erase">Erase</option>
+        </select>
+        <span style="font-size:9px;color:#667;margin-left:4px">Layer Y:</span>
+        <input id="bskin-layer" type="range" min="0" max="${skinDef.gridSize.y - 1}" value="0" style="width:60px"/>
+        <span id="bskin-layer-val" style="font-size:10px;color:#aaa">0</span>
+        <button id="bskin-save" style="font-size:10px;padding:2px 10px;background:#1a2a1a;border:1px solid #2a4a2a;color:#8f8;border-radius:3px;cursor:pointer;margin-left:auto">Save</button>
+        <button id="bskin-cancel" style="font-size:10px;padding:2px 10px;background:#2a1a1a;border:1px solid #4a2a2a;color:#f88;border-radius:3px;cursor:pointer">Cancel</button>
+      </div>
+      <canvas id="bskin-canvas" style="flex:1;display:block"></canvas>
+    `;
+    document.body.appendChild(subOverlay);
+
+    // Mini 3D voxel editor
+    const bCanvas = document.getElementById('bskin-canvas');
+    const bRenderer = new THREE.WebGLRenderer({ canvas: bCanvas, antialias: true });
+    bRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    bRenderer.setClearColor(0x141820);
+    const bScene = new THREE.Scene();
+    const bCamera = new THREE.PerspectiveCamera(45, 1, 0.01, 50);
+    bCamera.position.set(1, 1, 2);
+    const bControls = new OrbitControls(bCamera, bCanvas);
+    bControls.enableDamping = true;
+    bScene.add(new THREE.AmbientLight(0x445566, 0.6));
+    const bDirLight = new THREE.DirectionalLight(0xffeedd, 1.0);
+    bDirLight.position.set(2, 4, 3);
+    bScene.add(bDirLight);
+
+    const bVoxelMap = new Map();
+    // Load existing voxels
+    for (const v of skinDef.voxels) bVoxelMap.set(`${v.x}|${v.y}|${v.z}`, v.color);
+
+    const bVoxelGroup = new THREE.Group();
+    bScene.add(bVoxelGroup);
+    const bGridGroup = new THREE.Group();
+    bScene.add(bGridGroup);
+
+    let bGridSize = { ...skinDef.gridSize };
+    let bLayer = 0;
+    let bBrushColor = 0x7f8ea0;
+    let bEraseMode = false;
+
+    function bRebuildGrid() {
+      while (bGridGroup.children.length) bGridGroup.remove(bGridGroup.children[0]);
+      const g = bGridSize;
+      const cellSize = boneDef.length / Math.max(g.x, g.y, g.z);
+      // Draw layer grid
+      for (let x = 0; x <= g.x; x++) {
+        const geo = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3((x - g.x / 2) * cellSize, (bLayer - g.y / 2 + 0.5) * cellSize, (-g.z / 2) * cellSize),
+          new THREE.Vector3((x - g.x / 2) * cellSize, (bLayer - g.y / 2 + 0.5) * cellSize, (g.z / 2) * cellSize),
+        ]);
+        bGridGroup.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x335, transparent: true, opacity: 0.5 })));
+      }
+      for (let z = 0; z <= g.z; z++) {
+        const geo = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3((-g.x / 2) * cellSize, (bLayer - g.y / 2 + 0.5) * cellSize, (z - g.z / 2) * cellSize),
+          new THREE.Vector3((g.x / 2) * cellSize, (bLayer - g.y / 2 + 0.5) * cellSize, (z - g.z / 2) * cellSize),
+        ]);
+        bGridGroup.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x335, transparent: true, opacity: 0.5 })));
+      }
+    }
+
+    function bRebuildVoxels() {
+      while (bVoxelGroup.children.length) {
+        const c = bVoxelGroup.children[0];
+        bVoxelGroup.remove(c);
+        if (c.geometry) c.geometry.dispose();
+        if (c.material) c.material.dispose();
+      }
+      const g = bGridSize;
+      const cellSize = boneDef.length / Math.max(g.x, g.y, g.z);
+      const sharedGeo = new THREE.BoxGeometry(cellSize * 0.92, cellSize * 0.92, cellSize * 0.92);
+      for (const [key, color] of bVoxelMap) {
+        const [x, y, z] = key.split('|').map(Number);
+        const mat = new THREE.MeshStandardMaterial({ color });
+        const mesh = new THREE.Mesh(sharedGeo, mat);
+        mesh.position.set(
+          (x - g.x / 2 + 0.5) * cellSize,
+          (y - g.y / 2 + 0.5) * cellSize,
+          (z - g.z / 2 + 0.5) * cellSize
+        );
+        mesh.userData._vkey = key;
+        bVoxelGroup.add(mesh);
+      }
+    }
+
+    // Click to paint/erase
+    const bRay = new THREE.Raycaster();
+    const bMouse = new THREE.Vector2();
+    bCanvas.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      const rect = bCanvas.getBoundingClientRect();
+      bMouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      bMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+      bRay.setFromCamera(bMouse, bCamera);
+
+      if (bEraseMode) {
+        // Erase: hit existing voxel
+        const hits = bRay.intersectObjects(bVoxelGroup.children, false);
+        if (hits.length) {
+          const key = hits[0].object.userData._vkey;
+          if (key) { bVoxelMap.delete(key); bRebuildVoxels(); }
+        }
+      } else {
+        // Paint on grid plane (Y = layer)
+        const g = bGridSize;
+        const cellSize = boneDef.length / Math.max(g.x, g.y, g.z);
+        const planeY = (bLayer - g.y / 2 + 0.5) * cellSize;
+        const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -planeY);
+        const pt = new THREE.Vector3();
+        bRay.ray.intersectPlane(plane, pt);
+        if (pt) {
+          const gx = Math.floor(pt.x / cellSize + g.x / 2);
+          const gz = Math.floor(pt.z / cellSize + g.z / 2);
+          if (gx >= 0 && gx < g.x && gz >= 0 && gz < g.z) {
+            bVoxelMap.set(`${gx}|${bLayer}|${gz}`, bBrushColor);
+            bRebuildVoxels();
+          }
+        }
+      }
+    });
+
+    // Wire controls
+    const bLayerInput = document.getElementById('bskin-layer');
+    const bLayerVal = document.getElementById('bskin-layer-val');
+    bLayerInput.addEventListener('input', () => {
+      bLayer = parseInt(bLayerInput.value) || 0;
+      bLayerVal.textContent = bLayer;
+      bRebuildGrid();
+    });
+    document.getElementById('bskin-color').addEventListener('input', (e) => {
+      bBrushColor = parseInt(e.target.value.replace('#', ''), 16) || 0x7f8ea0;
+    });
+    document.getElementById('bskin-mode').addEventListener('change', (e) => {
+      bEraseMode = e.target.value === 'erase';
+    });
+    ['bskin-gx', 'bskin-gy', 'bskin-gz'].forEach(id => {
+      document.getElementById(id).addEventListener('change', () => {
+        bGridSize.x = Math.max(1, Math.min(16, parseInt(document.getElementById('bskin-gx').value) || 4));
+        bGridSize.y = Math.max(1, Math.min(16, parseInt(document.getElementById('bskin-gy').value) || 4));
+        bGridSize.z = Math.max(1, Math.min(16, parseInt(document.getElementById('bskin-gz').value) || 4));
+        const maxLayer = Math.max(0, bGridSize.y - 1);
+        bLayerInput.max = maxLayer;
+        if (bLayer > maxLayer) { bLayer = maxLayer; bLayerInput.value = bLayer; bLayerVal.textContent = bLayer; }
+        bRebuildGrid();
+        bRebuildVoxels();
+      });
+    });
+
+    // Save / Cancel
+    document.getElementById('bskin-save').addEventListener('click', () => {
+      def.boneSkins[bid] = {
+        gridSize: { ...bGridSize },
+        voxels: Array.from(bVoxelMap.entries()).map(([key, color]) => {
+          const [x, y, z] = key.split('|').map(Number);
+          return { x, y, z, color };
+        }),
+      };
+      bAnimId = null;
+      bRenderer.dispose();
+      subOverlay.remove();
+      rebuildBoneVisuals();
+      refreshBoneTree();
+    });
+    document.getElementById('bskin-cancel').addEventListener('click', () => {
+      bAnimId = null;
+      bRenderer.dispose();
+      subOverlay.remove();
+    });
+
+    // Resize + render loop
+    let bAnimId = true;
+    function bResize() {
+      const rect = bCanvas.parentElement.getBoundingClientRect();
+      const w = rect.width;
+      const h = rect.height - 40;
+      if (w < 1 || h < 1) return;
+      bRenderer.setSize(w, h, false);
+      bCamera.aspect = w / h;
+      bCamera.updateProjectionMatrix();
+    }
+    function bAnimate() {
+      if (!bAnimId) return;
+      bAnimId = requestAnimationFrame(bAnimate);
+      bControls.update();
+      bResize();
+      bRenderer.render(bScene, bCamera);
+    }
+    bRebuildGrid();
+    bRebuildVoxels();
+    bResize();
+    bAnimId = requestAnimationFrame(bAnimate);
+  });
+
+  // ─── Animation timeline system ────────────────────────────────────────────
+  const tlClipSelect = document.getElementById('skel-tl-clip');
+  const tlTimeInput = document.getElementById('skel-tl-time');
+  const tlDurInput = document.getElementById('skel-tl-duration');
+  const tlLoopInput = document.getElementById('skel-tl-loop');
+  const tlCanvas = document.getElementById('skel-tl-canvas');
+  const tlCtx = tlCanvas.getContext('2d');
+
+  function refreshClipSelect() {
+    const names = Object.keys(def.animations);
+    tlClipSelect.innerHTML = names.length
+      ? names.map(n => `<option value="${n}" ${n === skeletonEditorState.currentClipName ? 'selected' : ''}>${n}</option>`).join('')
+      : '<option value="">No clips</option>';
+    if (names.length && !skeletonEditorState.currentClipName) {
+      skeletonEditorState.currentClipName = names[0];
+    }
+    syncClipToUI();
+  }
+
+  function getCurrentClip() {
+    return def.animations[skeletonEditorState.currentClipName] || null;
+  }
+
+  function syncClipToUI() {
+    const clip = getCurrentClip();
+    if (clip) {
+      tlDurInput.value = clip.duration;
+      tlLoopInput.checked = clip.loop;
+    }
+  }
+
+  // New clip
+  document.getElementById('skel-tl-new-clip').addEventListener('click', () => {
+    const name = prompt('New animation clip name:', 'Anim_' + (Object.keys(def.animations).length + 1));
+    if (!name?.trim()) return;
+    def.animations[name.trim()] = { duration: 1, loop: true, keyframes: [] };
+    skeletonEditorState.currentClipName = name.trim();
+    refreshClipSelect();
+    drawTimeline();
+  });
+
+  // Delete clip
+  document.getElementById('skel-tl-del-clip').addEventListener('click', () => {
+    const clip = skeletonEditorState.currentClipName;
+    if (!clip) return;
+    delete def.animations[clip];
+    skeletonEditorState.currentClipName = Object.keys(def.animations)[0] || '';
+    refreshClipSelect();
+    drawTimeline();
+  });
+
+  // Switch clip
+  tlClipSelect.addEventListener('change', () => {
+    skeletonEditorState.currentClipName = tlClipSelect.value;
+    syncClipToUI();
+    drawTimeline();
+  });
+
+  // Duration / loop change
+  tlDurInput.addEventListener('change', () => {
+    const clip = getCurrentClip();
+    if (clip) clip.duration = Math.max(0.1, parseFloat(tlDurInput.value) || 1);
+    drawTimeline();
+  });
+  tlLoopInput.addEventListener('change', () => {
+    const clip = getCurrentClip();
+    if (clip) clip.loop = tlLoopInput.checked;
+  });
+
+  // Time input
+  tlTimeInput.addEventListener('change', () => {
+    skeletonEditorState.playheadTime = Math.max(0, parseFloat(tlTimeInput.value) || 0);
+    previewAtPlayhead();
+    drawTimeline();
+  });
+
+  // Add keyframe at playhead
+  document.getElementById('skel-tl-add-kf').addEventListener('click', () => {
+    const clip = getCurrentClip();
+    if (!clip || !skeletonResult?.boneMap) return;
+    const time = skeletonEditorState.playheadTime;
+    // Remove existing keyframe at same time (within tolerance)
+    clip.keyframes = clip.keyframes.filter(kf => Math.abs(kf.time - time) > 0.001);
+    clip.keyframes.push({ time, bones: capturePoseFromSkeleton(skeletonResult.boneMap) });
+    clip.keyframes.sort((a, b) => a.time - b.time);
+    drawTimeline();
+  });
+
+  // Delete keyframe nearest to playhead
+  document.getElementById('skel-tl-del-kf').addEventListener('click', () => {
+    const clip = getCurrentClip();
+    if (!clip || !clip.keyframes.length) return;
+    const time = skeletonEditorState.playheadTime;
+    let nearest = 0;
+    let nearestDist = Infinity;
+    for (let i = 0; i < clip.keyframes.length; i++) {
+      const dist = Math.abs(clip.keyframes[i].time - time);
+      if (dist < nearestDist) { nearest = i; nearestDist = dist; }
+    }
+    clip.keyframes.splice(nearest, 1);
+    drawTimeline();
+  });
+
+  // Click on timeline track to set playhead
+  const tlTrack = document.getElementById('skel-tl-track');
+  tlTrack.addEventListener('pointerdown', (e) => {
+    const rect = tlTrack.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const clip = getCurrentClip();
+    const dur = clip?.duration || 1;
+    const time = Math.max(0, Math.min(dur, (x / rect.width) * dur));
+    skeletonEditorState.playheadTime = Math.round(time * 100) / 100;
+    tlTimeInput.value = skeletonEditorState.playheadTime;
+    previewAtPlayhead();
+    drawTimeline();
+  });
+
+  // Draw timeline
+  function drawTimeline() {
+    const rect = tlCanvas.parentElement.getBoundingClientRect();
+    const w = rect.width;
+    const h = rect.height;
+    if (w < 1 || h < 1) return;
+    tlCanvas.width = w * Math.min(window.devicePixelRatio, 2);
+    tlCanvas.height = h * Math.min(window.devicePixelRatio, 2);
+    tlCanvas.style.width = w + 'px';
+    tlCanvas.style.height = h + 'px';
+    const ctx = tlCtx;
+    const dpr = tlCanvas.width / w;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const clip = getCurrentClip();
+    const dur = clip?.duration || 1;
+    const kfs = clip?.keyframes || [];
+
+    // Background
+    ctx.fillStyle = '#0c0e12';
+    ctx.fillRect(0, 0, w, h);
+
+    // Time ruler ticks
+    ctx.fillStyle = '#334';
+    ctx.font = '9px sans-serif';
+    const step = dur <= 2 ? 0.1 : dur <= 5 ? 0.25 : dur <= 10 ? 0.5 : 1;
+    for (let t = 0; t <= dur + 0.001; t += step) {
+      const x = (t / dur) * w;
+      ctx.fillStyle = '#334';
+      ctx.fillRect(x, 0, 1, h);
+      if (t % (step * 2) < 0.001 || step >= 0.25) {
+        ctx.fillStyle = '#667';
+        ctx.fillText(t.toFixed(step < 0.25 ? 2 : 1) + 's', x + 2, 10);
+      }
+    }
+
+    // Keyframe diamonds
+    for (const kf of kfs) {
+      const x = (kf.time / dur) * w;
+      ctx.save();
+      ctx.translate(x, h / 2);
+      ctx.rotate(Math.PI / 4);
+      ctx.fillStyle = '#ffaa22';
+      ctx.fillRect(-5, -5, 10, 10);
+      ctx.restore();
+    }
+
+    // Playhead
+    const px = (skeletonEditorState.playheadTime / dur) * w;
+    ctx.fillStyle = '#ff4444';
+    ctx.fillRect(px - 1, 0, 2, h);
+    ctx.beginPath();
+    ctx.moveTo(px - 5, 0);
+    ctx.lineTo(px + 5, 0);
+    ctx.lineTo(px, 6);
+    ctx.closePath();
+    ctx.fillStyle = '#ff4444';
+    ctx.fill();
+  }
+
+  // Preview animation at current playhead time
+  function previewAtPlayhead() {
+    if (!skeletonResult?.boneMap) return;
+    const clip = getCurrentClip();
+    if (!clip) return;
+    const boneIds = def.bones.map(b => b.id);
+    const pose = evaluateAnimationAtTime(clip, skeletonEditorState.playheadTime, boneIds);
+    if (pose) {
+      applyPoseToSkeleton(skeletonResult.boneMap, pose);
+      skeletonResult.rootGroup.updateMatrixWorld(true);
+      rebuildBoneVisuals();
+    }
+  }
+
+  // Play / Stop animation preview
+  document.getElementById('skel-tl-play').addEventListener('click', () => {
+    if (skeletonEditorState.isPlaying) return;
+    skeletonEditorState.isPlaying = true;
+    skeletonEditorState.playStartWall = performance.now() / 1000;
+    skeletonEditorState.playStartTime = skeletonEditorState.playheadTime;
+  });
+
+  document.getElementById('skel-tl-stop').addEventListener('click', () => {
+    skeletonEditorState.isPlaying = false;
+  });
+
+  // ─── Close button ──────────────────────────────────────────────────────────
+  document.getElementById('skel-btn-close').addEventListener('click', () => {
+    closeSkeletonEditor();
+  });
+
+  // ─── Main render loop ─────────────────────────────────────────────────────
+  function skelAnimate() {
+    if (!skeletonEditorOverlayEl) return;
+    skeletonEditorState._animFrameId = requestAnimationFrame(skelAnimate);
+
+    skelControls.update();
+
+    // Animation playback
+    if (skeletonEditorState.isPlaying) {
+      const clip = getCurrentClip();
+      if (clip && skeletonResult?.boneMap) {
+        const now = performance.now() / 1000;
+        const elapsed = now - skeletonEditorState.playStartWall;
+        let t = skeletonEditorState.playStartTime + elapsed;
+        if (clip.loop) {
+          t = ((t % clip.duration) + clip.duration) % clip.duration;
+        } else {
+          t = Math.min(t, clip.duration);
+          if (t >= clip.duration) skeletonEditorState.isPlaying = false;
+        }
+        skeletonEditorState.playheadTime = Math.round(t * 100) / 100;
+        tlTimeInput.value = skeletonEditorState.playheadTime;
+
+        const boneIds = def.bones.map(b => b.id);
+        const pose = evaluateAnimationAtTime(clip, t, boneIds);
+        if (pose) {
+          applyPoseToSkeleton(skeletonResult.boneMap, pose);
+          skeletonResult.rootGroup.updateMatrixWorld(true);
+          rebuildBoneVisuals();
+        }
+        drawTimeline();
+      } else {
+        skeletonEditorState.isPlaying = false;
+      }
+    }
+
+    skelRenderer.render(skelScene, skelCamera);
+  }
+
+  // ─── Initialize ────────────────────────────────────────────────────────────
+  skel3DResize();
+  rebuildBoneVisuals();
+  refreshBoneTree();
+  refreshBoneProps();
+  refreshPoseList();
+  refreshClipSelect();
+  drawTimeline();
+  skeletonEditorState._animFrameId = requestAnimationFrame(skelAnimate);
+}
+
+function closeSkeletonEditor() {
+  if (!skeletonEditorOverlayEl) return;
+  if (skeletonEditorState?._animFrameId) cancelAnimationFrame(skeletonEditorState._animFrameId);
+  if (skeleton3DState?.renderer) skeleton3DState.renderer.dispose();
+  if (skeletonEditorOverlayEl._skelResizeObserver) skeletonEditorOverlayEl._skelResizeObserver.disconnect();
+  skeletonEditorOverlayEl.remove();
+  skeletonEditorOverlayEl = null;
+  skeletonEditorState = null;
+  skeleton3DState = null;
+  // Refresh scene visuals for any skeleton meshes
+  refreshAllSkeletonVisuals();
+}
+
+function refreshAllSkeletonVisuals() {
+  for (const m of sceneObjects) {
+    if (m.userData.type === 'skeleton') refreshSkeletonMeshVisual(m);
+  }
+}
+
+function refreshSkeletonMeshVisual(mesh) {
+  // Remove old skeleton visual
+  if (mesh.userData._skelVisualGroup) {
+    mesh.remove(mesh.userData._skelVisualGroup);
+    mesh.userData._skelVisualGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+    mesh.userData._skelVisualGroup = null;
+  }
+
+  const cfg = getMeshSkeletonConfig(mesh);
+  if (!cfg?.definitionName) return;
+  const def = skeletonDefinitions[cfg.definitionName];
+  if (!def?.bones?.length) return;
+
+  const result = buildThreeBonesFromDef(def);
+  if (!result) return;
+
+  const group = new THREE.Group();
+  result.rootGroup.updateMatrixWorld(true);
+
+  // Draw bones as lines + spheres
+  const sphereGeo = new THREE.SphereGeometry(0.03, 6, 4);
+  for (const bd of def.bones) {
+    const threeBone = result.boneMap.get(bd.id);
+    if (!threeBone) continue;
+    const worldPos = new THREE.Vector3();
+    threeBone.getWorldPosition(worldPos);
+
+    const hasSkin = !!def.boneSkins[bd.id]?.voxels?.length;
+    const color = hasSkin ? 0x6688ff : (bd.parent ? 0xcccccc : 0x44ff88);
+    const marker = new THREE.Mesh(sphereGeo, new THREE.MeshBasicMaterial({ color }));
+    marker.position.copy(worldPos);
+    group.add(marker);
+
+    if (bd.parent) {
+      const parentBone = result.boneMap.get(bd.parent);
+      if (parentBone) {
+        const pPos = new THREE.Vector3();
+        parentBone.getWorldPosition(pPos);
+        const lineGeo = new THREE.BufferGeometry().setFromPoints([pPos, worldPos]);
+        group.add(new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0x667788 })));
+      }
+    }
+
+    // Bone skins
+    if (hasSkin) {
+      const skinDef = def.boneSkins[bd.id];
+      const gridSize = normalizeSkinGridSize(skinDef.gridSize || { x: 4, y: 4, z: 4 });
+      const cellSize = bd.length / Math.max(gridSize.x, gridSize.y, gridSize.z);
+      const voxels = skinDef.voxels;
+      const byColor = new Map();
+      for (const v of voxels) {
+        const col = v.color ?? 0x7f8ea0;
+        if (!byColor.has(col)) byColor.set(col, []);
+        byColor.get(col).push(v);
+      }
+      const boneQuat = new THREE.Quaternion();
+      threeBone.getWorldQuaternion(boneQuat);
+      const skinG = new THREE.Group();
+      const sharedGeo = new THREE.BoxGeometry(cellSize * 0.95, cellSize * 0.95, cellSize * 0.95);
+      for (const [col, cvoxels] of byColor) {
+        const mat = new THREE.MeshStandardMaterial({ color: col });
+        const inst = new THREE.InstancedMesh(sharedGeo, mat, cvoxels.length);
+        const mtx = new THREE.Matrix4();
+        for (let i = 0; i < cvoxels.length; i++) {
+          const v = cvoxels[i];
+          mtx.makeTranslation(
+            (v.x - gridSize.x / 2 + 0.5) * cellSize,
+            (v.y - gridSize.y / 2 + 0.5) * cellSize + bd.length / 2,
+            (v.z - gridSize.z / 2 + 0.5) * cellSize
+          );
+          inst.setMatrixAt(i, mtx);
+        }
+        inst.instanceMatrix.needsUpdate = true;
+        skinG.add(inst);
+      }
+      skinG.position.copy(worldPos);
+      skinG.quaternion.copy(boneQuat);
+      group.add(skinG);
+    }
+  }
+
+  mesh.userData._skelVisualGroup = group;
+  mesh.userData._skelBoneMap = result.boneMap;
+  mesh.userData._skelRootGroup = result.rootGroup;
+  mesh.userData._skelDef = def;
+  mesh.add(group);
+}
+
 function closeWorldContextMenu() {
   if (!worldContextMenuEl) return;
   worldContextMenuEl.remove();
@@ -1786,7 +3223,6 @@ function closeTransientMenus() {
   closeWorldContextMenu();
   closeRuntimeKeypadOverlay();
 }
-
 function skinEditorCellKey(x, y, z) {
   return `${x}|${y}|${z}`;
 }
@@ -1992,6 +3428,7 @@ function openSkinEditorForType(type) {
   if (!DEFS[type]) return;
   closeTransientMenus();
   closeSkinEditorOverlay();
+  closeSculptEditorOverlay();
 
   skinEditorState.type = type;
   skinEditorState.layer = 0;
@@ -2507,7 +3944,7 @@ function showLibraryContextMenu(type, x, y) {
   const menu = document.createElement('div');
   menu.style.position = 'fixed';
   menu.style.zIndex = '20020';
-  menu.style.minWidth = '190px';
+  menu.style.minWidth = '220px';
   menu.style.padding = '8px';
   menu.style.borderRadius = '8px';
   menu.style.border = '1px solid var(--border)';
@@ -2515,20 +3952,29 @@ function showLibraryContextMenu(type, x, y) {
   menu.style.boxShadow = '0 10px 28px rgba(0,0,0,0.4)';
   menu.innerHTML = `
     <div style="font-size:10px;color:var(--muted);padding:2px 4px 8px 4px;letter-spacing:.06em;text-transform:uppercase">${escapeHtml(typeLabel(type))}</div>
-    <button type="button" data-skin-edit="1" style="width:100%;justify-content:flex-start;font-size:11px;padding:5px 8px">Edit Block Skin</button>
-    <button type="button" data-skin-reset="1" style="width:100%;justify-content:flex-start;font-size:11px;padding:5px 8px;margin-top:4px" ${hasCustomSkinForType(type) ? '' : 'disabled'}>Reset To Default</button>
+    <div style="font-size:9px;color:var(--muted);padding:0 4px 6px 4px;letter-spacing:.04em">MODELER</div>
+    <button type="button" data-skin-voxel="1" style="width:100%;justify-content:flex-start;font-size:11px;padding:5px 8px">🧊 Voxel Painter</button>
+    <button type="button" data-skin-sculpt="1" style="width:100%;justify-content:flex-start;font-size:11px;padding:5px 8px;margin-top:3px">🔵 Sculpt Modeler</button>
+    <div style="height:1px;background:var(--border);margin:8px 0"></div>
+    <button type="button" data-skin-reset="1" style="width:100%;justify-content:flex-start;font-size:11px;padding:5px 8px" ${hasCustomSkinForType(type) || hasCustomSculptForType(type) ? '' : 'disabled'}>Reset To Default</button>
   `;
 
   document.body.appendChild(menu);
   clampFloatingPanelPosition(menu, x + 4, y + 4);
 
-  menu.querySelector('[data-skin-edit]')?.addEventListener('click', () => {
+  menu.querySelector('[data-skin-voxel]')?.addEventListener('click', () => {
     closeLibraryContextMenu();
     openSkinEditorForType(type);
   });
 
+  menu.querySelector('[data-skin-sculpt]')?.addEventListener('click', () => {
+    closeLibraryContextMenu();
+    openSculptEditorForType(type);
+  });
+
   menu.querySelector('[data-skin-reset]')?.addEventListener('click', () => {
     delete customBlockSkins[type];
+    delete customSculptSkins[type];
     refreshCustomSkinsOnScene();
     removeGhost();
     closeLibraryContextMenu();
@@ -2537,6 +3983,685 @@ function showLibraryContextMenu(type, x, y) {
 
   menu.addEventListener('pointerdown', e => e.stopPropagation());
   libraryContextMenuEl = menu;
+}
+
+// ─── Sculpt Modeler ──────────────────────────────────────────────────────────
+// Sculpt skins store a list of primitive operations (add/subtract) that compose
+// into a smooth 3D model using merged geometry.
+
+const SCULPT_PRIMITIVES = ['sphere', 'box', 'cylinder'];
+const SCULPT_OPS = ['add', 'subtract'];
+
+function createDefaultSculptPrimitive() {
+  return {
+    shape: 'sphere',
+    op: 'add',
+    position: [0, 0, 0],
+    scale: [1, 1, 1],
+    rotation: [0, 0, 0],
+    color: 0x7f8ea0,
+  };
+}
+
+function normalizeSculptPrimitive(prim = {}) {
+  const pos = Array.isArray(prim.position) ? prim.position.map(v => Number.isFinite(v) ? v : 0) : [0, 0, 0];
+  const scl = Array.isArray(prim.scale) ? prim.scale.map(v => Number.isFinite(v) && v > 0 ? v : 1) : [1, 1, 1];
+  const rot = Array.isArray(prim.rotation) ? prim.rotation.map(v => Number.isFinite(v) ? v : 0) : [0, 0, 0];
+  return {
+    shape: SCULPT_PRIMITIVES.includes(prim.shape) ? prim.shape : 'sphere',
+    op: SCULPT_OPS.includes(prim.op) ? prim.op : 'add',
+    position: pos.slice(0, 3),
+    scale: scl.slice(0, 3),
+    rotation: rot.slice(0, 3),
+    color: Number.isFinite(prim.color) ? Math.round(THREE.MathUtils.clamp(prim.color, 0, 0xffffff)) : 0x7f8ea0,
+  };
+}
+
+function normalizeSculptSkin(def = {}) {
+  const prims = Array.isArray(def.primitives) ? def.primitives.map(normalizeSculptPrimitive) : [];
+  return { version: 1, primitives: prims };
+}
+
+function hasCustomSculptForType(type) {
+  const skin = customSculptSkins[type];
+  return !!(skin && skin.primitives && skin.primitives.length);
+}
+
+function serializeCustomSculptSkins() {
+  const out = {};
+  for (const [type, skinRaw] of Object.entries(customSculptSkins)) {
+    if (!DEFS[type]) continue;
+    const skin = normalizeSculptSkin(skinRaw);
+    if (skin.primitives.length) out[type] = skin;
+  }
+  return out;
+}
+
+function setCustomSculptSkinsMap(map = {}) {
+  for (const key of Object.keys(customSculptSkins)) delete customSculptSkins[key];
+  for (const [type, raw] of Object.entries(map || {})) {
+    if (!DEFS[type]) continue;
+    const skin = normalizeSculptSkin(raw);
+    if (skin.primitives.length) customSculptSkins[type] = skin;
+  }
+}
+
+function buildSculptPrimitiveGeometry(prim) {
+  const p = normalizeSculptPrimitive(prim);
+  let geo;
+  switch (p.shape) {
+    case 'box':
+      geo = new THREE.BoxGeometry(1, 1, 1);
+      break;
+    case 'cylinder':
+      geo = new THREE.CylinderGeometry(0.5, 0.5, 1, 16);
+      break;
+    case 'sphere':
+    default:
+      geo = new THREE.SphereGeometry(0.5, 16, 12);
+      break;
+  }
+  return geo;
+}
+
+function buildSculptSkinVisual(mesh, skin) {
+  if (!mesh?.geometry || !skin?.primitives?.length) return null;
+
+  const group = new THREE.Group();
+  group.name = 'customSkinVisual';
+  group.userData.customSkinVisual = true;
+
+  // Get mesh bounding box to scale primitives proportionally
+  mesh.geometry.computeBoundingBox();
+  const bb = mesh.geometry.boundingBox;
+  const meshSize = new THREE.Vector3();
+  bb.getSize(meshSize);
+  const meshCenter = new THREE.Vector3();
+  bb.getCenter(meshCenter);
+
+  for (const prim of skin.primitives) {
+    if (prim.op === 'subtract') continue; // skip subtractive for basic visual
+
+    const geo = buildSculptPrimitiveGeometry(prim);
+    const mat = new THREE.MeshStandardMaterial({
+      color: prim.color,
+      roughness: 0.6,
+      metalness: 0.1,
+    });
+    const primMesh = new THREE.Mesh(geo, mat);
+    primMesh.castShadow = true;
+    primMesh.receiveShadow = true;
+    primMesh.position.set(
+      prim.position[0] * meshSize.x * 0.5,
+      prim.position[1] * meshSize.y * 0.5,
+      prim.position[2] * meshSize.z * 0.5
+    );
+    primMesh.scale.set(
+      prim.scale[0] * meshSize.x * 0.5,
+      prim.scale[1] * meshSize.y * 0.5,
+      prim.scale[2] * meshSize.z * 0.5
+    );
+    primMesh.rotation.set(
+      prim.rotation[0] * Math.PI / 180,
+      prim.rotation[1] * Math.PI / 180,
+      prim.rotation[2] * Math.PI / 180
+    );
+    group.add(primMesh);
+  }
+
+  return group;
+}
+
+function applySculptSkinToMesh(mesh) {
+  if (!mesh?.userData) return;
+  // Remove previous sculpt skin
+  const prev = mesh.userData.customSkinGroup;
+  if (prev && prev.userData?.isSculptSkin) {
+    mesh.remove(prev);
+    disposeObjectTree(prev);
+    delete mesh.userData.customSkinGroup;
+    mesh.userData._customSkinActive = false;
+  }
+
+  const skinRaw = customSculptSkins[mesh.userData.type];
+  if (!skinRaw?.primitives?.length) return;
+
+  const skin = normalizeSculptSkin(skinRaw);
+  if (!skin.primitives.length) return;
+
+  const visual = buildSculptSkinVisual(mesh, skin);
+  if (!visual) return;
+
+  visual.userData.isSculptSkin = true;
+  mesh.add(visual);
+  mesh.userData.customSkinGroup = visual;
+  mesh.userData._customSkinActive = true;
+
+  // Hide original material
+  if (mesh.material) {
+    mesh.material.visible = false;
+    mesh.material.transparent = true;
+    mesh.material.opacity = 0;
+  }
+}
+
+function refreshSculptSkinsOnScene() {
+  for (const mesh of sceneObjects) {
+    if (hasCustomSculptForType(mesh.userData.type)) {
+      applySculptSkinToMesh(mesh);
+    }
+  }
+}
+
+// Sculpt editor state
+const sculptEditorState = {
+  type: 'wall',
+  primitives: [],
+  selectedIndex: -1,
+  brushColor: 0x7f8ea0,
+  brushShape: 'sphere',
+  undoStack: [],
+  redoStack: [],
+};
+
+function captureSculptSnapshot() {
+  return {
+    primitives: sculptEditorState.primitives.map(p => ({ ...p, position: [...p.position], scale: [...p.scale], rotation: [...p.rotation] })),
+    selectedIndex: sculptEditorState.selectedIndex,
+  };
+}
+
+function applySculptSnapshot(snap) {
+  sculptEditorState.primitives = (snap.primitives || []).map(normalizeSculptPrimitive);
+  sculptEditorState.selectedIndex = snap.selectedIndex ?? -1;
+}
+
+function commitSculptChange(before) {
+  const after = captureSculptSnapshot();
+  if (JSON.stringify(before) === JSON.stringify(after)) return;
+  sculptEditorState.undoStack.push(before);
+  sculptEditorState.redoStack.length = 0;
+}
+
+function undoSculptChange() {
+  if (!sculptEditorState.undoStack.length) return;
+  const before = sculptEditorState.undoStack.pop();
+  sculptEditorState.redoStack.push(captureSculptSnapshot());
+  applySculptSnapshot(before);
+}
+
+function redoSculptChange() {
+  if (!sculptEditorState.redoStack.length) return;
+  const after = sculptEditorState.redoStack.pop();
+  sculptEditorState.undoStack.push(captureSculptSnapshot());
+  applySculptSnapshot(after);
+}
+
+function closeSculptEditorOverlay() {
+  if (!sculptEditorOverlayEl) return;
+  const st = sculptEditorOverlayEl._sculptState;
+  if (st?.animId) cancelAnimationFrame(st.animId);
+  if (st?.transformControls) { st.transformControls.detach(); st.transformControls.dispose(); }
+  if (st?.renderer) st.renderer.dispose();
+  if (st?.controls) st.controls.dispose();
+  sculptEditorOverlayEl.remove();
+  sculptEditorOverlayEl = null;
+}
+
+function openSculptEditorForType(type) {
+  if (!DEFS[type]) return;
+  closeTransientMenus();
+  closeSculptEditorOverlay();
+  closeSkinEditorOverlay();
+
+  sculptEditorState.type = type;
+  sculptEditorState.selectedIndex = -1;
+  sculptEditorState.undoStack = [];
+  sculptEditorState.redoStack = [];
+
+  const existing = normalizeSculptSkin(customSculptSkins[type] || {});
+  sculptEditorState.primitives = existing.primitives.map(normalizeSculptPrimitive);
+  if (existing.primitives.length) {
+    sculptEditorState.brushColor = existing.primitives[existing.primitives.length - 1].color;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.id = 'sculpt-editor-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:20010;display:flex;background:#080c10';
+  overlay.innerHTML = `
+    <div id="sculpt-sidebar" style="width:280px;min-width:240px;display:flex;flex-direction:column;gap:10px;padding:16px;background:#0b1118;border-right:1px solid #1d2430;overflow-y:auto;box-sizing:border-box">
+      <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#8b949e">Sculpt Modeler</div>
+      <div id="sculpt-title" style="font-size:20px;font-weight:700;color:#e6edf3">Sculpt ${escapeHtml(typeLabel(type))}</div>
+      <div style="display:flex;gap:6px">
+        <button id="sculpt-undo" type="button" style="flex:1;font-size:11px;padding:5px 8px" disabled>Undo</button>
+        <button id="sculpt-redo" type="button" style="flex:1;font-size:11px;padding:5px 8px" disabled>Redo</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;background:#111821;border:1px solid #1d2430;border-radius:8px;padding:10px">
+        <label style="font-size:10px;color:#8b949e;letter-spacing:.06em">ADD PRIMITIVE</label>
+        <div style="display:flex;gap:4px">
+          <select id="sculpt-shape" style="flex:1;font-size:11px;padding:4px 6px">
+            <option value="sphere">Sphere</option>
+            <option value="box">Box</option>
+            <option value="cylinder">Cylinder</option>
+          </select>
+          <button id="sculpt-add" type="button" style="font-size:11px;padding:5px 10px;background:#1e3a24;border-color:#2f7a3f;color:#8be9a8">+ Add</button>
+        </div>
+        <label style="font-size:10px;color:#8b949e;letter-spacing:.06em;margin-top:4px">COLOR</label>
+        <input id="sculpt-color" type="color" value="#7f8ea0" style="width:100%;height:28px;cursor:pointer"/>
+      </div>
+      <div id="sculpt-prim-list" style="display:flex;flex-direction:column;gap:4px;max-height:300px;overflow-y:auto"></div>
+      <div id="sculpt-selected-controls" style="display:none;flex-direction:column;gap:6px;background:#111821;border:1px solid #1d2430;border-radius:8px;padding:10px">
+        <label style="font-size:10px;color:#8b949e;letter-spacing:.06em">SELECTED PRIMITIVE</label>
+        <div style="display:flex;gap:4px;align-items:center">
+          <span style="font-size:9px;color:#8b949e;width:28px">Pos</span>
+          <input id="sculpt-pos-x" type="number" step="0.1" style="width:52px" placeholder="X"/>
+          <input id="sculpt-pos-y" type="number" step="0.1" style="width:52px" placeholder="Y"/>
+          <input id="sculpt-pos-z" type="number" step="0.1" style="width:52px" placeholder="Z"/>
+        </div>
+        <div style="display:flex;gap:4px;align-items:center">
+          <span style="font-size:9px;color:#8b949e;width:28px">Size</span>
+          <input id="sculpt-scl-x" type="number" step="0.1" min="0.1" style="width:52px" placeholder="X"/>
+          <input id="sculpt-scl-y" type="number" step="0.1" min="0.1" style="width:52px" placeholder="Y"/>
+          <input id="sculpt-scl-z" type="number" step="0.1" min="0.1" style="width:52px" placeholder="Z"/>
+        </div>
+        <div style="display:flex;gap:4px;align-items:center">
+          <span style="font-size:9px;color:#8b949e;width:28px">Rot°</span>
+          <input id="sculpt-rot-x" type="number" step="5" style="width:52px"/>
+          <input id="sculpt-rot-y" type="number" step="5" style="width:52px"/>
+          <input id="sculpt-rot-z" type="number" step="5" style="width:52px"/>
+        </div>
+        <div style="display:flex;gap:4px;align-items:center">
+          <span style="font-size:9px;color:#8b949e;width:28px">Color</span>
+          <input id="sculpt-prim-color" type="color" style="width:60px;height:24px;cursor:pointer"/>
+        </div>
+        <button id="sculpt-del-prim" type="button" style="font-size:11px;padding:4px 8px;color:#ff6b6b">Remove Primitive</button>
+      </div>
+      <div style="font-size:10px;color:#6a737d;line-height:1.6;background:#0d1117;border:1px solid #1d2430;border-radius:6px;padding:8px 10px;margin-top:4px">
+        <div style="font-weight:700;color:#8b949e;margin-bottom:4px">🎮 Controls</div>
+        <div>🖱 <b>Left-drag</b> on the 3D view to orbit the camera</div>
+        <div>🖱 <b>Scroll</b> to zoom in/out</div>
+        <div>🖱 <b>Click</b> a shape in the 3D view to select it</div>
+        <div>🔧 Drag the <b>gizmo arrows</b> on a selected shape to move/rotate/scale it</div>
+        <div>⌨ Press <b>1</b>=Move, <b>2</b>=Rotate, <b>3</b>=Scale</div>
+        <div>⌨ <b>Delete/Backspace</b> to remove selected</div>
+        <div>⌨ <b>Ctrl+Z</b> / <b>Ctrl+Y</b> to Undo/Redo</div>
+      </div>
+      <div style="display:flex;gap:4px;margin-top:4px">
+        <button id="sculpt-gizmo-translate" type="button" style="flex:1;font-size:10px;padding:4px 6px;background:#1a2740;border:1px solid #58a6ff;color:#58a6ff;border-radius:4px;cursor:pointer">Move</button>
+        <button id="sculpt-gizmo-rotate" type="button" style="flex:1;font-size:10px;padding:4px 6px;border-radius:4px;cursor:pointer">Rotate</button>
+        <button id="sculpt-gizmo-scale" type="button" style="flex:1;font-size:10px;padding:4px 6px;border-radius:4px;cursor:pointer">Scale</button>
+      </div>
+      <div style="margin-top:auto;display:flex;flex-direction:column;gap:8px">
+        <button id="sculpt-save" type="button" style="font-size:12px;padding:8px 12px;background:#1e3a24;border-color:#2f7a3f;color:#8be9a8">Save Sculpt</button>
+        <button id="sculpt-cancel" type="button" style="font-size:12px;padding:8px 12px">Close</button>
+      </div>
+    </div>
+    <canvas id="sculpt-3d-canvas" style="flex:1;display:block;outline:none"></canvas>
+  `;
+  document.body.appendChild(overlay);
+  sculptEditorOverlayEl = overlay;
+
+  // Set up 3D preview
+  const canvas3d = overlay.querySelector('#sculpt-3d-canvas');
+  const w0 = Math.max(canvas3d.clientWidth || 0, window.innerWidth - 280);
+  const h0 = Math.max(canvas3d.clientHeight || 0, window.innerHeight);
+
+  const r3d = new THREE.WebGLRenderer({ canvas: canvas3d, antialias: true });
+  r3d.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  r3d.setSize(w0, h0, false);
+  r3d.setClearColor(0x080c10);
+
+  const s3d = new THREE.Scene();
+  const cam3d = new THREE.PerspectiveCamera(55, w0 / h0, 0.1, 200);
+  cam3d.position.set(4, 3, 5);
+  cam3d.lookAt(0, 0, 0);
+
+  s3d.add(new THREE.AmbientLight(0xd0e8ff, 0.75));
+  const sun3d = new THREE.DirectionalLight(0xfff4e0, 1.2);
+  sun3d.position.set(8, 12, 6);
+  s3d.add(sun3d);
+  s3d.add(new THREE.DirectionalLight(0xc0d8ff, 0.4).translateX(-5).translateY(3));
+
+  const gridH = new THREE.GridHelper(12, 12, 0x1a2230, 0x1a2230);
+  s3d.add(gridH);
+
+  // Axis helpers
+  const axH = new THREE.AxesHelper(1.5);
+  axH.renderOrder = 31;
+  s3d.add(axH);
+
+  // TransformControls for dragging/rotating/scaling primitives
+  const sculptTc = new TransformControls(cam3d, canvas3d);
+  sculptTc.setSize(0.8);
+  sculptTc.addEventListener('dragging-changed', e => { oc3d.enabled = !e.value; });
+  s3d.add(sculptTc);
+  let sculptGizmoMode = 'translate';
+  let sculptDragBefore = null;
+  sculptTc.addEventListener('mouseDown', () => {
+    sculptDragBefore = captureSculptSnapshot();
+  });
+  sculptTc.addEventListener('objectChange', () => {
+    const idx = sculptEditorState.selectedIndex;
+    if (idx < 0 || idx >= sculptEditorState.primitives.length) return;
+    const obj = sculptTc.object;
+    if (!obj) return;
+    sculptEditorState.primitives[idx].position = [obj.position.x, obj.position.y, obj.position.z];
+    sculptEditorState.primitives[idx].scale = [obj.scale.x, obj.scale.y, obj.scale.z];
+    sculptEditorState.primitives[idx].rotation = [
+      obj.rotation.x * 180 / Math.PI,
+      obj.rotation.y * 180 / Math.PI,
+      obj.rotation.z * 180 / Math.PI
+    ];
+    refreshSelectedControls();
+  });
+  sculptTc.addEventListener('mouseUp', () => {
+    if (sculptDragBefore) {
+      commitSculptChange(sculptDragBefore);
+      sculptDragBefore = null;
+      syncUndoRedoButtons();
+    }
+  });
+
+  const oc3d = new OrbitControls(cam3d, canvas3d);
+  oc3d.enableDamping = true;
+  oc3d.dampingFactor = 0.1;
+  oc3d.update();
+
+  const sculptPreviewGroup = new THREE.Group();
+  s3d.add(sculptPreviewGroup);
+
+  // Outline material for selected primitive
+  const outlineMat = new THREE.MeshBasicMaterial({ color: 0x58a6ff, wireframe: true, transparent: true, opacity: 0.8 });
+
+  const sculptState = { renderer: r3d, scene: s3d, camera: cam3d, controls: oc3d, previewGroup: sculptPreviewGroup, animId: null, outlineMat, transformControls: sculptTc };
+  overlay._sculptState = sculptState;
+
+  function rebuildPreview() {
+    // Clear previous
+    while (sculptPreviewGroup.children.length) {
+      const c = sculptPreviewGroup.children[0];
+      sculptPreviewGroup.remove(c);
+      if (c.geometry) c.geometry.dispose();
+      if (c.material) {
+        if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+        else c.material.dispose();
+      }
+    }
+
+    sculptEditorState.primitives.forEach((prim, idx) => {
+      const geo = buildSculptPrimitiveGeometry(prim);
+      const color = prim.color;
+      const mat = prim.op === 'subtract'
+        ? new THREE.MeshStandardMaterial({ color: 0xff4444, transparent: true, opacity: 0.3, wireframe: true })
+        : new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.1 });
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(prim.position[0], prim.position[1], prim.position[2]);
+      m.scale.set(prim.scale[0], prim.scale[1], prim.scale[2]);
+      m.rotation.set(prim.rotation[0] * Math.PI / 180, prim.rotation[1] * Math.PI / 180, prim.rotation[2] * Math.PI / 180);
+      m.castShadow = true;
+      m.receiveShadow = true;
+      sculptPreviewGroup.add(m);
+
+      // Wireframe outline for selected
+      if (idx === sculptEditorState.selectedIndex) {
+        const outline = new THREE.Mesh(geo.clone(), outlineMat);
+        outline.position.copy(m.position);
+        outline.scale.copy(m.scale).multiplyScalar(1.02);
+        outline.rotation.copy(m.rotation);
+        sculptPreviewGroup.add(outline);
+      }
+    });
+
+    // Attach TransformControls to the selected primitive mesh
+    sculptTc.detach();
+    const selIdx = sculptEditorState.selectedIndex;
+    if (selIdx >= 0 && selIdx < sculptEditorState.primitives.length) {
+      let meshCount = -1;
+      for (const child of sculptPreviewGroup.children) {
+        if (child.material !== outlineMat) {
+          meshCount++;
+          if (meshCount === selIdx) {
+            sculptTc.attach(child);
+            sculptTc.setMode(sculptGizmoMode);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  function refreshPrimList() {
+    const listEl = overlay.querySelector('#sculpt-prim-list');
+    if (!listEl) return;
+    listEl.innerHTML = '';
+    sculptEditorState.primitives.forEach((prim, idx) => {
+      const div = document.createElement('div');
+      const sel = idx === sculptEditorState.selectedIndex;
+      div.style.cssText = `padding:5px 8px;border-radius:4px;cursor:pointer;font-size:11px;display:flex;align-items:center;gap:6px;${sel ? 'background:#1a2740;border:1px solid #58a6ff' : 'background:#111821;border:1px solid #1d2430'}`;
+      const colorSwatch = `<span style="display:inline-block;width:14px;height:14px;border-radius:3px;background:#${prim.color.toString(16).padStart(6, '0')}"></span>`;
+      div.innerHTML = `${colorSwatch}<span>${prim.op === 'subtract' ? '−' : '+'} ${prim.shape}</span><span style="margin-left:auto;font-size:9px;color:#8b949e">#${idx + 1}</span>`;
+      div.addEventListener('click', () => {
+        sculptEditorState.selectedIndex = idx;
+        refreshPrimList();
+        refreshSelectedControls();
+        rebuildPreview();
+      });
+      listEl.appendChild(div);
+    });
+  }
+
+  // Click-to-select in 3D viewport
+  const sculptRaycaster = new THREE.Raycaster();
+  const sculptPickNdc = new THREE.Vector2();
+  canvas3d.addEventListener('pointerdown', e => {
+    if (sculptTc.dragging) return;
+    const rect = canvas3d.getBoundingClientRect();
+    sculptPickNdc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+    sculptRaycaster.setFromCamera(sculptPickNdc, cam3d);
+    const meshes = [];
+    let meshIdx = 0;
+    for (const child of sculptPreviewGroup.children) {
+      if (child.material !== outlineMat) {
+        meshes.push({ mesh: child, idx: meshIdx++ });
+      }
+    }
+    const hits = sculptRaycaster.intersectObjects(meshes.map(m => m.mesh), false);
+    if (hits.length) {
+      const hitMesh = hits[0].object;
+      const found = meshes.find(m => m.mesh === hitMesh);
+      if (found && found.idx !== sculptEditorState.selectedIndex) {
+        sculptEditorState.selectedIndex = found.idx;
+        refreshPrimList();
+        refreshSelectedControls();
+        rebuildPreview();
+      }
+    }
+  });
+
+  // Gizmo mode buttons
+  function updateGizmoButtons() {
+    const btnT = overlay.querySelector('#sculpt-gizmo-translate');
+    const btnR = overlay.querySelector('#sculpt-gizmo-rotate');
+    const btnS = overlay.querySelector('#sculpt-gizmo-scale');
+    const activeStyle = 'background:#1a2740;border:1px solid #58a6ff;color:#58a6ff';
+    const normalStyle = 'background:transparent;border:1px solid var(--border,#30363d);color:var(--text,#d4d8dd)';
+    if (btnT) btnT.style.cssText = `flex:1;font-size:10px;padding:4px 6px;border-radius:4px;cursor:pointer;${sculptGizmoMode === 'translate' ? activeStyle : normalStyle}`;
+    if (btnR) btnR.style.cssText = `flex:1;font-size:10px;padding:4px 6px;border-radius:4px;cursor:pointer;${sculptGizmoMode === 'rotate' ? activeStyle : normalStyle}`;
+    if (btnS) btnS.style.cssText = `flex:1;font-size:10px;padding:4px 6px;border-radius:4px;cursor:pointer;${sculptGizmoMode === 'scale' ? activeStyle : normalStyle}`;
+  }
+  overlay.querySelector('#sculpt-gizmo-translate')?.addEventListener('click', () => { sculptGizmoMode = 'translate'; sculptTc.setMode('translate'); updateGizmoButtons(); });
+  overlay.querySelector('#sculpt-gizmo-rotate')?.addEventListener('click', () => { sculptGizmoMode = 'rotate'; sculptTc.setMode('rotate'); updateGizmoButtons(); });
+  overlay.querySelector('#sculpt-gizmo-scale')?.addEventListener('click', () => { sculptGizmoMode = 'scale'; sculptTc.setMode('scale'); updateGizmoButtons(); });
+  updateGizmoButtons();
+
+  function refreshSelectedControls() {
+    const panel = overlay.querySelector('#sculpt-selected-controls');
+    if (!panel) return;
+    const idx = sculptEditorState.selectedIndex;
+    if (idx < 0 || idx >= sculptEditorState.primitives.length) {
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = 'flex';
+    const prim = sculptEditorState.primitives[idx];
+    overlay.querySelector('#sculpt-pos-x').value = prim.position[0].toFixed(2);
+    overlay.querySelector('#sculpt-pos-y').value = prim.position[1].toFixed(2);
+    overlay.querySelector('#sculpt-pos-z').value = prim.position[2].toFixed(2);
+    overlay.querySelector('#sculpt-scl-x').value = prim.scale[0].toFixed(2);
+    overlay.querySelector('#sculpt-scl-y').value = prim.scale[1].toFixed(2);
+    overlay.querySelector('#sculpt-scl-z').value = prim.scale[2].toFixed(2);
+    overlay.querySelector('#sculpt-rot-x').value = prim.rotation[0].toFixed(1);
+    overlay.querySelector('#sculpt-rot-y').value = prim.rotation[1].toFixed(1);
+    overlay.querySelector('#sculpt-rot-z').value = prim.rotation[2].toFixed(1);
+    overlay.querySelector('#sculpt-prim-color').value = '#' + prim.color.toString(16).padStart(6, '0');
+  }
+
+  function syncUndoRedoButtons() {
+    const u = overlay.querySelector('#sculpt-undo');
+    const r = overlay.querySelector('#sculpt-redo');
+    if (u) u.disabled = !sculptEditorState.undoStack.length;
+    if (r) r.disabled = !sculptEditorState.redoStack.length;
+  }
+
+  function refreshAll() {
+    rebuildPreview();
+    refreshPrimList();
+    refreshSelectedControls();
+    syncUndoRedoButtons();
+  }
+
+  // Animate
+  function sculptAnimate() {
+    sculptState.animId = requestAnimationFrame(sculptAnimate);
+    oc3d.update();
+    r3d.render(s3d, cam3d);
+  }
+  sculptAnimate();
+
+  // Resize
+  const ro = new ResizeObserver(() => {
+    const w = canvas3d.clientWidth;
+    const h = canvas3d.clientHeight;
+    if (w > 0 && h > 0) {
+      cam3d.aspect = w / h;
+      cam3d.updateProjectionMatrix();
+      r3d.setSize(w, h, false);
+    }
+  });
+  ro.observe(canvas3d);
+
+  // Wire events
+  overlay.querySelector('#sculpt-add')?.addEventListener('click', () => {
+    const before = captureSculptSnapshot();
+    const shape = overlay.querySelector('#sculpt-shape')?.value || 'sphere';
+    const colorInput = overlay.querySelector('#sculpt-color');
+    const color = colorInput ? parseInt(colorInput.value.replace('#', ''), 16) : 0x7f8ea0;
+    sculptEditorState.primitives.push(normalizeSculptPrimitive({ shape, op: 'add', color, position: [0, 0, 0], scale: [1, 1, 1], rotation: [0, 0, 0] }));
+    sculptEditorState.selectedIndex = sculptEditorState.primitives.length - 1;
+    commitSculptChange(before);
+    refreshAll();
+  });
+
+  overlay.querySelector('#sculpt-del-prim')?.addEventListener('click', () => {
+    const idx = sculptEditorState.selectedIndex;
+    if (idx < 0 || idx >= sculptEditorState.primitives.length) return;
+    const before = captureSculptSnapshot();
+    sculptEditorState.primitives.splice(idx, 1);
+    sculptEditorState.selectedIndex = Math.min(idx, sculptEditorState.primitives.length - 1);
+    commitSculptChange(before);
+    refreshAll();
+  });
+
+  // Position/scale/rotation inputs
+  const bindPrimInput = (id, prop, index, parse = parseFloat) => {
+    const el = overlay.querySelector(id);
+    if (!el) return;
+    el.addEventListener('change', () => {
+      const idx = sculptEditorState.selectedIndex;
+      if (idx < 0 || idx >= sculptEditorState.primitives.length) return;
+      const before = captureSculptSnapshot();
+      const v = parse(el.value);
+      if (!Number.isFinite(v)) return;
+      sculptEditorState.primitives[idx][prop][index] = v;
+      commitSculptChange(before);
+      rebuildPreview();
+      syncUndoRedoButtons();
+    });
+  };
+  bindPrimInput('#sculpt-pos-x', 'position', 0);
+  bindPrimInput('#sculpt-pos-y', 'position', 1);
+  bindPrimInput('#sculpt-pos-z', 'position', 2);
+  bindPrimInput('#sculpt-scl-x', 'scale', 0);
+  bindPrimInput('#sculpt-scl-y', 'scale', 1);
+  bindPrimInput('#sculpt-scl-z', 'scale', 2);
+  bindPrimInput('#sculpt-rot-x', 'rotation', 0);
+  bindPrimInput('#sculpt-rot-y', 'rotation', 1);
+  bindPrimInput('#sculpt-rot-z', 'rotation', 2);
+
+  overlay.querySelector('#sculpt-prim-color')?.addEventListener('change', (e) => {
+    const idx = sculptEditorState.selectedIndex;
+    if (idx < 0 || idx >= sculptEditorState.primitives.length) return;
+    const before = captureSculptSnapshot();
+    sculptEditorState.primitives[idx].color = parseInt(e.target.value.replace('#', ''), 16) || 0x7f8ea0;
+    commitSculptChange(before);
+    rebuildPreview();
+    refreshPrimList();
+    syncUndoRedoButtons();
+  });
+
+  overlay.querySelector('#sculpt-undo')?.addEventListener('click', () => { undoSculptChange(); refreshAll(); });
+  overlay.querySelector('#sculpt-redo')?.addEventListener('click', () => { redoSculptChange(); refreshAll(); });
+
+  overlay.querySelector('#sculpt-save')?.addEventListener('click', () => {
+    const skin = normalizeSculptSkin({ primitives: sculptEditorState.primitives });
+    if (skin.primitives.length) {
+      customSculptSkins[type] = skin;
+      // Remove voxel skin if sculpt replaces it
+      delete customBlockSkins[type];
+    } else {
+      delete customSculptSkins[type];
+    }
+    refreshCustomSkinsOnScene();
+    refreshSculptSkinsOnScene();
+    removeGhost();
+    closeSculptEditorOverlay();
+    saveEditorSettings();
+  });
+
+  overlay.querySelector('#sculpt-cancel')?.addEventListener('click', () => {
+    closeSculptEditorOverlay();
+  });
+
+  overlay.addEventListener('keydown', e => {
+    // Don't intercept keys when typing in number/text inputs
+    const ae = document.activeElement;
+    const isInput = ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement || ae instanceof HTMLSelectElement;
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'z') {
+      e.preventDefault(); undoSculptChange(); refreshAll();
+    }
+    if (((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') || ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'z')) {
+      e.preventDefault(); redoSculptChange(); refreshAll();
+    }
+    if (e.key === 'Escape') { e.preventDefault(); closeSculptEditorOverlay(); }
+    if (!isInput && e.key === '1') { sculptGizmoMode = 'translate'; sculptTc.setMode('translate'); updateGizmoButtons(); }
+    if (!isInput && e.key === '2') { sculptGizmoMode = 'rotate'; sculptTc.setMode('rotate'); updateGizmoButtons(); }
+    if (!isInput && e.key === '3') { sculptGizmoMode = 'scale'; sculptTc.setMode('scale'); updateGizmoButtons(); }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && !isInput) {
+      const idx = sculptEditorState.selectedIndex;
+      if (idx >= 0 && idx < sculptEditorState.primitives.length) {
+        e.preventDefault();
+        const before = captureSculptSnapshot();
+        sculptEditorState.primitives.splice(idx, 1);
+        sculptEditorState.selectedIndex = Math.min(idx, sculptEditorState.primitives.length - 1);
+        commitSculptChange(before);
+        refreshAll();
+      }
+    }
+  });
+
+  overlay.tabIndex = 0;
+  overlay.focus();
+  refreshAll();
 }
 
 function pickKeypadMeshFromPointerEvent(e) {
@@ -2724,6 +4849,101 @@ function tryOpenRuntimeKeypadFromPointerEvent(e) {
   return openRuntimeKeypadOverlay(keypadMesh);
 }
 
+// ─── Runtime screen interaction overlay ───────────────────────────────────────
+function closeRuntimeScreenOverlay(options = {}) {
+  if (!runtimeScreenOverlayEl) return;
+  runtimeScreenOverlayEl.remove();
+  runtimeScreenOverlayEl = null;
+  if (options.restorePointerLock && state.isPlaytest && !runtimePauseActive && document.pointerLockElement !== renderer.domElement) {
+    renderer.domElement.requestPointerLock();
+  }
+}
+
+function openRuntimeScreenOverlay(mesh) {
+  if (!mesh || !state.isPlaytest) return false;
+  const sc = normalizeScreenConfig(mesh.userData.screenConfig);
+  if (!sc.interactive) return false;
+  closeRuntimeScreenOverlay();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'runtime-screen-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:20050;background:rgba(6,10,14,0.5);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+
+  let contentHtml = '';
+  if (sc.mediaType === 'url' && sc.url) {
+    const safeUrl = sc.url;
+    contentHtml = `<iframe id="runtime-screen-iframe" src="${escapeHtml(safeUrl)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups" style="width:100%;height:100%;border:none;border-radius:12px"></iframe>`;
+  } else if (sc.mediaType === 'html' && sc.htmlContent) {
+    contentHtml = `<iframe id="runtime-screen-iframe" sandbox="allow-scripts" style="width:100%;height:100%;border:none;border-radius:12px"></iframe>`;
+  } else if (sc.mediaType === 'video' && sc.videoData) {
+    contentHtml = `<video id="runtime-screen-video" src="${escapeHtml(sc.videoData)}" controls autoplay style="width:100%;max-height:100%;border-radius:12px;background:#000"></video>`;
+  } else if (sc.mediaType === 'image' && sc.imageData) {
+    contentHtml = `<img src="${escapeHtml(sc.imageData)}" style="max-width:100%;max-height:100%;border-radius:12px;object-fit:contain"/>`;
+  } else if (sc.mediaType === 'color') {
+    contentHtml = `<div style="width:100%;height:100%;background:${escapeHtml(sc.screenColor)};border-radius:12px"></div>`;
+  } else {
+    return false;
+  }
+
+  overlay.innerHTML = `
+    <div id="runtime-screen-panel" style="position:relative;width:min(80vw,960px);height:min(70vh,640px);border-radius:14px;border:1px solid rgba(143,180,215,0.22);background:rgba(10,16,22,0.98);box-shadow:0 24px 70px rgba(0,0,0,0.5);overflow:hidden;display:flex;flex-direction:column">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid rgba(143,180,215,0.12)">
+        <span style="font-size:11px;color:#89a1b5;letter-spacing:.1em;text-transform:uppercase">Screen</span>
+        <button id="runtime-screen-close" type="button" style="font-size:11px;padding:4px 10px;border-radius:6px;background:#30232a;border:1px solid #7b2a3b;color:#ffd4d4;cursor:pointer">✕ Close</button>
+      </div>
+      <div style="flex:1;overflow:hidden;padding:4px">${contentHtml}</div>
+    </div>
+  `;
+
+  const panel = overlay.querySelector('#runtime-screen-panel');
+  // For html media type, set srcdoc after insertion to avoid escaping issues
+  if (sc.mediaType === 'html' && sc.htmlContent) {
+    const iframe = overlay.querySelector('#runtime-screen-iframe');
+    if (iframe) iframe.srcdoc = sc.htmlContent;
+  }
+
+  overlay.querySelector('#runtime-screen-close')?.addEventListener('click', () => closeRuntimeScreenOverlay({ restorePointerLock: true }));
+  overlay.addEventListener('pointerdown', e => {
+    if (!panel.contains(e.target)) closeRuntimeScreenOverlay({ restorePointerLock: true });
+  });
+  panel.addEventListener('pointerdown', e => e.stopPropagation());
+  overlay.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeRuntimeScreenOverlay({ restorePointerLock: true });
+    }
+  });
+
+  document.body.appendChild(overlay);
+  runtimeScreenOverlayEl = overlay;
+  overlay.tabIndex = 0;
+  overlay.focus();
+  return true;
+}
+
+function tryOpenRuntimeScreenFromPointerEvent(e) {
+  if (!state.isPlaytest) return false;
+  const ndc = fpsLocked ? new THREE.Vector2(0, 0) : toNDC(e);
+  raycaster.setFromCamera(ndc, fpsCam);
+  const hits = raycaster.intersectObjects(sceneObjects, true);
+  for (const hit of hits) {
+    let obj = hit.object;
+    while (obj && !obj.userData?.type) obj = obj.parent;
+    if (obj?.userData?.type === 'screen') {
+      const sc = normalizeScreenConfig(obj.userData.screenConfig);
+      if (sc.interactive) {
+        e?.preventDefault?.();
+        if (document.pointerLockElement === renderer.domElement) {
+          suppressPointerUnlockStop = true;
+          document.exitPointerLock();
+        }
+        return openRuntimeScreenOverlay(obj);
+      }
+    }
+  }
+  return false;
+}
+
 function showKeypadContextMenu(mesh, x, y) {
   if (!mesh) return;
   closeKeypadContextMenu();
@@ -2795,6 +5015,10 @@ function normalizeShapeParams(type, params = {}) {
   const next = {};
   if (def.usesSides) next.sides = clampShapeSides(params.sides ?? def.defaultSides ?? state.placeSides);
   if (def.is2D) next.depth = clampShapeDepth(params.depth ?? state.place2DDepth);
+  if (type === 'terrain') {
+    next.segments = params.segments ?? 64;
+    next.terrainSize = params.terrainSize ?? 20;
+  }
   return next;
 }
 
@@ -2803,7 +5027,8 @@ function buildTypeGeometry(type, shapeParams = {}) {
   return def.makeGeo(normalizeShapeParams(type, shapeParams));
 }
 
-const CONTROL_ACTION_TYPES = ['move', 'rotate', 'light', 'audio', 'path', 'functionControl', 'playerGroup', 'setVar', 'setBool', 'playerStats', 'teleport'];
+const CONTROL_ACTION_TYPES = ['move', 'rotate', 'light', 'audio', 'path', 'functionControl', 'playerGroup', 'setVar', 'setBool', 'playerStats', 'teleport', 'skeleton'];
+const SKELETON_ANIM_COMMANDS = ['play', 'stop', 'pause', 'resume'];
 const TELEPORT_MODES = ['coords', 'spawn', 'object'];
 const CONTROL_LIGHT_OPS = ['toggle', 'enable', 'disable', 'intensity', 'distance'];
 const CONTROL_PLAYER_GROUP_MODES = ['set', 'add', 'remove', 'random'];
@@ -2861,6 +5086,306 @@ function normalizeFunctionNameList(value) {
     names.push(name);
   }
   return names;
+}
+
+// ─── Joint config ────────────────────────────────────────────────────────────
+const JOINT_AXES = ['X', 'Y', 'Z'];
+
+function createDefaultJointConfig() {
+  return {
+    parentLabel: '',
+    childLabel: '',
+    axis: 'Y',
+    speed: 1,        // rotations per second
+    angle: 0,        // current angle in degrees (runtime state kept separate)
+    minAngle: -180,
+    maxAngle: 180,
+    mode: 'manual',  // 'manual' = controlled by function, 'auto' = oscillate, 'fixed' = passive parent-child link
+  };
+}
+
+function normalizeJointConfig(config = {}) {
+  const base = createDefaultJointConfig();
+  return {
+    parentLabel: String(config.parentLabel ?? base.parentLabel).trim(),
+    childLabel: String(config.childLabel ?? base.childLabel).trim(),
+    axis: JOINT_AXES.includes(config.axis) ? config.axis : base.axis,
+    speed: Math.max(0, Number.isFinite(parseFloat(config.speed)) ? parseFloat(config.speed) : base.speed),
+    angle: Number.isFinite(parseFloat(config.angle)) ? parseFloat(config.angle) : base.angle,
+    minAngle: Number.isFinite(parseFloat(config.minAngle)) ? parseFloat(config.minAngle) : base.minAngle,
+    maxAngle: Number.isFinite(parseFloat(config.maxAngle)) ? parseFloat(config.maxAngle) : base.maxAngle,
+    mode: ['manual', 'auto', 'fixed'].includes(config.mode) ? config.mode : base.mode,
+  };
+}
+
+function getMeshJointConfig(mesh) {
+  if (!mesh?.userData || mesh.userData.type !== 'joint') return null;
+  const cfg = normalizeJointConfig(mesh.userData.jointConfig);
+  mesh.userData.jointConfig = cfg;
+  return cfg;
+}
+
+// ─── Skeleton config (per-mesh instance) ─────────────────────────────────────
+function createDefaultSkeletonConfig() {
+  return {
+    definitionName: '',
+    currentAnimation: '',
+    currentPose: '',
+    playOnStart: true,
+    loopAnimation: true,
+    animationSpeed: 1,
+  };
+}
+
+function normalizeSkeletonConfig(config = {}) {
+  const base = createDefaultSkeletonConfig();
+  return {
+    definitionName: String(config.definitionName ?? base.definitionName).trim(),
+    currentAnimation: String(config.currentAnimation ?? base.currentAnimation).trim(),
+    currentPose: String(config.currentPose ?? base.currentPose).trim(),
+    playOnStart: typeof config.playOnStart === 'boolean' ? config.playOnStart : base.playOnStart,
+    loopAnimation: typeof config.loopAnimation === 'boolean' ? config.loopAnimation : base.loopAnimation,
+    animationSpeed: Math.max(0, Number.isFinite(parseFloat(config.animationSpeed)) ? parseFloat(config.animationSpeed) : base.animationSpeed),
+  };
+}
+
+function getMeshSkeletonConfig(mesh) {
+  if (!mesh?.userData || mesh.userData.type !== 'skeleton') return null;
+  const cfg = normalizeSkeletonConfig(mesh.userData.skeletonConfig);
+  mesh.userData.skeletonConfig = cfg;
+  return cfg;
+}
+
+// ─── Skeleton definitions (project-level registry) ───────────────────────────
+function createDefaultBone(overrides = {}) {
+  return {
+    id: overrides.id || ('bone_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6)),
+    name: overrides.name || 'Bone',
+    parent: overrides.parent ?? null,
+    position: Array.isArray(overrides.position) ? overrides.position.slice(0, 3) : [0, 0, 0],
+    rotation: Array.isArray(overrides.rotation) ? overrides.rotation.slice(0, 4) : [0, 0, 0, 1],
+    length: Math.max(0.01, Number.isFinite(overrides.length) ? overrides.length : 0.3),
+  };
+}
+
+function normalizeBone(raw = {}) {
+  return createDefaultBone({
+    id: raw.id,
+    name: raw.name,
+    parent: raw.parent,
+    position: raw.position,
+    rotation: raw.rotation,
+    length: raw.length,
+  });
+}
+
+function createDefaultSkeletonDefinition(name = 'Unnamed') {
+  return {
+    name: String(name).trim() || 'Unnamed',
+    bones: [],
+    poses: {},
+    animations: {},
+    boneSkins: {},
+  };
+}
+
+function normalizeSkeletonDefinition(def = {}) {
+  const name = String(def.name ?? 'Unnamed').trim() || 'Unnamed';
+  const bones = Array.isArray(def.bones) ? def.bones.map(normalizeBone) : [];
+  const poses = {};
+  if (def.poses && typeof def.poses === 'object') {
+    for (const [poseName, poseData] of Object.entries(def.poses)) {
+      if (!poseData || typeof poseData !== 'object') continue;
+      const pose = {};
+      for (const [boneId, quat] of Object.entries(poseData)) {
+        if (Array.isArray(quat) && quat.length >= 4) {
+          pose[boneId] = quat.slice(0, 4).map(Number);
+        }
+      }
+      poses[poseName] = pose;
+    }
+  }
+  const animations = {};
+  if (def.animations && typeof def.animations === 'object') {
+    for (const [animName, animData] of Object.entries(def.animations)) {
+      if (!animData || typeof animData !== 'object') continue;
+      const anim = {
+        duration: Math.max(0.1, Number.isFinite(animData.duration) ? animData.duration : 1),
+        loop: typeof animData.loop === 'boolean' ? animData.loop : true,
+        keyframes: [],
+      };
+      if (Array.isArray(animData.keyframes)) {
+        for (const kf of animData.keyframes) {
+          if (!kf || typeof kf !== 'object') continue;
+          const keyframe = { time: Math.max(0, Number.isFinite(kf.time) ? kf.time : 0), bones: {} };
+          if (kf.bones && typeof kf.bones === 'object') {
+            for (const [boneId, quat] of Object.entries(kf.bones)) {
+              if (Array.isArray(quat) && quat.length >= 4) {
+                keyframe.bones[boneId] = quat.slice(0, 4).map(Number);
+              }
+            }
+          }
+          anim.keyframes.push(keyframe);
+        }
+        anim.keyframes.sort((a, b) => a.time - b.time);
+      }
+      animations[animName] = anim;
+    }
+  }
+  const boneSkins = {};
+  if (def.boneSkins && typeof def.boneSkins === 'object') {
+    for (const [boneId, skinRaw] of Object.entries(def.boneSkins)) {
+      if (!skinRaw || typeof skinRaw !== 'object') continue;
+      boneSkins[boneId] = normalizeCustomBlockSkin(skinRaw);
+    }
+  }
+  return { name, bones, poses, animations, boneSkins };
+}
+
+function serializeSkeletonDefinitions() {
+  const out = {};
+  for (const [name, defRaw] of Object.entries(skeletonDefinitions)) {
+    const def = normalizeSkeletonDefinition(defRaw);
+    if (!def.bones.length) continue;
+    out[name] = def;
+  }
+  return out;
+}
+
+function setSkeletonDefinitionsMap(map = {}) {
+  for (const key of Object.keys(skeletonDefinitions)) delete skeletonDefinitions[key];
+  if (map && typeof map === 'object') {
+    for (const [name, defRaw] of Object.entries(map)) {
+      const def = normalizeSkeletonDefinition(defRaw);
+      if (!def.bones.length) continue;
+      skeletonDefinitions[name] = def;
+    }
+  }
+}
+
+function createHumanoidSkeleton(name = 'Humanoid') {
+  const def = createDefaultSkeletonDefinition(name);
+  const b = (id, nm, parent, pos, len) => ({ id, name: nm, parent, position: pos, rotation: [0,0,0,1], length: len });
+  def.bones = [
+    b('root',       'Root',        null,       [0,   0,    0],    0.2),
+    b('spine',      'Spine',       'root',     [0,   0.2,  0],    0.25),
+    b('chest',      'Chest',       'spine',    [0,   0.25, 0],    0.25),
+    b('neck',       'Neck',        'chest',    [0,   0.25, 0],    0.1),
+    b('head',       'Head',        'neck',     [0,   0.1,  0],    0.2),
+    b('shoulderL',  'Shoulder L',  'chest',    [-0.18, 0.2, 0],   0.1),
+    b('upperArmL',  'Upper Arm L', 'shoulderL',[-0.1, 0,   0],    0.25),
+    b('lowerArmL',  'Lower Arm L', 'upperArmL',[-0.25,0,   0],    0.22),
+    b('handL',      'Hand L',      'lowerArmL',[-0.22,0,   0],    0.1),
+    b('shoulderR',  'Shoulder R',  'chest',    [0.18, 0.2, 0],    0.1),
+    b('upperArmR',  'Upper Arm R', 'shoulderR',[0.1,  0,   0],    0.25),
+    b('lowerArmR',  'Lower Arm R', 'upperArmR',[0.25, 0,   0],    0.22),
+    b('handR',      'Hand R',      'lowerArmR',[0.22, 0,   0],    0.1),
+    b('hipL',       'Hip L',       'root',     [-0.1, 0,   0],    0.1),
+    b('upperLegL',  'Upper Leg L', 'hipL',     [0,   -0.1, 0],    0.3),
+    b('lowerLegL',  'Lower Leg L', 'upperLegL',[0,   -0.3, 0],    0.28),
+    b('footL',      'Foot L',      'lowerLegL',[0,   -0.28,0.06], 0.12),
+    b('hipR',       'Hip R',       'root',     [0.1,  0,   0],    0.1),
+    b('upperLegR',  'Upper Leg R', 'hipR',     [0,   -0.1, 0],    0.3),
+    b('lowerLegR',  'Lower Leg R', 'upperLegR',[0,   -0.3, 0],    0.28),
+    b('footR',      'Foot R',      'lowerLegR',[0,   -0.28,0.06], 0.12),
+  ];
+  // Default T-pose is just the bone positions (no rotations needed)
+  const tPose = {};
+  for (const bone of def.bones) tPose[bone.id] = [0, 0, 0, 1];
+  def.poses['T-Pose'] = tPose;
+  return def;
+}
+
+// ─── THREE.js skeleton builder ───────────────────────────────────────────────
+function buildThreeBonesFromDef(def) {
+  if (!def?.bones?.length) return null;
+  const boneMap = new Map();
+  const rootBones = [];
+  // Create all THREE.Bone objects
+  for (const bd of def.bones) {
+    const bone = new THREE.Bone();
+    bone.name = bd.id;
+    bone.position.set(bd.position[0] || 0, bd.position[1] || 0, bd.position[2] || 0);
+    if (Array.isArray(bd.rotation) && bd.rotation.length >= 4) {
+      bone.quaternion.set(bd.rotation[0], bd.rotation[1], bd.rotation[2], bd.rotation[3]);
+    }
+    bone.userData._boneDefId = bd.id;
+    bone.userData._boneLength = bd.length;
+    boneMap.set(bd.id, bone);
+  }
+  // Set up hierarchy
+  for (const bd of def.bones) {
+    const bone = boneMap.get(bd.id);
+    if (bd.parent && boneMap.has(bd.parent)) {
+      boneMap.get(bd.parent).add(bone);
+    } else {
+      rootBones.push(bone);
+    }
+  }
+  // Build skeleton
+  const allBones = [];
+  const rootGroup = new THREE.Group();
+  for (const root of rootBones) {
+    rootGroup.add(root);
+  }
+  rootGroup.traverse(obj => { if (obj.isBone) allBones.push(obj); });
+  const skeleton = new THREE.Skeleton(allBones);
+  return { skeleton, rootGroup, boneMap, allBones };
+}
+
+function applyPoseToSkeleton(boneMap, pose) {
+  if (!boneMap || !pose) return;
+  for (const [boneId, quat] of Object.entries(pose)) {
+    const bone = boneMap.get(boneId);
+    if (bone && Array.isArray(quat) && quat.length >= 4) {
+      bone.quaternion.set(quat[0], quat[1], quat[2], quat[3]);
+    }
+  }
+}
+
+function capturePoseFromSkeleton(boneMap) {
+  const pose = {};
+  for (const [boneId, bone] of boneMap) {
+    pose[boneId] = bone.quaternion.toArray();
+  }
+  return pose;
+}
+
+function interpolatePoses(poseA, poseB, t, boneIds) {
+  const result = {};
+  const _qa = new THREE.Quaternion();
+  const _qb = new THREE.Quaternion();
+  for (const id of boneIds) {
+    const a = poseA?.[id] || [0, 0, 0, 1];
+    const b = poseB?.[id] || [0, 0, 0, 1];
+    _qa.set(a[0], a[1], a[2], a[3]);
+    _qb.set(b[0], b[1], b[2], b[3]);
+    _qa.slerp(_qb, t);
+    result[id] = _qa.toArray();
+  }
+  return result;
+}
+
+function evaluateAnimationAtTime(animDef, time, boneIds) {
+  if (!animDef?.keyframes?.length) return null;
+  const kfs = animDef.keyframes;
+  if (kfs.length === 1) return kfs[0].bones;
+  // Clamp or loop time
+  const dur = animDef.duration || 1;
+  let t = animDef.loop ? ((time % dur) + dur) % dur : Math.min(time, dur);
+  // Find surrounding keyframes
+  let prev = kfs[0], next = kfs[kfs.length - 1];
+  for (let i = 0; i < kfs.length - 1; i++) {
+    if (t >= kfs[i].time && t <= kfs[i + 1].time) {
+      prev = kfs[i];
+      next = kfs[i + 1];
+      break;
+    }
+  }
+  if (prev === next) return prev.bones;
+  const segDur = next.time - prev.time;
+  const segT = segDur > 0 ? (t - prev.time) / segDur : 0;
+  return interpolatePoses(prev.bones, next.bones, segT, boneIds);
 }
 
 function createDefaultCheckpointConfig() {
@@ -2927,6 +5452,511 @@ function getMeshCheckpointConfig(mesh) {
   const config = normalizeCheckpointConfig(mesh?.userData?.checkpointConfig);
   if (mesh?.userData) mesh.userData.checkpointConfig = config;
   return config;
+}
+
+function normalizeTeleportConfig(config = {}) {
+  return {
+    pairLabel: String(config.pairLabel ?? '').trim(),
+    crossWorld: config.crossWorld === true,
+    targetWorld: String(config.targetWorld ?? '').trim(),
+  };
+}
+
+function getMeshTeleportConfig(mesh) {
+  const config = normalizeTeleportConfig(mesh?.userData?.teleportConfig);
+  if (mesh?.userData) mesh.userData.teleportConfig = config;
+  return config;
+}
+
+// ─── Text Block Config ───────────────────────────────────────────────────────
+function normalizeTextConfig(config = {}) {
+  return {
+    content: String(config.content ?? 'Hello World'),
+    fontSize: Math.max(8, Math.min(200, parseInt(config.fontSize, 10) || 48)),
+    fontFamily: String(config.fontFamily ?? 'Arial'),
+    textColor: String(config.textColor ?? '#ffffff'),
+    bgColor: String(config.bgColor ?? 'transparent'),
+    align: ['left','center','right'].includes(config.align) ? config.align : 'center',
+    bold: !!config.bold,
+    italic: !!config.italic,
+  };
+}
+
+async function _registerCustomFont(entry) {
+  try {
+    const face = new FontFace(entry.name, `url(${entry.dataUrl})`);
+    await face.load();
+    document.fonts.add(face);
+  } catch (e) { console.warn('Failed to load custom font:', entry.name, e); }
+}
+
+function _getAvailableFontNames() {
+  const system = ['Arial','Georgia','Times New Roman','Courier New','Verdana','Impact','Comic Sans MS','Trebuchet MS','Palatino','Garamond'];
+  const custom = customFonts.map(f => f.name);
+  return [...custom, ...system];
+}
+
+function _applyTextTexture(mesh) {
+  const tc = mesh.userData.textConfig;
+  if (!tc) return;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  const fontSize = tc.fontSize;
+  const fontStr = (tc.italic ? 'italic ' : '') + (tc.bold ? 'bold ' : '') + fontSize + 'px ' + tc.fontFamily;
+  ctx.font = fontStr;
+  const lines = tc.content.split('\\n');
+  const lineHeight = fontSize * 1.25;
+  const maxWidth = Math.max(64, ...lines.map(l => ctx.measureText(l).width)) + fontSize;
+  const totalHeight = Math.max(64, lines.length * lineHeight + fontSize * 0.5);
+  canvas.width = Math.min(2048, Math.pow(2, Math.ceil(Math.log2(maxWidth))));
+  canvas.height = Math.min(2048, Math.pow(2, Math.ceil(Math.log2(totalHeight))));
+  if (tc.bgColor && tc.bgColor !== 'transparent') {
+    ctx.fillStyle = tc.bgColor;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+  ctx.font = fontStr;
+  ctx.fillStyle = tc.textColor;
+  ctx.textBaseline = 'top';
+  ctx.textAlign = tc.align;
+  const alignX = tc.align === 'left' ? fontSize * 0.25 : tc.align === 'right' ? canvas.width - fontSize * 0.25 : canvas.width / 2;
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], alignX, fontSize * 0.25 + i * lineHeight);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  if (mesh.material.map) mesh.material.map.dispose();
+  mesh.material.map = tex;
+  mesh.material.needsUpdate = true;
+}
+
+// ─── Screen/Media Config ─────────────────────────────────────────────────────
+function normalizeScreenConfig(config = {}) {
+  return {
+    mediaType: ['image', 'color', 'video', 'url', 'html'].includes(config.mediaType) ? config.mediaType : 'color',
+    imageData: config.imageData || null,
+    videoData: config.videoData || null,
+    url: String(config.url ?? ''),
+    htmlContent: String(config.htmlContent ?? ''),
+    screenColor: String(config.screenColor ?? '#222222'),
+    interactive: !!config.interactive,
+  };
+}
+
+function _applyScreenTexture(mesh) {
+  const sc = mesh.userData.screenConfig;
+  if (!sc) return;
+  // Clean up previous video element
+  if (mesh.userData._screenVideo) {
+    mesh.userData._screenVideo.pause();
+    mesh.userData._screenVideo.src = '';
+    mesh.userData._screenVideo = null;
+  }
+  if (sc.mediaType === 'image' && sc.imageData) {
+    const tex = new THREE.TextureLoader().load(sc.imageData);
+    tex.minFilter = THREE.LinearFilter;
+    if (mesh.material.map) mesh.material.map.dispose();
+    mesh.material.map = tex;
+    mesh.material.color.setHex(0xffffff);
+    mesh.material.needsUpdate = true;
+  } else if (sc.mediaType === 'video' && sc.videoData) {
+    const video = document.createElement('video');
+    video.src = sc.videoData;
+    video.loop = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.play().catch(() => {});
+    const tex = new THREE.VideoTexture(video);
+    tex.minFilter = THREE.LinearFilter;
+    if (mesh.material.map) mesh.material.map.dispose();
+    mesh.material.map = tex;
+    mesh.material.color.setHex(0xffffff);
+    mesh.material.needsUpdate = true;
+    mesh.userData._screenVideo = video;
+  } else if ((sc.mediaType === 'url' || sc.mediaType === 'html') && (sc.url || sc.htmlContent)) {
+    // Render HTML/URL preview as a canvas snapshot
+    const canvas = document.createElement('canvas');
+    canvas.width = 512; canvas.height = 288;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, 512, 288);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    if (sc.mediaType === 'url') {
+      ctx.fillText('🌐 ' + (sc.url.length > 35 ? sc.url.slice(0, 35) + '…' : sc.url), 256, 130);
+      ctx.font = '13px sans-serif';
+      ctx.fillStyle = '#8888aa';
+      ctx.fillText('Click to interact during playtest', 256, 160);
+    } else {
+      ctx.fillText('📄 HTML Content', 256, 130);
+      ctx.font = '13px sans-serif';
+      ctx.fillStyle = '#8888aa';
+      ctx.fillText(sc.htmlContent.length + ' chars — Click to interact', 256, 160);
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    if (mesh.material.map) mesh.material.map.dispose();
+    mesh.material.map = tex;
+    mesh.material.color.setHex(0xffffff);
+    mesh.material.needsUpdate = true;
+  } else {
+    if (mesh.material.map) { mesh.material.map.dispose(); mesh.material.map = null; }
+    mesh.material.color.set(sc.screenColor);
+    mesh.material.needsUpdate = true;
+  }
+}
+
+// ─── Camera Object Config ────────────────────────────────────────────────────
+function normalizeCameraConfig(config = {}) {
+  return {
+    fov: Math.max(10, Math.min(150, parseFloat(config.fov) || 60)),
+    near: Math.max(0.01, parseFloat(config.near) || 0.1),
+    far: Math.max(1, parseFloat(config.far) || 1000),
+  };
+}
+
+// ─── NPC Config ──────────────────────────────────────────────────────────────
+const NPC_BEHAVIORS = ['idle', 'wander', 'patrol'];
+
+function normalizeNpcConfig(config = {}) {
+  return {
+    displayName: String(config.displayName ?? 'NPC').trim(),
+    behavior: NPC_BEHAVIORS.includes(config.behavior) ? config.behavior : 'idle',
+    wanderRadius: Math.max(0.5, Math.min(50, parseFloat(config.wanderRadius) || 5)),
+    interactDistance: Math.max(0.5, Math.min(20, parseFloat(config.interactDistance) || 3)),
+    dialogueLines: Array.isArray(config.dialogueLines) ? config.dialogueLines.map(l => String(l)) : ['Hello there!'],
+    skinColor: parseInt(config.skinColor) || 0xf0c8a0,
+    shirtColor: parseInt(config.shirtColor) || 0x3a7bd5,
+    pantsColor: parseInt(config.pantsColor) || 0x4a4a5a,
+    walkSpeed: Math.max(0.1, Math.min(10, parseFloat(config.walkSpeed) || 1.5)),
+    facePlayer: config.facePlayer !== false,
+    idleAnimation: config.idleAnimation !== false,
+  };
+}
+
+function _buildNpcHumanoid(config) {
+  const group = new THREE.Group();
+  const skin = new THREE.MeshStandardMaterial({ color: config.skinColor, roughness: 0.85 });
+  const shirt = new THREE.MeshStandardMaterial({ color: config.shirtColor, roughness: 0.8 });
+  const pants = new THREE.MeshStandardMaterial({ color: config.pantsColor, roughness: 0.8 });
+
+  // Head (sphere)
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, 0.35), skin);
+  head.position.set(0, 1.525, 0);
+  head.castShadow = true;
+  head.receiveShadow = true;
+  head.name = 'npc_head';
+  group.add(head);
+
+  // Body (box)
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.6, 0.3), shirt);
+  body.position.set(0, 1.05, 0);
+  body.castShadow = true;
+  body.receiveShadow = true;
+  body.name = 'npc_body';
+  group.add(body);
+
+  // Left arm
+  const lArm = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.55, 0.2), shirt.clone());
+  lArm.position.set(-0.34, 1.05, 0);
+  lArm.castShadow = true;
+  lArm.receiveShadow = true;
+  lArm.name = 'npc_larm';
+  group.add(lArm);
+
+  // Right arm
+  const rArm = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.55, 0.2), shirt.clone());
+  rArm.position.set(0.34, 1.05, 0);
+  rArm.castShadow = true;
+  rArm.receiveShadow = true;
+  rArm.name = 'npc_rarm';
+  group.add(rArm);
+
+  // Left leg
+  const lLeg = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.55, 0.25), pants);
+  lLeg.position.set(-0.13, 0.475, 0);
+  lLeg.castShadow = true;
+  lLeg.receiveShadow = true;
+  lLeg.name = 'npc_lleg';
+  group.add(lLeg);
+
+  // Right leg
+  const rLeg = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.55, 0.25), pants.clone());
+  rLeg.position.set(0.13, 0.475, 0);
+  rLeg.castShadow = true;
+  rLeg.receiveShadow = true;
+  rLeg.name = 'npc_rleg';
+  group.add(rLeg);
+
+  // Nameplate (canvas texture) — shown in editor
+  const nameCanvas = document.createElement('canvas');
+  nameCanvas.width = 256;
+  nameCanvas.height = 48;
+  const nameCtx = nameCanvas.getContext('2d');
+  nameCtx.fillStyle = 'rgba(0,0,0,0.5)';
+  nameCtx.fillRect(0, 0, 256, 48);
+  nameCtx.fillStyle = '#ffffff';
+  nameCtx.font = 'bold 24px sans-serif';
+  nameCtx.textAlign = 'center';
+  nameCtx.textBaseline = 'middle';
+  nameCtx.fillText(config.displayName.slice(0, 20), 128, 24);
+  const nameTex = new THREE.CanvasTexture(nameCanvas);
+  const namePlate = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.2, 0.22),
+    new THREE.MeshBasicMaterial({ map: nameTex, transparent: true, depthTest: false, side: THREE.DoubleSide })
+  );
+  namePlate.position.set(0, 1.95, 0);
+  namePlate.renderOrder = 9999;
+  namePlate.name = 'npc_nameplate';
+  group.add(namePlate);
+
+  return group;
+}
+
+function _applyNpcAppearance(mesh) {
+  const config = mesh.userData.npcConfig;
+  if (!config) return;
+  // Remove existing humanoid group if any
+  const existing = mesh.getObjectByName('npc_head');
+  if (existing) {
+    const humanoid = existing.parent;
+    if (humanoid !== mesh) {
+      mesh.remove(humanoid);
+      humanoid.traverse(c => { if (c.geometry) c.geometry.dispose(); if (c.material) { if (c.material.map) c.material.map.dispose(); c.material.dispose(); } });
+    }
+  }
+  const group = _buildNpcHumanoid(config);
+  // Center: mesh's own geometry is just a thin invisible box for selection
+  mesh.material.visible = false;
+  mesh.add(group);
+}
+
+function _updateNpcNameplate(mesh) {
+  const config = mesh.userData.npcConfig;
+  if (!config) return;
+  const plate = mesh.getObjectByName('npc_nameplate');
+  if (!plate || !plate.material.map) return;
+  const canvas = plate.material.map.image;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, 256, 48);
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, 256, 48);
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 24px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(config.displayName.slice(0, 20), 128, 24);
+  plate.material.map.needsUpdate = true;
+}
+
+// ─── NPC Runtime State ───────────────────────────────────────────────────────
+const _npcRuntimeStates = new Map(); // mesh.uuid -> { wanderTarget, wanderTimer, dialogueIndex, lastInteractTime }
+let _npcDialogueActive = null; // { mesh, lineIndex } if dialogue is open
+const _npcInteractCooldown = 0.5; // seconds between interactions
+
+function _getNpcState(mesh) {
+  if (_npcRuntimeStates.has(mesh.uuid)) return _npcRuntimeStates.get(mesh.uuid);
+  const s = { wanderTarget: null, wanderTimer: 0, dialogueIndex: 0, originPos: mesh.position.clone(), walkPhase: 0 };
+  _npcRuntimeStates.set(mesh.uuid, s);
+  return s;
+}
+
+function updateNpcBehaviors(dt, time) {
+  for (const m of sceneObjects) {
+    if (m.userData.type !== 'npc') continue;
+    const cfg = normalizeNpcConfig(m.userData.npcConfig);
+    const st = _getNpcState(m);
+    const group = m.getObjectByName('npc_head')?.parent;
+    // Idle animation
+    if (cfg.idleAnimation && group) {
+      const head = group.getObjectByName('npc_head');
+      const lArm = group.getObjectByName('npc_larm');
+      const rArm = group.getObjectByName('npc_rarm');
+      if (head) head.rotation.y = Math.sin(time * 0.5) * 0.05;
+      const breath = Math.sin(time * 1.5) * 0.03;
+      if (lArm) lArm.rotation.x = breath;
+      if (rArm) rArm.rotation.x = -breath;
+    }
+    // Face player
+    if (cfg.facePlayer) {
+      const dx = fpsPos.x - m.position.x;
+      const dz = fpsPos.z - m.position.z;
+      const target = Math.atan2(dx, dz);
+      let diff = target - m.rotation.y;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      m.rotation.y += diff * Math.min(1, dt * 4);
+    }
+    // Wander behavior
+    if (cfg.behavior === 'wander') {
+      st.wanderTimer -= dt;
+      if (!st.wanderTarget || st.wanderTimer <= 0) {
+        const angle = Math.random() * Math.PI * 2;
+        const dist = Math.random() * cfg.wanderRadius;
+        st.wanderTarget = new THREE.Vector3(st.originPos.x + Math.cos(angle) * dist, m.position.y, st.originPos.z + Math.sin(angle) * dist);
+        st.wanderTimer = 2 + Math.random() * 4;
+      }
+      const dx = st.wanderTarget.x - m.position.x;
+      const dz = st.wanderTarget.z - m.position.z;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist > 0.2) {
+        const speed = cfg.walkSpeed * dt;
+        m.position.x += (dx / dist) * Math.min(speed, dist);
+        m.position.z += (dz / dist) * Math.min(speed, dist);
+        if (!cfg.facePlayer) m.rotation.y = Math.atan2(dx, dz);
+        st.walkPhase += dt * cfg.walkSpeed * 3;
+        _animateNpcWalk(m, st.walkPhase);
+      } else {
+        _animateNpcWalk(m, 0);
+      }
+    }
+    // Nameplate billboard
+    const plate = m.getObjectByName('npc_nameplate');
+    if (plate && fpsCam) {
+      plate.quaternion.copy(fpsCam.quaternion);
+    }
+  }
+}
+
+function _animateNpcWalk(mesh, phase) {
+  const group = mesh.getObjectByName('npc_head')?.parent;
+  if (!group) return;
+  const swing = Math.sin(phase) * 0.6;
+  const lArm = group.getObjectByName('npc_larm');
+  const rArm = group.getObjectByName('npc_rarm');
+  const lLeg = group.getObjectByName('npc_lleg');
+  const rLeg = group.getObjectByName('npc_rleg');
+  if (lArm) lArm.rotation.x = swing;
+  if (rArm) rArm.rotation.x = -swing;
+  if (lLeg) lLeg.rotation.x = -swing;
+  if (rLeg) rLeg.rotation.x = swing;
+}
+
+function checkNpcInteraction() {
+  if (_npcDialogueActive) { _advanceNpcDialogue(); return; }
+  let closest = null, closestDist = Infinity;
+  for (const m of sceneObjects) {
+    if (m.userData.type !== 'npc') continue;
+    const cfg = normalizeNpcConfig(m.userData.npcConfig);
+    const dx = fpsPos.x - m.position.x, dz = fpsPos.z - m.position.z;
+    const dist = Math.sqrt(dx * dx + dz * dz);
+    if (dist < cfg.interactDistance && dist < closestDist) { closest = m; closestDist = dist; }
+  }
+  if (!closest) return;
+  const cfg = normalizeNpcConfig(closest.userData.npcConfig);
+  if (!cfg.dialogueLines.length) return;
+  _npcDialogueActive = { mesh: closest, lineIndex: 0 };
+  _showNpcDialogue(cfg.displayName, cfg.dialogueLines[0]);
+}
+
+function _advanceNpcDialogue() {
+  if (!_npcDialogueActive) return;
+  const cfg = normalizeNpcConfig(_npcDialogueActive.mesh.userData.npcConfig);
+  _npcDialogueActive.lineIndex++;
+  if (_npcDialogueActive.lineIndex >= cfg.dialogueLines.length) {
+    _hideNpcDialogue();
+    _npcDialogueActive = null;
+  } else {
+    _showNpcDialogue(cfg.displayName, cfg.dialogueLines[_npcDialogueActive.lineIndex]);
+  }
+}
+
+function _showNpcDialogue(name, text) {
+  let box = document.getElementById('npc-dialogue-box');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'npc-dialogue-box';
+    box.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.85);color:#fff;padding:14px 24px;border-radius:10px;font-size:14px;max-width:450px;text-align:center;z-index:9999;pointer-events:none;border:1px solid rgba(255,255,255,0.15)';
+    document.body.appendChild(box);
+  }
+  const safeName = name.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const safeText = text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  box.innerHTML = '<div style="font-weight:700;margin-bottom:4px;color:#8be9fd">' + safeName + '</div><div>' + safeText + '</div><div style="font-size:10px;color:#888;margin-top:6px">Press E to continue</div>';
+  box.style.display = 'block';
+}
+
+function _hideNpcDialogue() {
+  const box = document.getElementById('npc-dialogue-box');
+  if (box) box.style.display = 'none';
+}
+
+function _showNpcInteractHint() {
+  let hint = document.getElementById('npc-interact-hint');
+  let showHint = false;
+  if (!_npcDialogueActive) {
+    for (const m of sceneObjects) {
+      if (m.userData.type !== 'npc') continue;
+      const cfg = normalizeNpcConfig(m.userData.npcConfig);
+      if (!cfg.dialogueLines.length) continue;
+      const dx = fpsPos.x - m.position.x, dz = fpsPos.z - m.position.z;
+      if (Math.sqrt(dx * dx + dz * dz) < cfg.interactDistance) { showHint = true; break; }
+    }
+  }
+  if (showHint) {
+    if (!hint) {
+      hint = document.createElement('div');
+      hint.id = 'npc-interact-hint';
+      hint.style.cssText = 'position:fixed;bottom:40px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.6);color:#fff;padding:6px 16px;border-radius:6px;font-size:12px;z-index:9998;pointer-events:none';
+      hint.textContent = 'Press E to talk';
+      document.body.appendChild(hint);
+    }
+    hint.style.display = 'block';
+  } else if (hint) {
+    hint.style.display = 'none';
+  }
+}
+
+function clearNpcRuntimeState() {
+  _npcRuntimeStates.clear();
+  _npcDialogueActive = null;
+  _hideNpcDialogue();
+  const hint = document.getElementById('npc-interact-hint');
+  if (hint) hint.style.display = 'none';
+}
+
+function bindNpcProps(mesh) {
+  if (mesh.userData.type !== 'npc' || state.selectedObject !== mesh) return;
+  const targets = getPropertyTargets(mesh).filter(t => t.userData.type === 'npc');
+  if (!targets.length) return;
+  const applyAll = () => {
+    const name = document.getElementById('prop-npc-name');
+    const beh = document.getElementById('prop-npc-behavior');
+    const spd = document.getElementById('prop-npc-speed');
+    const wr = document.getElementById('prop-npc-wander-radius');
+    const id = document.getElementById('prop-npc-interact-dist');
+    const fp = document.getElementById('prop-npc-face-player');
+    const ia = document.getElementById('prop-npc-idle-anim');
+    const sk = document.getElementById('prop-npc-skin');
+    const sh = document.getElementById('prop-npc-shirt');
+    const pa = document.getElementById('prop-npc-pants');
+    const dl = document.getElementById('prop-npc-dialogue');
+    for (const t of targets) {
+      const cfg = normalizeNpcConfig({
+        displayName: name?.value ?? 'NPC',
+        behavior: beh?.value ?? 'idle',
+        walkSpeed: parseFloat(spd?.value) || 1.2,
+        wanderRadius: parseFloat(wr?.value) || 5,
+        interactDistance: parseFloat(id?.value) || 3,
+        facePlayer: fp?.checked ?? true,
+        idleAnimation: ia?.checked ?? true,
+        skinColor: sk ? parseInt(sk.value.slice(1), 16) : 0xf0c8a0,
+        shirtColor: sh ? parseInt(sh.value.slice(1), 16) : 0x4488cc,
+        pantsColor: pa ? parseInt(pa.value.slice(1), 16) : 0x334455,
+        dialogueLines: dl ? dl.value.split('\n').filter(l => l.trim()) : [],
+      });
+      t.userData.npcConfig = cfg;
+      _applyNpcAppearance(t);
+    }
+  };
+  const ids = ['prop-npc-name','prop-npc-behavior','prop-npc-speed','prop-npc-wander-radius','prop-npc-interact-dist','prop-npc-face-player','prop-npc-idle-anim','prop-npc-dialogue'];
+  for (const elId of ids) {
+    const el = document.getElementById(elId);
+    if (el) el.addEventListener('change', applyAll);
+  }
+  for (const elId of ['prop-npc-skin','prop-npc-shirt','prop-npc-pants']) {
+    const el = document.getElementById(elId);
+    if (el) el.addEventListener('input', applyAll);
+  }
 }
 
 function createDefaultTriggerStopConfig() {
@@ -3305,6 +6335,7 @@ function addLightToMesh(mesh, intensity, distance) {
   pl.castShadow = true;
   pl.shadow.mapSize.set(LIGHT_BLOCK_SHADOW_MAP, LIGHT_BLOCK_SHADOW_MAP);
   pl.shadow.bias = LIGHT_BLOCK_SHADOW_BIAS;
+  pl.shadow.normalBias = 0.02;
   mesh.add(pl);
   mesh.userData.pointLight = pl;
   mesh.userData.lightIntensity = i;
@@ -3351,7 +6382,7 @@ function clampMeshSolidness(value) {
 }
 
 function isDefaultSolidType(type) {
-  return !['light', 'spawn', 'checkpoint', 'trigger', 'target', 'pivot'].includes(type);
+  return !['light', 'spawn', 'checkpoint', 'trigger', 'target', 'pivot', 'npc'].includes(type);
 }
 
 function getPlacementShapeParams(type) {
@@ -3408,6 +6439,40 @@ function createMesh(type, ghost = false, options = {}) {
   if (type === 'checkpoint') {
     mesh.userData.checkpointConfig = createDefaultCheckpointConfig();
   }
+  if (type === 'joint') {
+    mesh.userData.jointConfig = createDefaultJointConfig();
+  }
+  if (type === 'skeleton') {
+    mesh.userData.skeletonConfig = createDefaultSkeletonConfig();
+  }
+  if (type === 'teleport') {
+    mesh.userData.teleportConfig = normalizeTeleportConfig({});
+  }
+  if (type === 'text' || type === 'text3d') {
+    mesh.userData.textConfig = normalizeTextConfig(options.textConfig);
+    _applyTextTexture(mesh);
+  }
+  if (type === 'screen') {
+    mesh.userData.screenConfig = normalizeScreenConfig(options.screenConfig);
+    _applyScreenTexture(mesh);
+  }
+  if (type === 'camera') {
+    mesh.userData.cameraConfig = normalizeCameraConfig(options.cameraConfig);
+  }
+  if (type === 'npc') {
+    mesh.userData.npcConfig = normalizeNpcConfig(options.npcConfig);
+    mesh.userData.hitboxConfig = { mode: 'auto', offset: [0, 0.9, 0], size: [0.6, 1.8, 0.4] };
+    if (!ghost) _applyNpcAppearance(mesh);
+  }
+  if (type === 'terrain') {
+    const seg = shapeParams.segments ?? 64;
+    const sz  = shapeParams.terrainSize ?? 20;
+    const heightmap = options.heightmap || new Float32Array((seg + 1) * (seg + 1));
+    mesh.userData.terrainConfig = { segments: seg, terrainSize: sz, heightmap };
+    mesh.userData.collisionMode = 'geometry';   // terrain needs geometry collision for slopes
+    // Apply heightmap to geometry
+    _applyHeightmapToMesh(mesh);
+  }
   if (!ghost) setMeshOpacity(mesh, defaultOpacity);
   if (type === 'trigger') {
     mesh.userData.triggerRules = {};
@@ -3421,6 +6486,7 @@ function createMesh(type, ghost = false, options = {}) {
     pl.castShadow = true;
     pl.shadow.mapSize.set(LIGHT_BLOCK_SHADOW_MAP, LIGHT_BLOCK_SHADOW_MAP);
     pl.shadow.bias = LIGHT_BLOCK_SHADOW_BIAS;
+    pl.shadow.normalBias = 0.02;
     mesh.add(pl);
     mesh.userData.pointLight = pl;
     mesh.userData.lightDistance = pl.distance;
@@ -3428,7 +6494,7 @@ function createMesh(type, ghost = false, options = {}) {
   }
   if (!ghost) applyCustomSkinToMesh(mesh);
   // Default invisible-at-runtime types to hidden in game
-  if (['spawn', 'trigger', 'light', 'pivot'].includes(type)) {
+  if (['spawn', 'trigger', 'light', 'pivot', 'joint', 'skeleton', 'camera'].includes(type)) {
     mesh.userData.hiddenInGame = true;
   }
   return mesh;
@@ -3495,15 +6561,44 @@ transformControls.addEventListener('mouseDown', () => {
 });
 transformControls.addEventListener('mouseUp', () => {
   if (state.selectedObject && transformBefore) {
-    const after = captureTRS(state.selectedObject);
-    if (!trsEqual(transformBefore, after))
-      pushUndo({ type: 'transform', mesh: state.selectedObject, before: transformBefore, after });
+    const m = state.selectedObject;
+    const after = captureTRS(m);
+    const moved = !trsEqual(transformBefore, after);
+
+    // Draw Path: add checkpoint at new position then snap back
+    if (moved && m.userData._drawAnimPath) {
+      const cfg = getMeshMovementPathConfig(m);
+      cfg.checkpoints.push(normalizeMovementPathCheckpoint({ pos: m.position.toArray() }));
+      m.userData.movementPath = normalizeMovementPathConfig(cfg);
+      if (m.userData._drawAnimPathOrigin) m.position.copy(m.userData._drawAnimPathOrigin);
+      refreshSelectedPathPreview();
+      refreshProps();
+    }
+    // Normal mode: shift all checkpoints by the delta
+    else if (moved && !m.userData._drawAnimPath && state.transformMode !== 'scale') {
+      const dx = after.pos.x - transformBefore.pos.x;
+      const dy = after.pos.y - transformBefore.pos.y;
+      const dz = after.pos.z - transformBefore.pos.z;
+      const cfg = getMeshMovementPathConfig(m);
+      if (cfg.checkpoints.length) {
+        for (const cp of cfg.checkpoints) {
+          cp.pos[0] += dx;
+          cp.pos[1] += dy;
+          cp.pos[2] += dz;
+        }
+        m.userData.movementPath = normalizeMovementPathConfig(cfg);
+        refreshSelectedPathPreview();
+      }
+    }
+
+    if (moved && !m.userData._drawAnimPath)
+      pushUndo({ type: 'transform', mesh: m, before: transformBefore, after });
     // Commit extra selected undos
     for (let i = 0; i < state.extraSelected.length; i++) {
-      const m = state.extraSelected[i];
-      const a = captureTRS(m);
+      const em = state.extraSelected[i];
+      const a = captureTRS(em);
       if (extraTransformBefore[i] && !trsEqual(extraTransformBefore[i], a))
-        pushUndo({ type: 'transform', mesh: m, before: extraTransformBefore[i], after: a });
+        pushUndo({ type: 'transform', mesh: em, before: extraTransformBefore[i], after: a });
     }
     transformBefore = null;
     extraTransformBefore = [];
@@ -3740,6 +6835,14 @@ function selectObject(obj) {
   state.extraSelected.length = 0;
   extraSelBoxes.forEach(b => { b.visible = false; });
 
+  // Auto-uncheck Draw Path when deselecting
+  if (state.selectedObject && state.selectedObject !== obj && state.selectedObject.userData._drawAnimPath) {
+    const prev = state.selectedObject;
+    if (prev.userData._drawAnimPathOrigin) prev.position.copy(prev.userData._drawAnimPathOrigin);
+    delete prev.userData._drawAnimPath;
+    delete prev.userData._drawAnimPathOrigin;
+  }
+
   if (state.selectedObject) unhighlight(state.selectedObject);
   state.selectedObject = obj;
   if (obj) {
@@ -3885,14 +6988,23 @@ function ungroupSelected() {
 
 function highlight(mesh) {
   if (!mesh.material || mesh.userData._hi) return;
-  mesh.userData._hi = { emissive: mesh.material.emissive.getHex(), ei: mesh.material.emissiveIntensity };
-  mesh.material.emissive.set(0x2255cc);
-  mesh.material.emissiveIntensity = .4;
+  if (mesh.material.emissive) {
+    mesh.userData._hi = { emissive: mesh.material.emissive.getHex(), ei: mesh.material.emissiveIntensity };
+    mesh.material.emissive.set(0x2255cc);
+    mesh.material.emissiveIntensity = .4;
+  } else {
+    mesh.userData._hi = { color: mesh.material.color.getHex() };
+    mesh.material.color.set(0x5588ee);
+  }
 }
 function unhighlight(mesh) {
   if (!mesh.material || !mesh.userData._hi) return;
-  mesh.material.emissive.set(mesh.userData._hi.emissive);
-  mesh.material.emissiveIntensity = mesh.userData._hi.ei;
+  if (mesh.material.emissive && mesh.userData._hi.emissive !== undefined) {
+    mesh.material.emissive.set(mesh.userData._hi.emissive);
+    mesh.material.emissiveIntensity = mesh.userData._hi.ei;
+  } else if (mesh.userData._hi.color !== undefined) {
+    mesh.material.color.set(mesh.userData._hi.color);
+  }
   delete mesh.userData._hi;
 }
 
@@ -3935,6 +7047,7 @@ function addToScene(mesh) {
   sceneObjects.push(mesh);
   scene.add(mesh);
   if (typeof refreshObjLib === 'function') refreshObjLib();
+  markRestoreDirty();
 }
 function removeFromScene(mesh) {
   const i = sceneObjects.indexOf(mesh);
@@ -3942,6 +7055,7 @@ function removeFromScene(mesh) {
   if (state.selectedObject === mesh) selectObject(null);
   scene.remove(mesh);
   if (typeof refreshObjLib === 'function') refreshObjLib();
+  markRestoreDirty();
 }
 
 function setMeshGeometry(mesh, geometry) {
@@ -3993,6 +7107,16 @@ function applyAction(a) {
     setMeshOpacity(a.mesh, a.after);
     if (state.selectedObject === a.mesh) refreshProps();
   }
+  else if (a.type === 'metalness') {
+    if (a.mesh.material) { a.mesh.material.metalness = a.after; a.mesh.material.needsUpdate = true; }
+    a.mesh.userData.metalness = a.after;
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'roughness') {
+    if (a.mesh.material) { a.mesh.material.roughness = a.after; a.mesh.material.needsUpdate = true; }
+    a.mesh.userData.roughness = a.after;
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
   else if (a.type === 'geometry') {
     setMeshGeometry(a.mesh, a.after.clone());
     if (state.selectedObject === a.mesh) refreshProps();
@@ -4012,6 +7136,14 @@ function applyAction(a) {
   }
   else if (a.type === 'clear')  { a.meshes.forEach(removeFromScene); }
   else if (a.type === 'compound') { for (const op of a.ops) applyAction(op); }
+  else if (a.type === 'terrain-sculpt') {
+    a.mesh.userData.terrainConfig.heightmap = a.after.slice();
+    _applyHeightmapToMesh(a.mesh);
+  }
+  else if (a.type === 'texture-paint') {
+    if (a.afterPattern) applyTexturePaint(a.mesh, a.afterPattern.pattern, a.afterPattern.color1, a.afterPattern.color2, a.afterPattern.scale);
+    else applyTexturePaint(a.mesh, 'none', 0, 0, 1);
+  }
   else if (a.type === 'import') {
     a.before.forEach(removeFromScene);
     a.after.forEach(addToScene);
@@ -4058,6 +7190,16 @@ function applyInverse(a) {
     setMeshOpacity(a.mesh, a.before);
     if (state.selectedObject === a.mesh) refreshProps();
   }
+  else if (a.type === 'metalness') {
+    if (a.mesh.material) { a.mesh.material.metalness = a.before; a.mesh.material.needsUpdate = true; }
+    a.mesh.userData.metalness = a.before;
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'roughness') {
+    if (a.mesh.material) { a.mesh.material.roughness = a.before; a.mesh.material.needsUpdate = true; }
+    a.mesh.userData.roughness = a.before;
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
   else if (a.type === 'geometry') {
     setMeshGeometry(a.mesh, a.before.clone());
     if (state.selectedObject === a.mesh) refreshProps();
@@ -4077,6 +7219,14 @@ function applyInverse(a) {
   }
   else if (a.type === 'clear')  { a.meshes.forEach(addToScene); }
   else if (a.type === 'compound') { for (let i = a.ops.length - 1; i >= 0; i--) applyInverse(a.ops[i]); }
+  else if (a.type === 'terrain-sculpt') {
+    a.mesh.userData.terrainConfig.heightmap = a.before.slice();
+    _applyHeightmapToMesh(a.mesh);
+  }
+  else if (a.type === 'texture-paint') {
+    if (a.beforePattern) applyTexturePaint(a.mesh, a.beforePattern.pattern, a.beforePattern.color1, a.beforePattern.color2, a.beforePattern.scale);
+    else applyTexturePaint(a.mesh, 'none', 0, 0, 1);
+  }
   else if (a.type === 'import') {
     a.after.forEach(removeFromScene);
     a.before.forEach(addToScene);
@@ -4188,8 +7338,17 @@ function snap(v) {
 }
 function hitObject(ndc) {
   raycaster.setFromCamera(ndc, editorCam);
-  const hits = raycaster.intersectObjects(sceneObjects, false);
-  return hits.length ? hits[0].object : null;
+  const hits = raycaster.intersectObjects(sceneObjects, true);
+  if (!hits.length) return null;
+  // Map hit child back to its sceneObject parent
+  for (const h of hits) {
+    let obj = h.object;
+    while (obj) {
+      if (sceneObjects.includes(obj)) return obj;
+      obj = obj.parent;
+    }
+  }
+  return null;
 }
 
 // ─── Surface-snap helpers ────────────────────────────────────────────────────
@@ -4224,13 +7383,16 @@ function getPlacedY(type, shapeParams = {}, scale = null) {
 
 function surfaceHit(ndc) {
   raycaster.setFromCamera(ndc, editorCam);
-  const hits = raycaster.intersectObjects(sceneObjects, false);
+  const hits = raycaster.intersectObjects(sceneObjects, true);
   if (!hits.length || !hits[0].face) return null;
   const hit = hits[0];
+  // Map hit child back to its sceneObject parent
+  let obj = hit.object;
+  while (obj && !sceneObjects.includes(obj)) obj = obj.parent;
   const normal = hit.face.normal.clone()
     .transformDirection(hit.object.matrixWorld)
     .normalize();
-  return { point: hit.point, normal, object: hit.object };
+  return { point: hit.point, normal, object: obj || hit.object };
 }
 
 function computeSurfacePlacement(hitPoint, normal, ghostType, scale, shapeParams = {}) {
@@ -4346,7 +7508,12 @@ function eraseHoleAtHit(hit) {
     Math.max(targetSize.x, targetSize.y, targetSize.z) * 2.4
   );
 
-  const cutterPos = hit.point.clone();
+  // Match the ghost's snapped position: offset along normal, snap non-normal
+  // axes, then project back to the surface so the cutter intersects the target.
+  const halfSize = THREE.MathUtils.clamp(state.eraserSize * 0.5, 0.05, 6);
+  const cutterPos = hit.point.clone().addScaledVector(hit.normal, halfSize);
+  snapSurface(cutterPos, hit.normal);
+  cutterPos.addScaledVector(hit.normal, -halfSize);
   const cutter = makeEraserCutterMesh(cutterPos, hit.normal, throughDepth);
 
   target.updateMatrixWorld(true);
@@ -4358,6 +7525,7 @@ function eraseHoleAtHit(hit) {
     const beforeGeo = target.geometry.clone();
     const afterGeo = result.geometry.clone();
     target.userData.collisionMode = 'geometry';
+    target.userData._hasCustomGeometry = true;
     setMeshGeometry(target, result.geometry);
     pushUndo({ type: 'geometry', mesh: target, before: beforeGeo, after: afterGeo });
     if (state.selectedObject === target) selBox.setFromObject(target);
@@ -4383,6 +7551,544 @@ function clearAll() {
   meshes.forEach(removeFromScene);
   pushUndo({ type: 'clear', meshes });
   refreshStatus();
+}
+
+// ─── Copy / Paste ────────────────────────────────────────────────────────────
+function copySelected() {
+  const all = getAllSelected();
+  if (!all.length) return;
+  _clipboard = all.map(m => serializeSingleObject(m));
+  // Compute center of copied objects
+  _clipboardCenter.set(0, 0, 0);
+  for (const m of all) _clipboardCenter.add(m.position);
+  _clipboardCenter.divideScalar(all.length);
+  refreshStatus();
+}
+
+function pasteClipboard() {
+  if (!_clipboard.length) return;
+  // Paste offset: 2 units forward from editor camera
+  const dir = new THREE.Vector3();
+  editorCam.getWorldDirection(dir);
+  dir.y = 0;
+  if (dir.lengthSq() < 1e-6) dir.set(0, 0, -1);
+  dir.normalize();
+  const pasteCenter = editorCam.position.clone().add(dir.multiplyScalar(8));
+  pasteCenter.y = _clipboardCenter.y;
+  if (state.snapSize) {
+    pasteCenter.x = Math.round(pasteCenter.x / state.snapSize) * state.snapSize;
+    pasteCenter.z = Math.round(pasteCenter.z / state.snapSize) * state.snapSize;
+  }
+  const offset = pasteCenter.clone().sub(_clipboardCenter);
+  const newMeshes = [];
+  const newGroupMap = {};
+  for (const data of _clipboard) {
+    const d = JSON.parse(JSON.stringify(data));
+    d.position[0] += offset.x;
+    d.position[1] += offset.y;
+    d.position[2] += offset.z;
+    // Remap editor group ids so pasted objects get new groups
+    if (d.editorGroupId) {
+      if (!newGroupMap[d.editorGroupId]) newGroupMap[d.editorGroupId] = 'eg_' + (_nextEditorGroupId++);
+      d.editorGroupId = newGroupMap[d.editorGroupId];
+    }
+    const mesh = deserializeObject(d);
+    if (mesh) {
+      addToScene(mesh);
+      newMeshes.push(mesh);
+    }
+  }
+  if (newMeshes.length) {
+    pushUndo({ type: 'compound', ops: newMeshes.map(m => ({ type: 'add', mesh: m })) });
+    selectObject(newMeshes[0]);
+    if (newMeshes.length > 1) {
+      state.extraSelected = newMeshes.slice(1);
+      rebuildExtraBoxes();
+    }
+  }
+  refreshStatus();
+}
+
+function duplicateSelected() {
+  const all = getAllSelected();
+  if (!all.length) return;
+  const serialized = all.map(m => serializeSingleObject(m));
+  const center = new THREE.Vector3();
+  for (const m of all) center.add(m.position);
+  center.divideScalar(all.length);
+  const offset = new THREE.Vector3(state.snapSize || 1, 0, 0);
+  const newMeshes = [];
+  const newGroupMap = {};
+  for (const data of serialized) {
+    const d = JSON.parse(JSON.stringify(data));
+    d.position[0] += offset.x;
+    d.position[1] += offset.y;
+    d.position[2] += offset.z;
+    if (d.editorGroupId) {
+      if (!newGroupMap[d.editorGroupId]) newGroupMap[d.editorGroupId] = 'eg_' + (_nextEditorGroupId++);
+      d.editorGroupId = newGroupMap[d.editorGroupId];
+    }
+    const mesh = deserializeObject(d);
+    if (mesh) {
+      addToScene(mesh);
+      newMeshes.push(mesh);
+    }
+  }
+  if (newMeshes.length) {
+    pushUndo({ type: 'compound', ops: newMeshes.map(m => ({ type: 'add', mesh: m })) });
+    selectObject(newMeshes[0]);
+    if (newMeshes.length > 1) {
+      state.extraSelected = newMeshes.slice(1);
+      rebuildExtraBoxes();
+    }
+  }
+  refreshStatus();
+}
+
+// ─── Custom Object Templates ────────────────────────────────────────────────
+function saveSelectionAsCustomObject(name) {
+  const all = getAllSelected();
+  if (!all.length) return;
+  // Compute center
+  const center = new THREE.Vector3();
+  for (const m of all) center.add(m.position);
+  center.divideScalar(all.length);
+  // Serialize with positions relative to center
+  const objects = all.map(m => {
+    const d = serializeSingleObject(m);
+    d.position[0] -= center.x;
+    d.position[1] -= center.y;
+    d.position[2] -= center.z;
+    return d;
+  });
+  const templateName = name || 'Custom ' + _nextCustomTemplateId;
+  const template = {
+    id: 'ct_' + (_nextCustomTemplateId++),
+    name: templateName,
+    objects,
+    color: all[0].material?.color ? all[0].material.color.getHex() : 0x888888,
+  };
+  customObjectTemplates.push(template);
+  refreshCustomObjectUI();
+  refreshObjLib();
+  markRestoreDirty();
+}
+
+function placeCustomTemplate(templateId, pos) {
+  const template = customObjectTemplates.find(t => t.id === templateId);
+  if (!template) return;
+  const newMeshes = [];
+  const newGroupId = 'eg_' + (_nextEditorGroupId++);
+  for (const data of template.objects) {
+    const d = JSON.parse(JSON.stringify(data));
+    d.position[0] += pos.x;
+    d.position[1] += pos.y;
+    d.position[2] += pos.z;
+    // Link as editor group if multiple
+    if (template.objects.length > 1) d.editorGroupId = newGroupId;
+    const mesh = deserializeObject(d);
+    if (mesh) {
+      addToScene(mesh);
+      newMeshes.push(mesh);
+    }
+  }
+  if (newMeshes.length) {
+    pushUndo({ type: 'compound', ops: newMeshes.map(m => ({ type: 'add', mesh: m })) });
+  }
+  refreshStatus();
+}
+
+function deleteCustomTemplate(templateId) {
+  const idx = customObjectTemplates.findIndex(t => t.id === templateId);
+  if (idx >= 0) {
+    customObjectTemplates.splice(idx, 1);
+    refreshCustomObjectUI();
+    refreshObjLib();
+    markRestoreDirty();
+  }
+}
+
+function serializeCustomObjectTemplates() {
+  return customObjectTemplates.map(t => ({ ...t, objects: t.objects.map(o => ({ ...o })) }));
+}
+
+function loadCustomObjectTemplates(arr) {
+  customObjectTemplates.length = 0;
+  if (!Array.isArray(arr)) return;
+  for (const t of arr) {
+    customObjectTemplates.push({
+      id: t.id || 'ct_' + (_nextCustomTemplateId++),
+      name: t.name || 'Custom',
+      objects: Array.isArray(t.objects) ? t.objects : [],
+      color: t.color ?? 0x888888,
+    });
+    const numId = parseInt(String(t.id).replace('ct_', ''), 10);
+    if (Number.isFinite(numId) && numId >= _nextCustomTemplateId) _nextCustomTemplateId = numId + 1;
+  }
+  refreshCustomObjectUI();
+}
+
+function refreshCustomObjectUI() {
+  const container = document.getElementById('custom-objects-list');
+  if (!container) return;
+  container.innerHTML = '';
+  if (!customObjectTemplates.length) {
+    container.innerHTML = '<div style="font-size:10px;color:var(--muted);padding:4px 8px">No custom objects saved yet.<br>Select objects and click "Save as Custom".</div>';
+    return;
+  }
+  for (const t of customObjectTemplates) {
+    const div = document.createElement('div');
+    div.className = 'custom-tpl-item';
+    div.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 8px;cursor:pointer;border-radius:4px;font-size:11px;background:#111821;border:1px solid #1d2430;margin-bottom:3px;';
+    const colorHex = '#' + (t.color ?? 0x888888).toString(16).padStart(6, '0');
+    div.innerHTML = `
+      <span style="display:inline-block;width:18px;height:18px;border-radius:3px;background:${colorHex};flex-shrink:0"></span>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(t.name)} <span style="color:#8b949e">(${t.objects.length})</span></span>
+      <button class="ct-place-btn" title="Place this custom object" style="font-size:10px;padding:1px 5px;cursor:pointer">⊕</button>
+      <button class="ct-del-btn" title="Delete template" style="font-size:10px;padding:1px 5px;cursor:pointer;color:#f85149">✕</button>
+    `;
+    div.querySelector('.ct-place-btn').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      state._placingCustomTemplate = t.id;
+      state.mode = 'place';
+      if (modeSelect) modeSelect.value = 'place';
+      refreshStatus();
+    });
+    div.querySelector('.ct-del-btn').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      deleteCustomTemplate(t.id);
+    });
+    container.appendChild(div);
+  }
+}
+
+// ─── Terrain Sculpting ──────────────────────────────────────────────────────
+function _applyHeightmapToMesh(mesh) {
+  const tc = mesh.userData.terrainConfig;
+  if (!tc) return;
+  const pos = mesh.geometry.attributes.position;
+  const hm = tc.heightmap;
+  for (let i = 0; i < pos.count; i++) {
+    if (i < hm.length) pos.setY(i, hm[i]);
+  }
+  pos.needsUpdate = true;
+  mesh.geometry.computeVertexNormals();
+  mesh.geometry.computeBoundingBox();
+  mesh.geometry.computeBoundingSphere();
+  // Invalidate cached collision AABB
+  mesh.userData._cachedCollisionAABB = null;
+}
+
+function _getTerrainVertexIndex(tc, localX, localZ) {
+  const seg = tc.segments;
+  const sz = tc.terrainSize;
+  const halfSize = sz / 2;
+  const col = Math.round(((localX + halfSize) / sz) * seg);
+  const row = Math.round(((localZ + halfSize) / sz) * seg);
+  if (col < 0 || col > seg || row < 0 || row > seg) return -1;
+  return row * (seg + 1) + col;
+}
+
+function sculptTerrain(mesh, worldPoint, brush, radius, strength) {
+  const tc = mesh.userData.terrainConfig;
+  if (!tc) return;
+  const hm = tc.heightmap;
+  const seg = tc.segments;
+  const sz = tc.terrainSize;
+  const halfSize = sz / 2;
+
+  // Convert world point to local space
+  const invMatrix = new THREE.Matrix4().copy(mesh.matrixWorld).invert();
+  const localPt = worldPoint.clone().applyMatrix4(invMatrix);
+
+  const cellSize = sz / seg;
+  const radiusCells = Math.ceil(radius / cellSize);
+  const centerCol = Math.round(((localPt.x + halfSize) / sz) * seg);
+  const centerRow = Math.round(((localPt.z + halfSize) / sz) * seg);
+
+  // Precompute flatten target
+  let flattenY = 0;
+  if (brush === 'flatten') {
+    const ci = _getTerrainVertexIndex(tc, localPt.x, localPt.z);
+    flattenY = ci >= 0 && ci < hm.length ? hm[ci] : 0;
+  }
+
+  // Smooth: gather neighbors for averaging
+  let smoothBuffer = null;
+  if (brush === 'smooth') {
+    smoothBuffer = new Float32Array(hm.length);
+    smoothBuffer.set(hm);
+  }
+
+  for (let dr = -radiusCells; dr <= radiusCells; dr++) {
+    for (let dc = -radiusCells; dc <= radiusCells; dc++) {
+      const r = centerRow + dr;
+      const c = centerCol + dc;
+      if (r < 0 || r > seg || c < 0 || c > seg) continue;
+      const idx = r * (seg + 1) + c;
+      if (idx < 0 || idx >= hm.length) continue;
+
+      const vx = (c / seg) * sz - halfSize;
+      const vz = (r / seg) * sz - halfSize;
+      const dist = Math.sqrt((vx - localPt.x) ** 2 + (vz - localPt.z) ** 2);
+      if (dist > radius) continue;
+      const falloff = 1 - (dist / radius);
+
+      if (brush === 'raise') {
+        hm[idx] += strength * falloff;
+      } else if (brush === 'lower') {
+        hm[idx] -= strength * falloff;
+      } else if (brush === 'flatten') {
+        hm[idx] += (flattenY - hm[idx]) * falloff * strength * 0.5;
+      } else if (brush === 'smooth') {
+        // Average of neighbors
+        let sum = 0, count = 0;
+        for (let sr = -1; sr <= 1; sr++) {
+          for (let sc = -1; sc <= 1; sc++) {
+            const nr = r + sr, nc = c + sc;
+            if (nr < 0 || nr > seg || nc < 0 || nc > seg) continue;
+            const ni = nr * (seg + 1) + nc;
+            if (ni >= 0 && ni < smoothBuffer.length) { sum += smoothBuffer[ni]; count++; }
+          }
+        }
+        if (count) hm[idx] += ((sum / count) - hm[idx]) * falloff * strength;
+      }
+    }
+  }
+  _applyHeightmapToMesh(mesh);
+}
+
+function handleTerrainSculptClick(e) {
+  if (!terrainSculptState.active) return false;
+  const ndc = toNDC(e);
+  raycaster.setFromCamera(ndc, editorCam);
+  let terrains = sceneObjects.filter(m => m.userData.type === 'terrain');
+  let hits = raycaster.intersectObjects(terrains, false);
+
+  // If no terrain hit, check if the click landed on the ground floor (Y ≈ 0)
+  // and auto-create a terrain block there
+  if (!hits.length) {
+    const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const groundPt = new THREE.Vector3();
+    if (raycaster.ray.intersectPlane(groundPlane, groundPt)) {
+      const seg = 64;
+      const sz = 20;
+      const mesh = createMesh('terrain', false, { shapeParams: { segments: seg, terrainSize: sz } });
+      mesh.position.set(
+        Math.round(groundPt.x / sz) * sz,
+        0,
+        Math.round(groundPt.z / sz) * sz
+      );
+      addToScene(mesh);
+      pushUndo({ type: 'add', mesh });
+      terrains = [mesh];
+      hits = raycaster.intersectObjects(terrains, false);
+      if (!hits.length) return false;
+    } else {
+      return false;
+    }
+  }
+
+  const hit = hits[0];
+  _terrainSculptBeforeState = hit.object.userData.terrainConfig.heightmap.slice();
+  _terrainSculptMesh = hit.object;
+  sculptTerrain(hit.object, hit.point, terrainSculptState.brush, terrainSculptState.radius, terrainSculptState.strength);
+  terrainSculptState._painting = true;
+  return true;
+}
+
+let _terrainSculptBeforeState = null;
+let _terrainSculptMesh = null;
+
+function handleTerrainSculptDrag(e) {
+  if (!terrainSculptState._painting) return;
+  const ndc = toNDC(e);
+  raycaster.setFromCamera(ndc, editorCam);
+  const terrains = sceneObjects.filter(m => m.userData.type === 'terrain');
+  const hits = raycaster.intersectObjects(terrains, false);
+  if (!hits.length) return;
+  sculptTerrain(hits[0].object, hits[0].point, terrainSculptState.brush, terrainSculptState.radius, terrainSculptState.strength);
+}
+
+function handleTerrainSculptEnd() {
+  if (!terrainSculptState._painting) return;
+  terrainSculptState._painting = false;
+  if (_terrainSculptMesh && _terrainSculptBeforeState) {
+    const before = _terrainSculptBeforeState;
+    const after = _terrainSculptMesh.userData.terrainConfig.heightmap.slice();
+    const mesh = _terrainSculptMesh;
+    pushUndo({
+      type: 'terrain-sculpt',
+      mesh,
+      before,
+      after,
+    });
+  }
+  _terrainSculptBeforeState = null;
+  _terrainSculptMesh = null;
+}
+
+// ─── Texture Paint ──────────────────────────────────────────────────────────
+function _generatePatternCanvas(pattern, color1, color2, scale) {
+  const size = Math.max(32, Math.round(64 * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const c1 = '#' + color1.toString(16).padStart(6, '0');
+  const c2 = '#' + color2.toString(16).padStart(6, '0');
+
+  ctx.fillStyle = c1;
+  ctx.fillRect(0, 0, size, size);
+
+  if (pattern === 'checker') {
+    ctx.fillStyle = c2;
+    const half = size / 2;
+    ctx.fillRect(0, 0, half, half);
+    ctx.fillRect(half, half, half, half);
+  } else if (pattern === 'brick') {
+    ctx.fillStyle = c2;
+    const bh = size / 4;
+    ctx.lineWidth = Math.max(1, size / 32);
+    ctx.strokeStyle = c2;
+    for (let row = 0; row < 4; row++) {
+      const y = row * bh;
+      ctx.strokeRect(0, y, size, bh);
+      const off = row % 2 === 0 ? 0 : size / 2;
+      ctx.beginPath();
+      ctx.moveTo(off + size / 2, y);
+      ctx.lineTo(off + size / 2, y + bh);
+      ctx.stroke();
+      if (row % 2 === 1) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(0, y + bh);
+        ctx.stroke();
+      }
+    }
+  } else if (pattern === 'stripe') {
+    ctx.fillStyle = c2;
+    const step = size / 8;
+    for (let i = 0; i < 8; i += 2) {
+      ctx.fillRect(0, i * step, size, step);
+    }
+  } else if (pattern === 'grid') {
+    ctx.strokeStyle = c2;
+    ctx.lineWidth = Math.max(1, size / 32);
+    const step = size / 4;
+    for (let i = 0; i <= 4; i++) {
+      ctx.beginPath(); ctx.moveTo(i * step, 0); ctx.lineTo(i * step, size); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, i * step); ctx.lineTo(size, i * step); ctx.stroke();
+    }
+  } else if (pattern === 'noise') {
+    const imgData = ctx.getImageData(0, 0, size, size);
+    const r1 = parseInt(c1.slice(1, 3), 16), g1 = parseInt(c1.slice(3, 5), 16), b1 = parseInt(c1.slice(5, 7), 16);
+    const r2 = parseInt(c2.slice(1, 3), 16), g2 = parseInt(c2.slice(3, 5), 16), b2 = parseInt(c2.slice(5, 7), 16);
+    for (let p = 0; p < imgData.data.length; p += 4) {
+      const t = Math.random();
+      imgData.data[p]     = Math.round(r1 + (r2 - r1) * t);
+      imgData.data[p + 1] = Math.round(g1 + (g2 - g1) * t);
+      imgData.data[p + 2] = Math.round(b1 + (b2 - b1) * t);
+      imgData.data[p + 3] = 255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+  } else if (pattern === 'gradient') {
+    const grad = ctx.createLinearGradient(0, 0, 0, size);
+    grad.addColorStop(0, c1);
+    grad.addColorStop(1, c2);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+  } else if (pattern === 'wood') {
+    // Wood grain - horizontal wavy lines
+    const r1 = parseInt(c1.slice(1, 3), 16), g1 = parseInt(c1.slice(3, 5), 16), b1 = parseInt(c1.slice(5, 7), 16);
+    const r2 = parseInt(c2.slice(1, 3), 16), g2 = parseInt(c2.slice(3, 5), 16), b2 = parseInt(c2.slice(5, 7), 16);
+    const imgData = ctx.getImageData(0, 0, size, size);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const grain = (Math.sin((y / size) * 30 + Math.sin(x / size * 8) * 2) + 1) * 0.5;
+        const t = grain * 0.6 + Math.random() * 0.1;
+        const i = (y * size + x) * 4;
+        imgData.data[i]     = Math.round(r1 + (r2 - r1) * t);
+        imgData.data[i + 1] = Math.round(g1 + (g2 - g1) * t);
+        imgData.data[i + 2] = Math.round(b1 + (b2 - b1) * t);
+        imgData.data[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+  } else if (pattern === 'cobblestone') {
+    // Cobblestone - rounded irregular shapes
+    ctx.fillStyle = c2;
+    const cols = 4, rows = 4;
+    const cw = size / cols, ch = size / rows;
+    for (let r = 0; r < rows; r++) {
+      for (let c2i = 0; c2i < cols; c2i++) {
+        const cx = c2i * cw + cw / 2 + (Math.random() - 0.5) * cw * 0.3;
+        const cy = r * ch + ch / 2 + (Math.random() - 0.5) * ch * 0.3;
+        const rx = cw * 0.38 + (Math.random() - 0.5) * cw * 0.1;
+        const ry = ch * 0.38 + (Math.random() - 0.5) * ch * 0.1;
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, rx, ry, Math.random() * 0.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    // Mortar lines
+    ctx.strokeStyle = c1;
+    ctx.lineWidth = Math.max(1, size / 32);
+    for (let i = 1; i < cols; i++) {
+      const x = i * cw + (Math.random() - 0.5) * 2;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + (Math.random() - 0.5) * 4, size); ctx.stroke();
+    }
+    for (let i = 1; i < rows; i++) {
+      const y = i * ch + (Math.random() - 0.5) * 2;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(size, y + (Math.random() - 0.5) * 4); ctx.stroke();
+    }
+  } else if (pattern === 'marble') {
+    // Marble - soft veins
+    const r1 = parseInt(c1.slice(1, 3), 16), g1 = parseInt(c1.slice(3, 5), 16), b1 = parseInt(c1.slice(5, 7), 16);
+    const r2 = parseInt(c2.slice(1, 3), 16), g2 = parseInt(c2.slice(3, 5), 16), b2 = parseInt(c2.slice(5, 7), 16);
+    const imgData = ctx.getImageData(0, 0, size, size);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const v = Math.sin(x / size * 10 + Math.sin(y / size * 6) * 3 + Math.random() * 0.5);
+        const t = (v + 1) * 0.5 * 0.4 + Math.random() * 0.05;
+        const i = (y * size + x) * 4;
+        imgData.data[i]     = Math.round(r1 + (r2 - r1) * t);
+        imgData.data[i + 1] = Math.round(g1 + (g2 - g1) * t);
+        imgData.data[i + 2] = Math.round(b1 + (b2 - b1) * t);
+        imgData.data[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+  }
+  return canvas;
+}
+
+function applyTexturePaint(mesh, pattern, color1, color2, scale, customImg) {
+  if (!mesh?.material) return;
+  if (pattern === 'none') {
+    if (mesh.material.map) {
+      mesh.material.map.dispose();
+      mesh.material.map = null;
+      mesh.material.needsUpdate = true;
+    }
+    mesh.userData._texturePattern = null;
+    return;
+  }
+  let tex;
+  if (pattern === 'custom' && customImg) {
+    tex = new THREE.Texture(customImg);
+    tex.needsUpdate = true;
+  } else {
+    const canvas = _generatePatternCanvas(pattern, color1, color2, scale);
+    tex = new THREE.CanvasTexture(canvas);
+  }
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(1, 1);
+  if (mesh.material.map) mesh.material.map.dispose();
+  mesh.material.map = tex;
+  mesh.material.needsUpdate = true;
+  mesh.userData._texturePattern = { pattern, color1, color2, scale };
 }
 
 // ─── Save / load ─────────────────────────────────────────────────────────────
@@ -4417,7 +8123,7 @@ function serializeSettings() {
     },
     gameRules: { ...gameRules },
     gameRulesVarBinds: { ...gameRulesVarBinds },
-    gridFill: { enabled: gridFillEnabled, color: gridFillColor },
+    gridFill: { enabled: gridFillEnabled, color: gridFillColor, texture: gridFillTexture },
     worldBorder: { enabled: worldBorderEnabled, minX: worldBorderMinX, maxX: worldBorderMaxX, minZ: worldBorderMinZ, maxZ: worldBorderMaxZ },
     worlds: worlds.map(w => ({ ...w })),
     activeWorldId,
@@ -4450,9 +8156,14 @@ function serializeSettings() {
     gameBools: gameBools.map(normalizeGameBoolEntry),
     playerProfile: normalizePlayerProfile(playerProfile),
     audioLibrary: audioLibrary.map(item => ({ ...item })),
+    customFonts: customFonts.map(f => ({ name: f.name, dataUrl: f.dataUrl })),
     controlFunctionGroups: controlFunctionGroups.map(normalizeControlFunctionGroup),
     controlFunctions: controlFunctions.map(normalizeControlFunction),
     customBlockSkins: serializeCustomBlockSkins(),
+    customSculptSkins: serializeCustomSculptSkins(),
+    skeletonDefinitions: serializeSkeletonDefinitions(),
+    keybinds: { ...keybinds },
+    customObjectTemplates: serializeCustomObjectTemplates(),
   };
 }
 
@@ -4469,6 +8180,7 @@ function applySunUI() {
   syncSunInputs();
   updateSunSky();
   refreshStatus();
+  markRestoreDirty();
 }
 
 function applySceneSettings(settings = {}) {
@@ -4539,9 +8251,12 @@ function applySceneSettings(settings = {}) {
   if (settings.gridFill) {
     gridFillEnabled = !!settings.gridFill.enabled;
     gridFillColor = settings.gridFill.color ?? 0x1a2636;
+    gridFillTexture = settings.gridFill.texture || 'none';
     gridFillEnabledInput.checked = gridFillEnabled;
     gridFillColorInput.value = '#' + gridFillColor.toString(16).padStart(6, '0');
-    setGridFill(gridFillEnabled, gridFillColor);
+    const texSel = document.getElementById('grid-fill-texture');
+    if (texSel) texSel.value = gridFillTexture;
+    setGridFill(gridFillEnabled, gridFillColor, gridFillTexture);
   }
   // Restore world border
   if (settings.worldBorder) {
@@ -4621,6 +8336,15 @@ function applySceneSettings(settings = {}) {
     }
   }
   refreshAudioLibraryUI();
+  customFonts.length = 0;
+  if (Array.isArray(settings.customFonts)) {
+    for (const entry of settings.customFonts) {
+      if (entry && entry.name && entry.dataUrl) {
+        customFonts.push({ name: String(entry.name), dataUrl: String(entry.dataUrl) });
+        _registerCustomFont(entry);
+      }
+    }
+  }
   if (settings.controlFunctionGroups) {
     controlFunctionGroups.length = 0;
     for (const group of settings.controlFunctionGroups) {
@@ -4637,6 +8361,14 @@ function applySceneSettings(settings = {}) {
     }
   }
   setCustomBlockSkinsMap(settings.customBlockSkins || {});
+  setCustomSculptSkinsMap(settings.customSculptSkins || {});
+  setSkeletonDefinitionsMap(settings.skeletonDefinitions || {});
+  // Restore keybinds
+  if (settings.keybinds) {
+    Object.assign(keybinds, DEFAULT_KEYBINDS, settings.keybinds);
+    syncKeybindButtons();
+  }
+  loadCustomObjectTemplates(settings.customObjectTemplates || []);
   ensureControlFunctionGroups();
   refreshVarPanel();
   refreshBoolPanel();
@@ -4685,6 +8417,9 @@ function serializeScene() {
     if (m.userData.checkpointConfig) {
       o.checkpointConfig = normalizeCheckpointConfig(m.userData.checkpointConfig);
     }
+    if (m.userData.teleportConfig) {
+      o.teleportConfig = normalizeTeleportConfig(m.userData.teleportConfig);
+    }
     if (m.userData.triggerStopConfig) {
       const stopConfig = normalizeTriggerStopConfig(m.userData.triggerStopConfig);
       if (stopConfig.mode !== 'none' || stopConfig.functionNames.length) o.triggerStopConfig = stopConfig;
@@ -4702,6 +8437,39 @@ function serializeScene() {
     if (switchConfig.enabled) o.switchConfig = switchConfig;
     if (m.userData.type === 'keypad') {
       o.keypadConfig = normalizeKeypadConfig(m.userData.keypadConfig);
+    }
+    if (m.userData.type === 'joint' && m.userData.jointConfig) {
+      o.jointConfig = normalizeJointConfig(m.userData.jointConfig);
+    }
+    if (m.userData.type === 'skeleton' && m.userData.skeletonConfig) {
+      o.skeletonConfig = normalizeSkeletonConfig(m.userData.skeletonConfig);
+    }
+    if (m.userData.type === 'terrain' && m.userData.terrainConfig) {
+      o.terrainConfig = {
+        segments: m.userData.terrainConfig.segments,
+        terrainSize: m.userData.terrainConfig.terrainSize,
+        heightmap: Array.from(m.userData.terrainConfig.heightmap),
+      };
+    }
+    if (m.userData._texturePattern) {
+      o.texturePattern = { ...m.userData._texturePattern };
+    }
+    if (m.userData.textConfig) {
+      o.textConfig = normalizeTextConfig(m.userData.textConfig);
+    }
+    if (m.userData.screenConfig) {
+      o.screenConfig = normalizeScreenConfig(m.userData.screenConfig);
+    }
+    if (m.userData.cameraConfig) {
+      o.cameraConfig = normalizeCameraConfig(m.userData.cameraConfig);
+    }
+    if (m.userData.type === 'npc' && m.userData.npcConfig) {
+      o.npcConfig = normalizeNpcConfig(m.userData.npcConfig);
+    }
+    if (m.userData.metalness !== undefined) o.metalness = m.userData.metalness;
+    if (m.userData.roughness !== undefined) o.roughness = m.userData.roughness;
+    if (m.userData._hasCustomGeometry) {
+      o.customGeometry = _serializeBufferGeometry(m.geometry);
     }
     return o;
   });
@@ -4734,6 +8502,8 @@ function deserializeObject(d) {
   if (d.hitboxConfig) mesh.userData.hitboxConfig = normalizeHitboxConfig(d.hitboxConfig);
   if (d.solidness !== undefined) mesh.userData.solidness = clampMeshSolidness(parseFloat(d.solidness));
   if (d.opacity !== undefined) setMeshOpacity(mesh, parseFloat(d.opacity));
+  if (d.metalness !== undefined) { mesh.material.metalness = parseFloat(d.metalness); mesh.userData.metalness = mesh.material.metalness; }
+  if (d.roughness !== undefined) { mesh.material.roughness = parseFloat(d.roughness); mesh.userData.roughness = mesh.material.roughness; }
   if (d.traction !== undefined) mesh.userData.traction = !!d.traction;
   if (d.hiddenInGame) mesh.userData.hiddenInGame = true;
   if (d.label) mesh.userData.label = d.label;
@@ -4744,6 +8514,7 @@ function deserializeObject(d) {
   if (d.triggerRules) mesh.userData.triggerRules = { ...d.triggerRules };
   if (d.movementPath) mesh.userData.movementPath = normalizeMovementPathConfig(d.movementPath);
   if (d.checkpointConfig) mesh.userData.checkpointConfig = normalizeCheckpointConfig(d.checkpointConfig);
+  if (d.teleportConfig) mesh.userData.teleportConfig = normalizeTeleportConfig(d.teleportConfig);
   if (d.triggerStopConfig) mesh.userData.triggerStopConfig = normalizeTriggerStopConfig(d.triggerStopConfig);
   if (d.triggerCalls) mesh.userData.triggerCalls = normalizeTriggerCalls(d.triggerCalls);
   // Keep legacy data for migration
@@ -4757,6 +8528,42 @@ function deserializeObject(d) {
   if (d.targetMaxHealth !== undefined) mesh.userData.targetMaxHealth = d.targetMaxHealth;
   if (d.switchConfig) mesh.userData.switchConfig = normalizeSwitchConfig(d.switchConfig);
   if (d.keypadConfig && d.type === 'keypad') mesh.userData.keypadConfig = normalizeKeypadConfig(d.keypadConfig);
+  if (d.jointConfig && d.type === 'joint') mesh.userData.jointConfig = normalizeJointConfig(d.jointConfig);
+  if (d.skeletonConfig && d.type === 'skeleton') mesh.userData.skeletonConfig = normalizeSkeletonConfig(d.skeletonConfig);
+  if (d.terrainConfig && d.type === 'terrain') {
+    const tc = d.terrainConfig;
+    const seg = tc.segments ?? 64;
+    mesh.userData.terrainConfig = {
+      segments: seg,
+      terrainSize: tc.terrainSize ?? 20,
+      heightmap: new Float32Array(Array.isArray(tc.heightmap) ? tc.heightmap : (seg + 1) * (seg + 1)),
+    };
+    _applyHeightmapToMesh(mesh);
+  }
+  if (d.texturePattern) {
+    applyTexturePaint(mesh, d.texturePattern.pattern, d.texturePattern.color1, d.texturePattern.color2, d.texturePattern.scale);
+  }
+  if (d.textConfig && (d.type === 'text' || d.type === 'text3d')) {
+    mesh.userData.textConfig = normalizeTextConfig(d.textConfig);
+    _applyTextTexture(mesh);
+  }
+  if (d.screenConfig && d.type === 'screen') {
+    mesh.userData.screenConfig = normalizeScreenConfig(d.screenConfig);
+    _applyScreenTexture(mesh);
+  }
+  if (d.cameraConfig && d.type === 'camera') {
+    mesh.userData.cameraConfig = normalizeCameraConfig(d.cameraConfig);
+  }
+  if (d.npcConfig && d.type === 'npc') {
+    mesh.userData.npcConfig = normalizeNpcConfig(d.npcConfig);
+    _applyNpcAppearance(mesh);
+  }
+  if (d.customGeometry) {
+    const restoredGeo = _deserializeBufferGeometry(d.customGeometry);
+    setMeshGeometry(mesh, restoredGeo);
+    mesh.userData._hasCustomGeometry = true;
+    mesh.userData.collisionMode = 'geometry';
+  }
   if (d.lightColor !== undefined && mesh.userData.pointLight) {
     mesh.userData.pointLight.color.setHex(d.lightColor);
     mesh.userData.pointLight.distance  = d.lightDistance ?? mesh.userData.pointLight.distance;
@@ -4930,6 +8737,8 @@ function saveEditorSettings() {
     functionsPanelCollapsed: functionsPanelState.collapsed,
     activeLibraryPane,
     customBlockSkins: serializeCustomBlockSkins(),
+    customSculptSkins: serializeCustomSculptSkins(),
+    customObjectTemplates: serializeCustomObjectTemplates(),
   }));
 }
 
@@ -4967,6 +8776,9 @@ function loadEditorSettings() {
     if (s.activeLibraryPane) activeLibraryPane = s.activeLibraryPane === 'audio' ? 'audio' : 'objects';
     if (s.customBlockSkins && typeof s.customBlockSkins === 'object') {
       setCustomBlockSkinsMap(s.customBlockSkins);
+    }
+    if (s.customSculptSkins && typeof s.customSculptSkins === 'object') {
+      setCustomSculptSkinsMap(s.customSculptSkins);
     }
   } catch { /* corrupt data: ignore */ }
 }
@@ -5270,6 +9082,9 @@ function createDefaultFunctionAction() {
     teleportCoords: [0, 0, 0],
     teleportWorldId: '',
     teleportTargetRef: '',
+    skelAnimCommand: 'play',
+    skelAnimClip: '',
+    skelAnimSpeed: 1,
   };
 }
 
@@ -5325,6 +9140,9 @@ function normalizeFunctionAction(config = {}) {
     teleportCoords: normalizeVec(config.teleportCoords ?? [0, 0, 0]),
     teleportWorldId: String(config.teleportWorldId ?? '').trim(),
     teleportTargetRef: String(config.teleportTargetRef ?? '').trim(),
+    skelAnimCommand: SKELETON_ANIM_COMMANDS.includes(config.skelAnimCommand) ? config.skelAnimCommand : 'play',
+    skelAnimClip: String(config.skelAnimClip ?? '').trim(),
+    skelAnimSpeed: Math.max(0, Number.isFinite(parseFloat(config.skelAnimSpeed)) ? parseFloat(config.skelAnimSpeed) : 1),
   };
 }
 
@@ -6222,6 +10040,9 @@ function showMainMenu() {
     return;
   }
   if (state.isPlaytest) stopPlaytest();
+  // Flush any pending auto-save before leaving studio, then stop the timer
+  if (_restoreDirty) _flushRestore();
+  if (_restoreTimer) { clearTimeout(_restoreTimer); _restoreTimer = null; }
   renderProjectLibrary();
   if (mainMenuEl) mainMenuEl.classList.remove('hidden');
   if (topbarEl) topbarEl.classList.add('studio-hidden');
@@ -6239,8 +10060,11 @@ function showStudio() {
   if (functionsPanelEl) functionsPanelEl.style.display = runtimeMode ? 'none' : '';
   if (functionsResizerEl) functionsResizerEl.style.display = runtimeMode ? 'none' : '';
   if (runtimeMode) applyRuntimeChrome();
+  syncSunInputs();
+  updateSunSky();
   onResize();
   refreshStatus();
+  _offerRestore();
 }
 
 function resetSceneForNewProject() {
@@ -6250,6 +10074,21 @@ function resetSceneForNewProject() {
   toRemove.forEach(removeFromScene);
   undoStack.length = 0;
   redoStack.length = 0;
+  // Clear project-scoped collections so nothing leaks between projects
+  controlFunctions.length = 0;
+  _controlFunctionStates.clear();
+  conditionalTriggers.length = 0;
+  gameVars.length = 0;
+  gameBools.length = 0;
+  // Reset all project-level state to defaults so nothing leaks between projects
+  applySceneSettings({});
+  // Reset worlds to a single default world
+  worlds.length = 0;
+  worlds.push({ id: 'world_1', name: 'World 1', objects: [] });
+  activeWorldId = 'world_1';
+  _nextWorldId = 2;
+  refreshWorldUI();
+  refreshControlFunctionsUI();
   syncUndoUI();
   refreshStatus();
 }
@@ -6258,6 +10097,11 @@ function startNewProject() {
   currentProjectId = null;
   currentProjectName = '';
   resetSceneForNewProject();
+  _pendingRestore = null;
+  clearRestoreSlot();
+  syncSunInputs();
+  updateSunSky();
+  applyFogSettings();
   showStudio();
 }
 
@@ -6266,8 +10110,13 @@ function openProjectById(projectId) {
   if (!project) return;
   const raw = project.payload || project.data;
   const payload = typeof raw === 'string' ? raw : (raw ? JSON.stringify(raw) : null);
+  // Clear previous project state before loading new one
+  resetSceneForNewProject();
   currentProjectId = project.id;
   currentProjectName = project.name || '';
+  // Clear any pending restore so it doesn't offer to overwrite the project we just opened
+  _pendingRestore = null;
+  clearRestoreSlot();
   if (!payload) {
     console.warn('Project has no payload, opening empty.');
   } else {
@@ -6356,6 +10205,10 @@ let fpsSpawnYaw    = 0;
 let fpsSpawnPitch  = 0;
 let fpsSpawnProtectTimer = 0;
 let fpsSpawnLanded = true;
+let fpsCrouching = false;
+let _fpsCurrentHeight = 1.75;
+let _fpsCurrentEyeHeight = 1.6;
+const CROUCH_TRANSITION_SPEED = 10; // units/sec (smooth crouch transition)
 let _playtestWorldId = 'world_1';
 let _prePlaytestWorldId = 'world_1';
 const FPS_SENS  = 0.002;
@@ -6709,6 +10562,7 @@ function resetSimulation() {
   }
   _movementPathStates.clear();
   _pathTriggerMoveOffsets.clear();
+  clearJointRuntimeStates();
   _simActive = false;
   refreshControlFunctionsUI();
 }
@@ -6785,10 +10639,20 @@ const _pathFacingQuat = new THREE.Quaternion();
 const _pathFrontVec = new THREE.Vector3();
 
 function getPlayHintBaseHtml() {
+  const fwd = keybindLabel(keybinds.forward);
+  const bwd = keybindLabel(keybinds.backward);
+  const lt  = keybindLabel(keybinds.left);
+  const rt  = keybindLabel(keybinds.right);
+  const spr = keybindLabel(keybinds.sprint);
+  const jmp = keybindLabel(keybinds.jump);
+  const cro = keybindLabel(keybinds.crouch);
+  const sh  = keybindLabel(keybinds.shoot);
+  const tm  = keybindLabel(keybinds.toggleMouse);
+  const moveKeys = `${fwd}${lt}${bwd}${rt}`;
   if (runtimeMode) {
-    return 'WASD · Move &nbsp;│&nbsp; R · Sprint &nbsp;│&nbsp; Space · Jump &nbsp;│&nbsp; Mouse · Look &nbsp;│&nbsp; LMB · Shoot &nbsp;│&nbsp; P · Pause';
+    return `${moveKeys} · Move &nbsp;│&nbsp; ${spr} · Sprint &nbsp;│&nbsp; ${jmp} · Jump &nbsp;│&nbsp; ${cro} · Crouch &nbsp;│&nbsp; Mouse · Look &nbsp;│&nbsp; ${sh} · Shoot &nbsp;│&nbsp; ${tm} · Free Cursor &nbsp;│&nbsp; P · Pause`;
   }
-  return 'WASD · Move &nbsp;│&nbsp; R · Sprint &nbsp;│&nbsp; Space · Jump &nbsp;│&nbsp; Mouse · Look &nbsp;│&nbsp; LMB · Shoot &nbsp;│&nbsp; Esc · Exit';
+  return `${moveKeys} · Move &nbsp;│&nbsp; ${spr} · Sprint &nbsp;│&nbsp; ${jmp} · Jump &nbsp;│&nbsp; ${cro} · Crouch &nbsp;│&nbsp; Mouse · Look &nbsp;│&nbsp; ${sh} · Shoot &nbsp;│&nbsp; ${tm} · Free Cursor &nbsp;│&nbsp; Esc · Exit`;
 }
 
 function updatePlayHint() {
@@ -6840,6 +10704,46 @@ const _bodyDirs      = [
 ];
 const _bodyRayDir = new THREE.Vector3();
 
+// ─── Fast terrain heightmap sampler (avoids raycasting) ──────────────────────
+const _terrainInvMat = new THREE.Matrix4();
+const _terrainLocalPt = new THREE.Vector3();
+const _terrainWorldPt = new THREE.Vector3();
+
+function _sampleTerrainHeightWorld(mesh, worldX, worldZ) {
+  const tc = mesh.userData.terrainConfig;
+  if (!tc || !tc.heightmap || mesh.userData._hasCustomGeometry) return null;
+  mesh.updateMatrixWorld(false);
+  _terrainInvMat.copy(mesh.matrixWorld).invert();
+  _terrainLocalPt.set(worldX, 0, worldZ);
+  _terrainLocalPt.applyMatrix4(_terrainInvMat);
+  const seg = tc.segments;
+  const sz = tc.terrainSize;
+  const hm = tc.heightmap;
+  const col = ((_terrainLocalPt.x + sz / 2) / sz) * seg;
+  const row = ((_terrainLocalPt.z + sz / 2) / sz) * seg;
+  if (col < -0.5 || col > seg + 0.5 || row < -0.5 || row > seg + 0.5) return null;
+  const col0 = Math.max(0, Math.min(seg - 1, Math.floor(col)));
+  const row0 = Math.max(0, Math.min(seg - 1, Math.floor(row)));
+  const col1 = Math.min(col0 + 1, seg);
+  const row1 = Math.min(row0 + 1, seg);
+  const fx = Math.max(0, Math.min(1, col - col0));
+  const fz = Math.max(0, Math.min(1, row - row0));
+  const stride = seg + 1;
+  const h00 = hm[row0 * stride + col0] || 0;
+  const h10 = hm[row0 * stride + col1] || 0;
+  const h01 = hm[row1 * stride + col0] || 0;
+  const h11 = hm[row1 * stride + col1] || 0;
+  const h = h00 * (1 - fx) * (1 - fz) + h10 * fx * (1 - fz) + h01 * (1 - fx) * fz + h11 * fx * fz;
+  _terrainWorldPt.set(_terrainLocalPt.x, h, _terrainLocalPt.z);
+  _terrainWorldPt.applyMatrix4(mesh.matrixWorld);
+  return _terrainWorldPt.y;
+}
+
+function _isTerrainCollider(c) {
+  const m = c.members[0];
+  return m.userData.type === 'terrain' && m.userData.terrainConfig && !m.userData._hasCustomGeometry;
+}
+
 function setPlayerAABB(out, pos, playerHeight = gameRules.height) {
   out.min.set(pos.x - PLAYER_RADIUS, pos.y, pos.z - PLAYER_RADIUS);
   out.max.set(pos.x + PLAYER_RADIUS, pos.y + playerHeight, pos.z + PLAYER_RADIUS);
@@ -6876,12 +10780,19 @@ function getMeshCollisionMode(mesh) {
 }
 
 function refreshSolids() {
-  _solidColliders.length = 0;
+  let idx = 0;
   for (const m of sceneObjects) {
     if (!isSolidMesh(m)) continue;
-    computeMeshCollisionAABB(m, _solidAABB);
-    _solidColliders.push({ members: [m], aabb: _solidAABB.clone() });
+    if (idx >= _solidColliders.length) {
+      _solidColliders.push({ members: [m], aabb: new THREE.Box3() });
+    }
+    const c = _solidColliders[idx];
+    c.members[0] = m;
+    c.members.length = 1;
+    computeMeshCollisionAABB(m, c.aabb);
+    idx++;
   }
+  _solidColliders.length = idx;
 }
 
 function colliderIntersectsBody(collider, pos, bodyBottom, bodyTop) {
@@ -6958,6 +10869,13 @@ function collidesAt(pos, playerHeight, ignoreMeshes = null) {
     if (pos.y + pH <= aabb.min.y) continue;  // player entirely below block
     if (pos.y >= aabb.max.y) continue;       // player entirely above block
 
+    // Fast terrain heightmap test: check if player body intersects terrain surface
+    if (_isTerrainCollider(c)) {
+      const th = _sampleTerrainHeightWorld(c.members[0], pos.x, pos.z);
+      if (th !== null && th > pos.y && th < pos.y + pH) return true;
+      continue;
+    }
+
     if (getMeshCollisionMode(c.members[0]) !== 'geometry') return true;
     if (colliderIntersectsPlayerGeometry(c, pos, pos.y, pos.y + pH)) return true;
   }
@@ -6970,7 +10888,7 @@ function collidesAt(pos, playerHeight, ignoreMeshes = null) {
  */
 function collidesWalk(pos, ignoreMeshes = null) {
   const bodyBot = pos.y + (fpsGrounded ? STEP_HEIGHT : 0.02);
-  const bodyTop = pos.y + gameRules.height;
+  const bodyTop = pos.y + _fpsCurrentHeight;
   for (const c of _solidColliders) {
     if (colliderIgnored(c, ignoreMeshes)) continue;
     const aabb = c.aabb;
@@ -6980,6 +10898,13 @@ function collidesWalk(pos, ignoreMeshes = null) {
     if (pos.z - PLAYER_RADIUS >= aabb.max.z) continue;
     if (bodyTop <= aabb.min.y) continue;
     if (bodyBot >= aabb.max.y) continue;
+
+    // Fast terrain heightmap test
+    if (_isTerrainCollider(c)) {
+      const th = _sampleTerrainHeightWorld(c.members[0], pos.x, pos.z);
+      if (th !== null && th > bodyBot && th < bodyTop) return true;
+      continue;
+    }
 
     if (getMeshCollisionMode(c.members[0]) !== 'geometry') return true;
     if (colliderIntersectsPlayerGeometry(c, pos, bodyBot, bodyTop)) return true;
@@ -7004,6 +10929,15 @@ function findGroundHeight(pos, ignoreMeshes = null) {
       if (_physOrigin.x < aabb.min.x - PLAYER_RADIUS || _physOrigin.x > aabb.max.x + PLAYER_RADIUS) continue;
       if (_physOrigin.z < aabb.min.z - PLAYER_RADIUS || _physOrigin.z > aabb.max.z + PLAYER_RADIUS) continue;
       if (_physOrigin.y < aabb.min.y) continue;
+
+      // Fast path: terrain heightmap sampling (avoids expensive raycasting)
+      if (_isTerrainCollider(c)) {
+        const th = _sampleTerrainHeightWorld(c.members[0], _physOrigin.x, _physOrigin.z);
+        if (th !== null && th <= pos.y + STEP_HEIGHT + 0.01) {
+          ground = Math.max(ground, th);
+        }
+        continue;
+      }
 
       if (getMeshCollisionMode(c.members[0]) !== 'geometry') {
         if (_physOrigin.x >= aabb.min.x && _physOrigin.x <= aabb.max.x &&
@@ -7316,7 +11250,7 @@ function clampPlayerToWorldBorder() {
 function syncFpsCamera() {
   const fov = _runtimeFovOverride ?? playtestFov;
   if (fpsCam.fov !== fov) { fpsCam.fov = fov; fpsCam.updateProjectionMatrix(); }
-  fpsCam.position.set(fpsPos.x, fpsPos.y + gameRules.eyeHeight, fpsPos.z);
+  fpsCam.position.set(fpsPos.x, fpsPos.y + _fpsCurrentEyeHeight, fpsPos.z);
   fpsCam.rotation.order = 'YXZ';
   fpsCam.rotation.y = fpsYaw;
   fpsCam.rotation.x = fpsPitch;
@@ -7350,6 +11284,7 @@ function readFogUI() {
   if (fogDensityInput) fogSettings.density = parseFloat(fogDensityInput.value) || 0.025;
   if (fogBrightnessInput) fogSettings.brightness = parseFloat(fogBrightnessInput.value) || 1;
   applyFogSettings();
+  markRestoreDirty();
 }
 
 function syncFovUI() {
@@ -7429,6 +11364,8 @@ function switchToWorld(worldId, options = {}) {
     const spawn = sceneObjects.find(m => m.userData.type === 'spawn' && (m.userData.world || 'world_1') === worldId);
     if (spawn) {
       fpsPos.set(spawn.position.x, spawn.position.y - 0.875 + 0.01, spawn.position.z);
+      fpsYaw = spawn.rotation.y;
+      fpsPitch = 0;
       fpsVelY = 0;
       fpsGrounded = false;
     }
@@ -7441,6 +11378,29 @@ function resolveWorldId(ref) {
   if (worlds.some(w => w.id === ref)) return ref;
   const byName = worlds.find(w => w.name.toLowerCase() === ref.trim().toLowerCase());
   return byName ? byName.id : null;
+}
+
+function executeSkeletonAction(action) {
+  const cmd = action.skelAnimCommand || 'play';
+  const clipName = action.skelAnimClip || '';
+  const refType = action.refType || 'group';
+  const refValue = action.refValue || '';
+
+  const targets = refType === 'name'
+    ? sceneObjects.filter(m => m.userData.type === 'skeleton' && m.userData.label === refValue)
+    : sceneObjects.filter(m => m.userData.type === 'skeleton' && (m.userData.groups || [m.userData.group || 'default']).some(g => g === refValue));
+
+  for (const mesh of targets) {
+    if (cmd === 'play' && clipName) {
+      skeletonPlayAnimation(mesh, clipName);
+    } else if (cmd === 'stop') {
+      skeletonStopAnimation(mesh);
+    } else if (cmd === 'pause') {
+      skeletonPauseAnimation(mesh);
+    } else if (cmd === 'resume') {
+      skeletonResumeAnimation(mesh);
+    }
+  }
 }
 
 function executeTeleportAction(action, callerMesh) {
@@ -7463,6 +11423,8 @@ function executeTeleportAction(action, callerMesh) {
       const spawn = sceneObjects.find(m => m.userData.type === 'spawn' && (m.userData.world || 'world_1') === _playtestWorldId);
       if (spawn) {
         fpsPos.set(spawn.position.x, spawn.position.y - 0.875 + 0.01, spawn.position.z);
+        fpsYaw = spawn.rotation.y;
+        fpsPitch = 0;
         fpsVelY = 0;
         fpsGrounded = false;
       }
@@ -7516,7 +11478,7 @@ function showWorldContextMenu(worldId, x, y) {
   const canDelete = worlds.length > 1;
 
   const menu = document.createElement('div');
-  menu.style.cssText = 'position:fixed;z-index:20020;min-width:170px;padding:8px;border-radius:8px;border:1px solid var(--border);background:rgba(15,20,27,0.97);box-shadow:0 10px 28px rgba(0,0,0,0.4)';
+  menu.style.cssText = 'position:fixed;z-index:20020;min-width:180px;padding:8px;border-radius:10px;border:1px solid var(--border);background:rgba(15,20,27,0.97);box-shadow:0 12px 36px rgba(0,0,0,0.5);backdrop-filter:blur(12px)';
   menu.innerHTML = `
     <div style="font-size:10px;color:var(--muted);padding:2px 4px 8px 4px;letter-spacing:.06em;text-transform:uppercase">${escapeHtml(w.name)}</div>
     <button type="button" data-action="main" style="width:100%;justify-content:flex-start;font-size:11px;padding:5px 8px" ${isMain ? 'disabled' : ''}>★ Set as Main World</button>
@@ -7590,6 +11552,29 @@ function showWorldContextMenu(worldId, x, y) {
   worldContextMenuEl = menu;
 }
 
+function _serializeBufferGeometry(geo) {
+  const data = {};
+  const pos = geo.attributes.position;
+  if (pos) data.position = Array.from(pos.array);
+  const norm = geo.attributes.normal;
+  if (norm) data.normal = Array.from(norm.array);
+  const uv = geo.attributes.uv;
+  if (uv) data.uv = Array.from(uv.array);
+  if (geo.index) data.index = Array.from(geo.index.array);
+  return data;
+}
+
+function _deserializeBufferGeometry(data) {
+  const geo = new THREE.BufferGeometry();
+  if (data.position) geo.setAttribute('position', new THREE.Float32BufferAttribute(data.position, 3));
+  if (data.normal)   geo.setAttribute('normal',   new THREE.Float32BufferAttribute(data.normal, 3));
+  if (data.uv)       geo.setAttribute('uv',       new THREE.Float32BufferAttribute(data.uv, 2));
+  if (data.index)    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(data.index), 1));
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+  return geo;
+}
+
 function serializeSingleObject(m) {
   const o = {
     type:       m.userData.type,
@@ -7627,6 +11612,9 @@ function serializeSingleObject(m) {
   if (m.userData.checkpointConfig) {
     o.checkpointConfig = normalizeCheckpointConfig(m.userData.checkpointConfig);
   }
+  if (m.userData.teleportConfig) {
+    o.teleportConfig = normalizeTeleportConfig(m.userData.teleportConfig);
+  }
   if (m.userData.triggerStopConfig) {
     const stopConfig = normalizeTriggerStopConfig(m.userData.triggerStopConfig);
     if (stopConfig.mode !== 'none' || stopConfig.functionNames.length) o.triggerStopConfig = stopConfig;
@@ -7643,6 +11631,33 @@ function serializeSingleObject(m) {
   if (switchConfig.enabled) o.switchConfig = switchConfig;
   if (m.userData.type === 'keypad') {
     o.keypadConfig = normalizeKeypadConfig(m.userData.keypadConfig);
+  }
+  if (m.userData.type === 'joint' && m.userData.jointConfig) {
+    o.jointConfig = normalizeJointConfig(m.userData.jointConfig);
+  }
+  if (m.userData.type === 'skeleton' && m.userData.skeletonConfig) {
+    o.skeletonConfig = normalizeSkeletonConfig(m.userData.skeletonConfig);
+  }
+  if (m.userData.type === 'npc' && m.userData.npcConfig) {
+    o.npcConfig = normalizeNpcConfig(m.userData.npcConfig);
+  }
+  if (m.userData.type === 'terrain' && m.userData.terrainConfig) {
+    o.terrainConfig = {
+      segments: m.userData.terrainConfig.segments,
+      terrainSize: m.userData.terrainConfig.terrainSize,
+      heightmap: Array.from(m.userData.terrainConfig.heightmap),
+    };
+  }
+  if (m.userData._texturePattern) {
+    o.texturePattern = { ...m.userData._texturePattern };
+  }
+  if (m.userData.textConfig) o.textConfig = normalizeTextConfig(m.userData.textConfig);
+  if (m.userData.screenConfig) o.screenConfig = normalizeScreenConfig(m.userData.screenConfig);
+  if (m.userData.cameraConfig) o.cameraConfig = normalizeCameraConfig(m.userData.cameraConfig);
+  if (m.userData.metalness !== undefined) o.metalness = m.userData.metalness;
+  if (m.userData.roughness !== undefined) o.roughness = m.userData.roughness;
+  if (m.userData._hasCustomGeometry) {
+    o.customGeometry = _serializeBufferGeometry(m.geometry);
   }
   return o;
 }
@@ -7839,6 +11854,405 @@ function updateSpawnDirectionIndicators() {
     if (!indicator) continue;
     indicator.visible = !state.isPlaytest;
   }
+}
+
+// ─── Joint visual indicators ─────────────────────────────────────────────────
+const _jointLineMat = new THREE.LineBasicMaterial({ color: 0x00ccff, transparent: true, opacity: 0.65, depthTest: false });
+const _jointLineMatChild = new THREE.LineBasicMaterial({ color: 0xff6644, transparent: true, opacity: 0.65, depthTest: false });
+
+function ensureJointIndicator(mesh) {
+  if (!mesh || mesh.userData.type !== 'joint') return null;
+  if (mesh.userData._jointIndicator) return mesh.userData._jointIndicator;
+
+  const group = new THREE.Group();
+  group.renderOrder = 32;
+
+  // Rotation axis ring
+  const ringGeo = new THREE.TorusGeometry(0.35, 0.015, 8, 32);
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ccff, transparent: true, opacity: 0.5, depthTest: false, side: THREE.DoubleSide });
+  const ring = new THREE.Mesh(ringGeo, ringMat);
+  ring.name = 'jointRing';
+  group.add(ring);
+
+  // Parent line (updated each frame)
+  const parentLineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+  const parentLine = new THREE.Line(parentLineGeo, _jointLineMat);
+  parentLine.name = 'parentLine';
+  parentLine.frustumCulled = false;
+  group.add(parentLine);
+
+  // Child line
+  const childLineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+  const childLine = new THREE.Line(childLineGeo, _jointLineMatChild);
+  childLine.name = 'childLine';
+  childLine.frustumCulled = false;
+  group.add(childLine);
+
+  mesh.add(group);
+  mesh.userData._jointIndicator = group;
+  return group;
+}
+
+function updateJointIndicators() {
+  for (const mesh of sceneObjects) {
+    if (mesh.userData.type !== 'joint') continue;
+    const indicator = ensureJointIndicator(mesh);
+    if (!indicator) continue;
+    indicator.visible = !state.isPlaytest;
+
+    const jc = getMeshJointConfig(mesh);
+    if (!jc) continue;
+
+    // Orient the ring to match the rotation axis
+    const ring = indicator.getObjectByName('jointRing');
+    if (ring) {
+      ring.rotation.set(0, 0, 0);
+      if (jc.axis === 'X') ring.rotation.y = Math.PI / 2;
+      else if (jc.axis === 'Z') ring.rotation.x = Math.PI / 2;
+      // Y axis: ring lies flat (default torus orientation is XZ plane -> already Y)
+    }
+
+    // Update parent/child connection lines
+    const parentLine = indicator.getObjectByName('parentLine');
+    const childLine = indicator.getObjectByName('childLine');
+    const jointWorldPos = mesh.getWorldPosition(new THREE.Vector3());
+
+    if (parentLine) {
+      const parentMesh = jc.parentLabel ? sceneObjects.find(m => m.userData.label === jc.parentLabel) : null;
+      const posArr = parentLine.geometry.attributes.position.array;
+      posArr[0] = posArr[1] = posArr[2] = 0; // local origin = joint
+      if (parentMesh) {
+        const wp = parentMesh.getWorldPosition(new THREE.Vector3());
+        const local = mesh.worldToLocal(wp);
+        posArr[3] = local.x; posArr[4] = local.y; posArr[5] = local.z;
+      } else {
+        posArr[3] = posArr[4] = posArr[5] = 0;
+      }
+      parentLine.geometry.attributes.position.needsUpdate = true;
+      parentLine.visible = !!parentMesh;
+    }
+
+    if (childLine) {
+      const childMesh = jc.childLabel ? sceneObjects.find(m => m.userData.label === jc.childLabel) : null;
+      const posArr = childLine.geometry.attributes.position.array;
+      posArr[0] = posArr[1] = posArr[2] = 0;
+      if (childMesh) {
+        const wp = childMesh.getWorldPosition(new THREE.Vector3());
+        const local = mesh.worldToLocal(wp);
+        posArr[3] = local.x; posArr[4] = local.y; posArr[5] = local.z;
+      } else {
+        posArr[3] = posArr[4] = posArr[5] = 0;
+      }
+      childLine.geometry.attributes.position.needsUpdate = true;
+      childLine.visible = !!childMesh;
+    }
+  }
+}
+
+// ─── Joint runtime state & update ────────────────────────────────────────────
+const _jointRuntimeStates = new Map(); // mesh.uuid -> { angle, direction }
+
+function getJointRuntimeState(mesh) {
+  let st = _jointRuntimeStates.get(mesh.uuid);
+  if (!st) {
+    st = { angle: 0, direction: 1 };
+    _jointRuntimeStates.set(mesh.uuid, st);
+  }
+  return st;
+}
+
+function clearJointRuntimeStates() {
+  _jointRuntimeStates.clear();
+}
+
+function updateJointAnimations(dt) {
+  if ((!state.isPlaytest && !_simActive) || dt <= 0) return;
+
+  for (const mesh of sceneObjects) {
+    if (mesh.userData.type !== 'joint') continue;
+    const jc = getMeshJointConfig(mesh);
+    if (!jc || !jc.childLabel) continue;
+
+    const childMesh = sceneObjects.find(m => m.userData.label === jc.childLabel);
+    if (!childMesh) continue;
+
+    // Collect all editor group members of the child (so the whole group rotates)
+    const childGid = childMesh.userData.editorGroupId;
+    const childMembers = childGid
+      ? sceneObjects.filter(m => m.userData.editorGroupId === childGid)
+      : [childMesh];
+
+    if (jc.mode === 'fixed') {
+      // Fixed mode: child follows parent movement but no independent rotation
+      // The group animation system already handles this via editorGroupId
+      continue;
+    }
+
+    if (jc.mode === 'auto') {
+      const st = getJointRuntimeState(mesh);
+      const angleDelta = jc.speed * 360 * dt; // degrees per second
+      st.angle += angleDelta * st.direction;
+
+      // Clamp and bounce at limits
+      if (st.angle >= jc.maxAngle) {
+        st.angle = jc.maxAngle;
+        st.direction = -1;
+      } else if (st.angle <= jc.minAngle) {
+        st.angle = jc.minAngle;
+        st.direction = 1;
+      }
+
+      // Compute rotation delta from previous frame
+      const prevAngle = st.angle - angleDelta * st.direction; // approximate previous
+      const deltaRad = (st.angle - (prevAngle + angleDelta * st.direction === st.angle ? prevAngle : prevAngle)) * Math.PI / 180;
+    }
+
+    // For both auto and manual, apply the rotation around the joint point
+    if (jc.mode === 'auto') {
+      const st = getJointRuntimeState(mesh);
+      const jointPos = mesh.getWorldPosition(new THREE.Vector3());
+
+      // Build axis vector
+      const axis = new THREE.Vector3();
+      if (jc.axis === 'X') axis.set(1, 0, 0);
+      else if (jc.axis === 'Z') axis.set(0, 0, 1);
+      else axis.set(0, 1, 0);
+
+      // Compute absolute target rotation for this frame
+      const targetRad = st.angle * Math.PI / 180;
+
+      // Store the initial positions/quaternions on first frame
+      if (st._initPositions === undefined) {
+        st._initPositions = new Map();
+        st._initQuaternions = new Map();
+        for (const m of childMembers) {
+          st._initPositions.set(m.uuid, m.position.clone());
+          st._initQuaternions.set(m.uuid, m.quaternion.clone());
+        }
+        st._initJointPos = jointPos.clone();
+      }
+
+      // Apply rotation: reset to initial, then rotate by targetRad around joint
+      const rotQuat = new THREE.Quaternion().setFromAxisAngle(axis, targetRad);
+      for (const m of childMembers) {
+        const initPos = st._initPositions.get(m.uuid);
+        const initQuat = st._initQuaternions.get(m.uuid);
+        if (!initPos || !initQuat) continue;
+
+        // Position: rotate offset from joint around axis
+        const offset = initPos.clone().sub(st._initJointPos);
+        offset.applyQuaternion(rotQuat);
+        m.position.copy(st._initJointPos).add(offset);
+
+        // Also account for joint having moved (e.g. on a moving platform)
+        const jointDelta = jointPos.clone().sub(st._initJointPos);
+        m.position.add(jointDelta);
+
+        // Rotation: apply joint rotation to initial quaternion
+        m.quaternion.copy(rotQuat).multiply(initQuat);
+      }
+    }
+  }
+}
+
+// ─── Skeleton Runtime Animation ─────────────────────────────────────────────
+function updateSkeletonAnimations(dt) {
+  if ((!state.isPlaytest && !_simActive) || dt <= 0) return;
+
+  for (const mesh of sceneObjects) {
+    if (mesh.userData.type !== 'skeleton') continue;
+    const cfg = getMeshSkeletonConfig(mesh);
+    if (!cfg?.definitionName) continue;
+    const def = skeletonDefinitions[cfg.definitionName];
+    if (!def) continue;
+
+    const animName = cfg.currentAnimation;
+    const anim = animName ? def.animations?.[animName] : null;
+    if (!anim || !anim.keyframes?.length || anim.duration <= 0) continue;
+
+    // Get or create runtime state
+    let rst = _skeletonRuntimeStates.get(mesh.uuid);
+    if (!rst) {
+      rst = { time: 0, playing: !!cfg.playOnStart, speed: cfg.animationSpeed || 1 };
+      _skeletonRuntimeStates.set(mesh.uuid, rst);
+    }
+
+    if (!rst.playing) continue;
+
+    // Advance time
+    rst.time += dt * rst.speed;
+    const duration = anim.duration;
+
+    if (rst.time >= duration) {
+      if (cfg.loopAnimation) {
+        rst.time = rst.time % duration;
+      } else {
+        rst.time = duration;
+        rst.playing = false;
+      }
+    }
+
+    // Find surrounding keyframes
+    const kfs = anim.keyframes;
+    if (kfs.length === 1) {
+      applySkeletonKeyframe(mesh, def, kfs[0]);
+      continue;
+    }
+
+    let kfA = kfs[0], kfB = kfs[kfs.length - 1];
+    for (let i = 0; i < kfs.length - 1; i++) {
+      if (rst.time >= kfs[i].time && rst.time <= kfs[i + 1].time) {
+        kfA = kfs[i];
+        kfB = kfs[i + 1];
+        break;
+      }
+    }
+
+    const segDur = kfB.time - kfA.time;
+    const t = segDur > 0 ? Math.min(1, Math.max(0, (rst.time - kfA.time) / segDur)) : 1;
+
+    // Interpolate bone rotations
+    applyInterpolatedKeyframes(mesh, def, kfA, kfB, t);
+  }
+}
+
+function applySkeletonKeyframe(mesh, def, kf) {
+  const boneMap = mesh.userData._skelBoneMap;
+  if (!boneMap || !kf?.bones) return;
+
+  for (const [boneId, quat] of Object.entries(kf.bones)) {
+    const bone = boneMap.get(boneId);
+    if (bone && Array.isArray(quat) && quat.length >= 4) {
+      bone.quaternion.set(quat[0], quat[1], quat[2], quat[3]);
+    }
+  }
+  mesh.userData._skelRootGroup?.updateMatrixWorld(true);
+  updateSkeletonBoneSkinPositions(mesh, def);
+}
+
+function applyInterpolatedKeyframes(mesh, def, kfA, kfB, t) {
+  const boneMap = mesh.userData._skelBoneMap;
+  if (!boneMap) return;
+
+  const allBoneIds = new Set([
+    ...Object.keys(kfA.bones || {}),
+    ...Object.keys(kfB.bones || {}),
+  ]);
+
+  const qa = new THREE.Quaternion();
+  const qb = new THREE.Quaternion();
+
+  for (const boneId of allBoneIds) {
+    const bone = boneMap.get(boneId);
+    if (!bone) continue;
+
+    const aQuat = kfA.bones?.[boneId];
+    const bQuat = kfB.bones?.[boneId];
+
+    if (aQuat && Array.isArray(aQuat) && aQuat.length >= 4) {
+      qa.set(aQuat[0], aQuat[1], aQuat[2], aQuat[3]);
+    } else {
+      qa.set(0, 0, 0, 1);
+    }
+    if (bQuat && Array.isArray(bQuat) && bQuat.length >= 4) {
+      qb.set(bQuat[0], bQuat[1], bQuat[2], bQuat[3]);
+    } else {
+      qb.set(0, 0, 0, 1);
+    }
+
+    bone.quaternion.copy(qa).slerp(qb, t);
+  }
+
+  mesh.userData._skelRootGroup?.updateMatrixWorld(true);
+  updateSkeletonBoneSkinPositions(mesh, def);
+}
+
+function updateSkeletonBoneSkinPositions(mesh, def) {
+  const visualGroup = mesh.userData._skelVisualGroup;
+  const boneMap = mesh.userData._skelBoneMap;
+  if (!visualGroup || !boneMap) return;
+
+  // Update marker and skin positions to match bone world positions
+  let childIdx = 0;
+  for (const bd of def.bones) {
+    const threeBone = boneMap.get(bd.id);
+    if (!threeBone) continue;
+
+    const worldPos = new THREE.Vector3();
+    threeBone.getWorldPosition(worldPos);
+
+    // Update the marker sphere
+    if (childIdx < visualGroup.children.length) {
+      const marker = visualGroup.children[childIdx];
+      if (marker.isMesh) marker.position.copy(worldPos);
+    }
+    childIdx++;
+
+    // Update bone connection line (if not root)
+    if (bd.parent) {
+      if (childIdx < visualGroup.children.length) {
+        const line = visualGroup.children[childIdx];
+        if (line.isLine) {
+          const parentBone = boneMap.get(bd.parent);
+          if (parentBone) {
+            const pPos = new THREE.Vector3();
+            parentBone.getWorldPosition(pPos);
+            line.geometry.setFromPoints([pPos, worldPos]);
+            line.geometry.attributes.position.needsUpdate = true;
+          }
+        }
+      }
+      childIdx++;
+    }
+
+    // Update bone skin group
+    if (def.boneSkins[bd.id]?.voxels?.length) {
+      if (childIdx < visualGroup.children.length) {
+        const skinG = visualGroup.children[childIdx];
+        if (skinG.isGroup) {
+          skinG.position.copy(worldPos);
+          const boneQuat = new THREE.Quaternion();
+          threeBone.getWorldQuaternion(boneQuat);
+          skinG.quaternion.copy(boneQuat);
+        }
+      }
+      childIdx++;
+    }
+  }
+}
+
+function clearSkeletonRuntimeStates() {
+  _skeletonRuntimeStates.clear();
+}
+
+function skeletonPlayAnimation(mesh, animName) {
+  const cfg = getMeshSkeletonConfig(mesh);
+  if (!cfg) return;
+  cfg.currentAnimation = animName;
+  let rst = _skeletonRuntimeStates.get(mesh.uuid);
+  if (!rst) {
+    rst = { time: 0, playing: true, speed: cfg.animationSpeed || 1 };
+    _skeletonRuntimeStates.set(mesh.uuid, rst);
+  } else {
+    rst.time = 0;
+    rst.playing = true;
+    rst.speed = cfg.animationSpeed || 1;
+  }
+}
+
+function skeletonStopAnimation(mesh) {
+  const rst = _skeletonRuntimeStates.get(mesh.uuid);
+  if (rst) rst.playing = false;
+}
+
+function skeletonPauseAnimation(mesh) {
+  const rst = _skeletonRuntimeStates.get(mesh.uuid);
+  if (rst) rst.playing = false;
+}
+
+function skeletonResumeAnimation(mesh) {
+  const rst = _skeletonRuntimeStates.get(mesh.uuid);
+  if (rst) rst.playing = true;
 }
 
 function activateCheckpoint(mesh) {
@@ -8477,6 +12891,8 @@ function executeControlFunction(functionName, callerMesh, active, context = {}) 
       if (active) applyPlayerStatsAction(action);
     } else if (action.actionType === 'teleport') {
       if (active) executeTeleportAction(action, callerMesh);
+    } else if (action.actionType === 'skeleton') {
+      if (active) executeSkeletonAction(action);
     }
   }
 
@@ -9023,6 +13439,102 @@ function checkTriggerBlocks() {
   }
 }
 
+// ─── Teleport blocks overlap detection ───────────────────────────────────────
+const _activeTeleports = new Set();
+const _teleportBlockAABB = new THREE.Box3();
+
+function checkTeleportBlocks() {
+  const pH = gameRules.height;
+  for (const m of sceneObjects) {
+    if (m.userData.type !== 'teleport') continue;
+    if ((m.userData.world || 'world_1') !== _playtestWorldId) continue;
+    _teleportBlockAABB.setFromObject(m);
+    // Expand the AABB slightly for easier triggering
+    _teleportBlockAABB.expandByScalar(0.3);
+    const overlap =
+      fpsPos.x + PLAYER_RADIUS > _teleportBlockAABB.min.x &&
+      fpsPos.x - PLAYER_RADIUS < _teleportBlockAABB.max.x &&
+      fpsPos.z + PLAYER_RADIUS > _teleportBlockAABB.min.z &&
+      fpsPos.z - PLAYER_RADIUS < _teleportBlockAABB.max.z &&
+      fpsPos.y + pH > _teleportBlockAABB.min.y &&
+      fpsPos.y < _teleportBlockAABB.max.y;
+
+    if (overlap && !_activeTeleports.has(m.uuid)) {
+      if (_teleportCooldowns.has(m.uuid)) continue;
+      _activeTeleports.add(m.uuid);
+      // Find the paired teleport block by label match
+      const config = getMeshTeleportConfig(m);
+      const pairLabel = config.pairLabel;
+      if (pairLabel) {
+        // Cross-world teleport: search stored world data for destination
+        if (config.crossWorld && config.targetWorld && config.targetWorld !== _playtestWorldId) {
+          const targetWorld = worlds.find(w => w.id === config.targetWorld);
+          if (targetWorld) {
+            // Find destination object data in target world's stored objects
+            // Match by label or by teleportConfig.pairLabel
+            const pairLabelLower = pairLabel.toLowerCase();
+            const srcLabelLower = (m.userData.label || '').toLowerCase();
+            const destData = (targetWorld.objects || []).find(o =>
+              o.type === 'teleport' && (
+                (o.label || '').toLowerCase() === pairLabelLower ||
+                (o.teleportConfig?.pairLabel || '').toLowerCase() === pairLabelLower ||
+                (o.teleportConfig?.pairLabel || '').toLowerCase() === srcLabelLower
+              )
+            );
+            if (destData) {
+              const offsetX = fpsPos.x - m.position.x;
+              const offsetY = fpsPos.y - m.position.y;
+              const offsetZ = fpsPos.z - m.position.z;
+              const destPos = destData.position || [0, 0, 0];
+              // Clear stale teleport state before world switch
+              _activeTeleports.clear();
+              // Switch world first, then position player
+              switchToWorld(config.targetWorld, { keepPosition: true });
+              fpsPos.set(destPos[0] + offsetX, destPos[1] + offsetY, destPos[2] + offsetZ);
+              if (fpsGrounded) fpsVelY = 0;
+              // Set cooldown on ALL teleporters near the player to prevent immediate re-teleport
+              const pH = gameRules.height;
+              for (const o of sceneObjects) {
+                if (o.userData.type !== 'teleport') continue;
+                const bb = new THREE.Box3().setFromObject(o).expandByScalar(0.5);
+                if (fpsPos.x + PLAYER_RADIUS > bb.min.x && fpsPos.x - PLAYER_RADIUS < bb.max.x &&
+                    fpsPos.z + PLAYER_RADIUS > bb.min.z && fpsPos.z - PLAYER_RADIUS < bb.max.z &&
+                    fpsPos.y + pH > bb.min.y && fpsPos.y < bb.max.y) {
+                  _teleportCooldowns.set(o.uuid, true);
+                  _activeTeleports.add(o.uuid);
+                }
+              }
+              return; // world switched, abort further processing
+            }
+          }
+        }
+        // Same-world teleport
+        const dest = sceneObjects.find(o =>
+          o !== m &&
+          o.userData.type === 'teleport' &&
+          (o.userData.label || '').toLowerCase() === pairLabel.toLowerCase() &&
+          (o.userData.world || 'world_1') === _playtestWorldId
+        );
+        if (dest) {
+          // Relative-coordinate teleport: preserve player's offset from source block center
+          const offsetX = fpsPos.x - m.position.x;
+          const offsetY = fpsPos.y - m.position.y;
+          const offsetZ = fpsPos.z - m.position.z;
+          fpsPos.set(dest.position.x + offsetX, dest.position.y + offsetY, dest.position.z + offsetZ);
+          // Preserve vertical velocity for momentum-based feel (only zero if grounded)
+          if (fpsGrounded) fpsVelY = 0;
+          // Set cooldown on destination so player doesn't immediately bounce back
+          _teleportCooldowns.set(dest.uuid, true);
+          _teleportCooldowns.set(m.uuid, true);
+        }
+      }
+    } else if (!overlap) {
+      _activeTeleports.delete(m.uuid);
+      _teleportCooldowns.delete(m.uuid);
+    }
+  }
+}
+
 function checkCheckpointBlocks() {
   const pH = gameRules.height;
   for (const mesh of sceneObjects) {
@@ -9407,6 +13919,7 @@ function syncGameruleUI() {
   syncVarAwareInput(grGravityInput, 'gravity', gameRules.gravity);
   if (grGravityEnabledInput) grGravityEnabledInput.checked = !!gameRules.gravityEnabled;
   grHeightInput.value  = gameRules.height;
+  if (grCrouchHeightInput) grCrouchHeightInput.value = gameRules.crouchHeight;
   syncVarAwareInput(grSprintInput, 'sprintSpeed', gameRules.sprintSpeed);
   syncVarAwareInput(grSprintDurationInput, 'sprintDuration', gameRules.sprintDuration);
   syncVarAwareInput(grSprintRechargeInput, 'sprintRechargeTime', gameRules.sprintRechargeTime);
@@ -9424,6 +13937,8 @@ function syncGameruleUI() {
 
 function startPlaytest() {
   if (state.isPlaytest) return;
+  // Flush any pending autosave before entering playtest
+  if (_restoreDirty) { clearTimeout(_restoreTimer); _restoreTimer = null; _flushRestore(); }
   stopLibraryPreviewAudio();
   // Reset any editor simulation before starting playtest
   if (_simActive || _simBasePositions.size) resetSimulation();
@@ -9442,6 +13957,9 @@ function startPlaytest() {
   fpsAirDashRemaining = 0;
   fpsAirDashUsed = false;
   fpsFallStartY = null;
+  fpsCrouching = false;
+  _fpsCurrentHeight = gameRules.height;
+  _fpsCurrentEyeHeight = gameRules.eyeHeight;
   fpsSpawnProtectTimer = gameRules.spawnProtectTime;
   fpsSpawnLanded = false;
   _controlFunctionStates.clear();
@@ -9454,6 +13972,9 @@ function startPlaytest() {
   _triggerRotateStates.clear();
   _movementPathStates.clear();
   _pathTriggerMoveOffsets.clear();
+  clearJointRuntimeStates();
+  clearSkeletonRuntimeStates();
+  clearNpcRuntimeState();
   _activeTriggerCalls.clear();
   _teleportCooldowns.clear();
   _runtimeFovOverride = null;
@@ -9553,6 +14074,21 @@ function startPlaytest() {
 
 function _cleanupPlaytest() {
   closeRuntimeKeypadOverlay();
+  closeRuntimeScreenOverlay();
+  // Remove portal discs from teleport meshes
+  for (const m of sceneObjects) {
+    if (m.userData._portalDisc) {
+      m.remove(m.userData._portalDisc);
+      m.userData._portalDisc.material.dispose();
+      delete m.userData._portalDisc;
+    }
+    // Stop any playing screen videos
+    if (m.userData._screenVideo) {
+      m.userData._screenVideo.pause();
+      m.userData._screenVideo.src = '';
+      m.userData._screenVideo = null;
+    }
+  }
   // Restore dedicated light block visibility
   for (const m of sceneObjects) {
     if (m.userData.type === 'light' && m.userData.pointLight) {
@@ -9591,6 +14127,9 @@ function _cleanupPlaytest() {
   _triggerRotateStates.clear();
   _pathTriggerMoveOffsets.clear();
   _movementPathStates.clear();
+  clearJointRuntimeStates();
+  clearSkeletonRuntimeStates();
+  clearNpcRuntimeState();
   _activeTriggerCalls.clear();
   _teleportCooldowns.clear();
   _runtimeFovOverride = null;
@@ -9605,6 +14144,7 @@ function _cleanupPlaytest() {
   fpsKeys.clear();
   editKeys.clear();
   _activeTriggers.clear();
+  _activeTeleports.clear();
   // Reset conditional trigger fired states
   for (const ct of conditionalTriggers) { ct._fired = false; ct._lastFireTime = null; ct._nextFireTime = null; }
   orbitControls.enabled = true;
@@ -9653,6 +14193,12 @@ function stopPlaytest(options = {}) {
 
 document.addEventListener('pointerlockchange', () => {
   fpsLocked = document.pointerLockElement === renderer.domElement;
+  if (!fpsLocked && editorFreeLook) {
+    // Pointer lock lost while in free-look — exit free-look cleanly
+    editorFreeLook = false;
+    orbitControls.enabled = true;
+    return;
+  }
   if (!fpsLocked && state.isPlaytest) {
     if (suppressPointerUnlockStop) {
       suppressPointerUnlockStop = false;
@@ -9668,6 +14214,20 @@ document.addEventListener('pointerlockchange', () => {
 });
 
 document.addEventListener('mousemove', e => {
+  // Editor free-look: rotate orbit target around camera
+  if (editorFreeLook && document.pointerLockElement === renderer.domElement && !state.isPlaytest) {
+    const sens = 0.003;
+    const spherical = new THREE.Spherical().setFromVector3(
+      orbitControls.target.clone().sub(editorCam.position)
+    );
+    spherical.theta -= e.movementX * sens;
+    spherical.phi   -= e.movementY * sens;
+    spherical.phi    = Math.max(0.05, Math.min(Math.PI - 0.05, spherical.phi));
+    const offset = new THREE.Vector3().setFromSpherical(spherical);
+    orbitControls.target.copy(editorCam.position).add(offset);
+    editorCam.lookAt(orbitControls.target);
+    return;
+  }
   if (!fpsLocked || !state.isPlaytest) return;
   fpsYaw   -= e.movementX * FPS_SENS;
   fpsPitch -= e.movementY * FPS_SENS;
@@ -9689,6 +14249,7 @@ renderer.domElement.addEventListener('pointerup', e => {
   if (state.isPlaytest) {                       // playtest: lock or shoot
     if (runtimeMode && runtimePauseActive) return;
     if (tryOpenRuntimeKeypadFromPointerEvent(e)) return;
+    if (tryOpenRuntimeScreenFromPointerEvent(e)) return;
     if (!fpsLocked) renderer.domElement.requestPointerLock();
     else fpsShoot();
     return;
@@ -9718,6 +14279,16 @@ function handleEditorClick(e) {
   }
 
   if (state.mode === 'place') {
+    // Custom template placement
+    if (state._placingCustomTemplate) {
+      const pt = groundPoint(ndc);
+      if (pt) {
+        snap(pt);
+        placeCustomTemplate(state._placingCustomTemplate, new THREE.Vector3(pt.x, 0, pt.z));
+        state._placingCustomTemplate = null;
+      }
+      return;
+    }
     const shapeParams = getPlacementShapeParams(state.placingType);
     const hit = surfaceHit(ndc);
     if (hit) {
@@ -9732,9 +14303,18 @@ function handleEditorClick(e) {
       placeObject(new THREE.Vector3(pt.x, getPlacedY(state.placingType, shapeParams, state.cloneScale), pt.z));
     }
   } else if (state.mode === 'paint') {
+    // Terrain sculpting intercept
+    if (terrainSculptState.active && handleTerrainSculptClick(e)) return;
     const hit = surfaceHit(ndc);
     if (hit?.object) {
-      if (state.paintSubMode === 'erase-paint') {
+      // Texture painting
+      if (texturePaintState.enabled && (texturePaintState.pattern !== 'none' || texturePaintState.customImage)) {
+        const beforePattern = hit.object.userData._texturePattern ? { ...hit.object.userData._texturePattern } : null;
+        const pat = texturePaintState.customImage ? 'custom' : texturePaintState.pattern;
+        applyTexturePaint(hit.object, pat, state.brushColor, texturePaintState.color2, texturePaintState.scale, texturePaintState.customImage);
+        const afterPattern = { ...hit.object.userData._texturePattern };
+        pushUndo({ type: 'texture-paint', mesh: hit.object, beforePattern, afterPattern });
+      } else if (state.paintSubMode === 'erase-paint') {
         paintMesh(hit.object, hit.object.userData.originalColor ?? 0xcccccc);
       } else if (state.paintSubMode === 'fill') {
         _floodFillPaint(hit.object, state.brushColor);
@@ -9764,6 +14344,11 @@ renderer.domElement.addEventListener('pointermove', e => {
   if (state.isPlaytest || !['place', 'erase', 'paint'].includes(state.mode)) { removeGhost(); return; }
   const ndc = toNDC(e);
   lastPlaceNDC.copy(ndc);
+
+  // Terrain sculpt drag
+  if (state.mode === 'paint' && terrainSculptState._painting && (e.buttons & 1) === 1) {
+    handleTerrainSculptDrag(e);
+  }
 
   if (state.mode === 'paint' && (e.buttons & 1) === 1) {
     const hit = surfaceHit(ndc);
@@ -9824,6 +14409,10 @@ renderer.domElement.addEventListener('pointerleave', () => {
   if (ghost) ghost.visible = false;
 });
 
+renderer.domElement.addEventListener('pointerup', () => {
+  handleTerrainSculptEnd();
+});
+
 function fpsShoot() {
   fpsRay.set(fpsCam.position, fpsCam.getWorldDirection(new THREE.Vector3()));
   const shootables = sceneObjects.filter(m => {
@@ -9872,7 +14461,10 @@ function fpsShoot() {
 
 function isEditingFormField() {
   const active = document.activeElement;
-  return active instanceof HTMLInputElement || active instanceof HTMLSelectElement || active instanceof HTMLTextAreaElement;
+  if (active instanceof HTMLInputElement || active instanceof HTMLSelectElement || active instanceof HTMLTextAreaElement) return true;
+  // Block editor keys when a full-screen overlay (e.g. skin editor) is open
+  if (skinEditorOverlayEl) return true;
+  return false;
 }
 
 // ─── Keyboard ────────────────────────────────────────────────────────────────
@@ -9900,11 +14492,23 @@ window.addEventListener('keydown', e => {
       setPlaytestDevView(!fpsDevView);
       return;
     }
-    if (['Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyR', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+    if (['Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyR', 'ShiftLeft', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
       e.preventDefault();
     }
-    if (e.code === 'Space' && !e.repeat) startJump();
-    if (e.code === 'KeyR') fpsSprinting = true;
+    if (keybindMatch('jump', e.code) && !e.repeat) startJump();
+    if (keybindMatch('sprint', e.code)) fpsSprinting = true;
+    if (keybindMatch('crouch', e.code)) fpsCrouching = true;
+    if (keybindMatch('toggleMouse', e.code) && !e.repeat) {
+      e.preventDefault();
+      if (fpsLocked) {
+        suppressPointerUnlockStop = true;
+        document.exitPointerLock();
+      } else {
+        renderer.domElement.requestPointerLock();
+      }
+      return;
+    }
+    if (e.code === 'KeyE' && !e.repeat) checkNpcInteraction();
     fpsKeys.add(e.code);
     return;
   }
@@ -9934,6 +14538,9 @@ window.addEventListener('keydown', e => {
 
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
+  if ((e.ctrlKey || e.metaKey) && k === 'c') { e.preventDefault(); copySelected(); return; }
+  if ((e.ctrlKey || e.metaKey) && k === 'v') { e.preventDefault(); pasteClipboard(); return; }
+  if ((e.ctrlKey || e.metaKey) && k === 'd') { e.preventDefault(); duplicateSelected(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'g') {
     e.preventDefault();
     if (e.shiftKey) ungroupSelected(); else groupSelected();
@@ -9957,7 +14564,12 @@ window.addEventListener('keydown', e => {
     return;
   }
   if (k === 'p') { startPlaytest(); return; }
-  if (k === 'escape') { stopPlaytest(); }
+  if (k === 'escape') { if (editorFreeLook) { stopEditorFreeLook(); return; } stopPlaytest(); }
+  if (k === 'f' && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    if (editorFreeLook) stopEditorFreeLook(); else startEditorFreeLook();
+    return;
+  }
 
   if (e.code === 'Tab' && state.mode === 'place') {
     e.preventDefault();
@@ -9980,7 +14592,8 @@ window.addEventListener('keydown', e => {
 
 window.addEventListener('keyup', e => {
   fpsKeys.delete(e.code);
-  if (e.code === 'KeyR') fpsSprinting = false;
+  if (keybindMatch('sprint', e.code)) fpsSprinting = false;
+  if (keybindMatch('crouch', e.code)) fpsCrouching = false;
   editKeys.delete(e.code);
 });
 
@@ -9988,6 +14601,7 @@ window.addEventListener('keyup', e => {
 function setMode(mode) {
   state.mode = mode;
   if (mode !== 'paint') state.colorPickArmed = false;
+  if (mode !== 'place') state._placingCustomTemplate = null;
   if (modeSelect) modeSelect.value = mode;
   if (mode !== 'select') selectObject(null);
   transformGroup.style.opacity       = mode === 'select' ? '1'    : '.4';
@@ -10079,6 +14693,7 @@ function setDefaultLightIntensity(val) {
   state.defaultLightIntensity = intensity;
   lightIntensityInput.value = intensity.toFixed(1);
   refreshStatus();
+  markRestoreDirty();
 }
 
 function activeCameraPosition() {
@@ -10170,11 +14785,34 @@ document.querySelectorAll('.lib-category-title').forEach(title => {
   });
 });
 
+// --- Object library search filter ---
+const libSearchInput = document.getElementById('lib-search');
+if (libSearchInput) {
+  libSearchInput.addEventListener('input', () => {
+    const q = libSearchInput.value.trim().toLowerCase();
+    const cats = document.querySelectorAll('#library-pane-objects .lib-category');
+    for (const cat of cats) {
+      const btns = cat.querySelectorAll('.lib-btn');
+      let anyVisible = false;
+      for (const btn of btns) {
+        const text = (btn.textContent || '').toLowerCase();
+        const type = (btn.dataset.type || '').toLowerCase();
+        const match = !q || text.includes(q) || type.includes(q);
+        btn.style.display = match ? '' : 'none';
+        if (match) anyVisible = true;
+      }
+      cat.style.display = anyVisible ? '' : 'none';
+    }
+  });
+}
+
 document.addEventListener('pointerdown', e => {
   const target = e.target;
   if (libraryContextMenuEl && libraryContextMenuEl.contains(target)) return;
   if (keypadContextMenuEl && keypadContextMenuEl.contains(target)) return;
   if (worldContextMenuEl && worldContextMenuEl.contains(target)) return;
+  if (skinEditorOverlayEl && skinEditorOverlayEl.contains(target)) return;
+  if (sculptEditorOverlayEl && sculptEditorOverlayEl.contains(target)) return;
   closeTransientMenus();
 });
 
@@ -10230,6 +14868,93 @@ if (pickColorBtn) {
     refreshStatus();
   });
 }
+texturePaintState.customImage = null; // clear uploaded image when selecting a pattern
+  const texBtn = document.getElementById('texture-upload-btn');
+  if (texBtn) texBtn.textContent = '📁 Upload Image';
+  
+// Texture paint wiring
+const texPatternSelect = document.getElementById('texture-pattern');
+const texColor2Input   = document.getElementById('texture-color2');
+const texScaleInput    = document.getElementById('texture-scale');
+if (texPatternSelect) texPatternSelect.addEventListener('change', () => {
+  texturePaintState.pattern = texPatternSelect.value;
+  texturePaintState.enabled = texPatternSelect.value !== 'none';
+  texturePaintState.customImage = null; // clear uploaded image when selecting a pattern
+  const texBtn = document.getElementById('texture-upload-btn');
+  if (texBtn) texBtn.textContent = '📁 Upload Image';
+  refreshStatus();
+});
+if (texColor2Input) texColor2Input.addEventListener('input', () => {
+  texturePaintState.color2 = parseInt(texColor2Input.value.replace('#', ''), 16) || 0x222222;
+});
+if (texScaleInput) texScaleInput.addEventListener('change', () => {
+  texturePaintState.scale = parseFloat(texScaleInput.value) || 1;
+});
+
+// Custom image texture upload
+const texUploadBtn  = document.getElementById('texture-upload-btn');
+const texUploadFile = document.getElementById('texture-upload-file');
+if (texUploadBtn && texUploadFile) {
+  texUploadBtn.addEventListener('click', () => texUploadFile.click());
+  texUploadFile.addEventListener('change', () => {
+    const file = texUploadFile.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        texturePaintState.customImage = img;
+        texturePaintState.pattern = 'custom';
+        texturePaintState.enabled = true;
+        if (texPatternSelect) texPatternSelect.value = 'none';
+        texUploadBtn.textContent = '✅ ' + file.name.slice(0, 12);
+        refreshStatus();
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+    texUploadFile.value = '';
+  });
+}
+
+// Terrain sculpt wiring
+const terrainSculptToggle = document.getElementById('terrain-sculpt-toggle');
+const terrainBrushSelect  = document.getElementById('terrain-brush');
+const terrainRadiusInput  = document.getElementById('terrain-radius');
+const terrainStrengthInput = document.getElementById('terrain-strength');
+if (terrainSculptToggle) terrainSculptToggle.addEventListener('change', () => {
+  terrainSculptState.active = terrainSculptToggle.checked;
+  if (terrainSculptToggle.checked) setMode('paint');
+  refreshStatus();
+});
+if (terrainBrushSelect) terrainBrushSelect.addEventListener('change', () => {
+  terrainSculptState.brush = terrainBrushSelect.value;
+});
+if (terrainRadiusInput) terrainRadiusInput.addEventListener('change', () => {
+  terrainSculptState.radius = parseFloat(terrainRadiusInput.value) || 3;
+});
+if (terrainStrengthInput) terrainStrengthInput.addEventListener('change', () => {
+  terrainSculptState.strength = parseFloat(terrainStrengthInput.value) || 0.3;
+});
+
+// Copy / Paste / Duplicate buttons
+const btnCopy = document.getElementById('btn-copy');
+const btnPaste = document.getElementById('btn-paste');
+const btnDuplicate = document.getElementById('btn-duplicate');
+if (btnCopy) btnCopy.addEventListener('click', () => copySelected());
+if (btnPaste) btnPaste.addEventListener('click', () => pasteClipboard());
+if (btnDuplicate) btnDuplicate.addEventListener('click', () => duplicateSelected());
+
+// Save as Custom Object button
+const btnSaveCustom = document.getElementById('btn-save-custom');
+if (btnSaveCustom) btnSaveCustom.addEventListener('click', () => {
+  const all = getAllSelected();
+  if (!all.length) { alert('Select one or more objects first.'); return; }
+  const name = prompt('Custom object name:', 'Custom ' + _nextCustomTemplateId);
+  if (name === null) return;
+  saveSelectionAsCustomObject(name || undefined);
+});
+
 syncScaleSideUI();
 
 // Gamerule inputs — support variable names in number fields
@@ -10253,6 +14978,7 @@ function bindVarAwareGrInput(inputEl, ruleKey, parseFn, fallback) {
       gameRules[ruleKey] = fallback;
       inputEl.style.color = '';
     }
+    markRestoreDirty();
   });
 }
 bindVarAwareGrInput(grJumpInput, 'jumpHeight', v => v || 8.5, 8.5);
@@ -10261,6 +14987,9 @@ if (grGravityEnabledInput) grGravityEnabledInput.addEventListener('change', () =
 grHeightInput.addEventListener('change', () => {
   gameRules.height = parseFloat(grHeightInput.value) || 1.75;
   gameRules.eyeHeight = gameRules.height - 0.15;
+});
+if (grCrouchHeightInput) grCrouchHeightInput.addEventListener('change', () => {
+  gameRules.crouchHeight = parseFloat(grCrouchHeightInput.value) || 1.0;
 });
 bindVarAwareGrInput(grSprintInput, 'sprintSpeed', v => v || 12, 12);
 bindVarAwareGrInput(grSprintDurationInput, 'sprintDuration', v => Math.max(0, v), 0);
@@ -10321,11 +15050,20 @@ if (btnResetValues) {
 }
 
 // Grid fill controls
-function setGridFill(enabled, color) {
+function setGridFill(enabled, color, texture) {
   gridFillEnabled = enabled;
   if (color !== undefined) gridFillColor = color;
-  // Update existing fill planes color
-  for (const [, mesh] of gridFillPlanes) mesh.material.color.setHex(gridFillColor);
+  if (texture !== undefined) gridFillTexture = texture;
+  // Rebuild fill planes with new material when texture changes
+  if (texture !== undefined) {
+    for (const [key, mesh] of gridFillPlanes) {
+      scene.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose();
+    }
+    gridFillPlanes.clear();
+  } else {
+    // Just update color on existing planes
+    for (const [, mesh] of gridFillPlanes) mesh.material.color.setHex(gridFillColor);
+  }
   // Force chunk rebuild
   lastChunkX = Infinity;
   const camPos = activeCameraPosition();
@@ -10334,8 +15072,17 @@ function setGridFill(enabled, color) {
 gridFillEnabledInput.addEventListener('change', () => setGridFill(gridFillEnabledInput.checked));
 gridFillColorInput.addEventListener('input', () => {
   gridFillColor = parseInt(gridFillColorInput.value.replace('#', ''), 16);
-  for (const [, mesh] of gridFillPlanes) mesh.material.color.setHex(gridFillColor);
+  gridFillTexture = 'none';
+  const texSel = document.getElementById('grid-fill-texture');
+  if (texSel) texSel.value = 'none';
+  for (const [, mesh] of gridFillPlanes) { if (mesh.material.map) { mesh.material.map.dispose(); mesh.material.map = null; } mesh.material.color.setHex(gridFillColor); mesh.material.needsUpdate = true; }
 });
+{
+  const texSel = document.getElementById('grid-fill-texture');
+  if (texSel) texSel.addEventListener('change', () => {
+    setGridFill(gridFillEnabled, undefined, texSel.value);
+  });
+}
 
 // World border controls
 function syncWorldBorderUI() {
@@ -10761,6 +15508,45 @@ function bindOpacityProps(mesh) {
   numberInput.addEventListener('change', () => commit(numberInput.value));
 }
 
+function bindReflectProps(mesh) {
+  const metalRange = document.getElementById('prop-metalness-range');
+  const metalNum = document.getElementById('prop-metalness-number');
+  const roughRange = document.getElementById('prop-roughness-range');
+  const roughNum = document.getElementById('prop-roughness-number');
+  if (!metalRange || !metalNum || !roughRange || !roughNum || state.selectedObject !== mesh) return;
+
+  const targets = getPropertyTargets(mesh).filter(t => t.material);
+  if (!targets.length) return;
+
+  const bindMaterialProp = (propName, rangeEl, numEl, undoType) => {
+    let before = new Map(targets.map(t => [t, t.material[propName] ?? 0]));
+    const sync = val => {
+      const v = THREE.MathUtils.clamp(parseFloat(val) || 0, 0, 1);
+      rangeEl.value = v;
+      numEl.value = r3(v, 2);
+      for (const t of targets) { t.material[propName] = v; t.material.needsUpdate = true; t.userData[propName] = v; }
+    };
+    const commit = val => {
+      const v = THREE.MathUtils.clamp(parseFloat(val) || 0, 0, 1);
+      for (const t of targets) {
+        const b = before.get(t);
+        if (b !== undefined && Math.abs(b - v) > 0.001) pushUndo({ type: undoType, mesh: t, before: b, after: v });
+      }
+      before = new Map(targets.map(t => [t, t.material[propName] ?? 0]));
+      sync(v);
+    };
+    rangeEl.addEventListener('pointerdown', () => { before = new Map(targets.map(t => [t, t.material[propName] ?? 0])); });
+    rangeEl.addEventListener('input', () => sync(rangeEl.value));
+    rangeEl.addEventListener('change', () => commit(rangeEl.value));
+    numEl.addEventListener('focus', () => { before = new Map(targets.map(t => [t, t.material[propName] ?? 0])); });
+    numEl.addEventListener('input', () => sync(numEl.value));
+    numEl.addEventListener('change', () => commit(numEl.value));
+  };
+
+  bindMaterialProp('metalness', metalRange, metalNum, 'metalness');
+  bindMaterialProp('roughness', roughRange, roughNum, 'roughness');
+}
+
 function buildCollisionConfigSnapshot(mesh) {
   return {
     collisionMode: getMeshCollisionMode(mesh),
@@ -11084,6 +15870,7 @@ function bindMovementPathProps(mesh) {
   };
 
   const enabledInput = document.getElementById('prop-path-enabled');
+  const drawInput = document.getElementById('prop-path-draw');
   const speedInput = document.getElementById('prop-path-speed');
   const loopInput = document.getElementById('prop-path-loop');
   const addSelectedBtn = document.getElementById('prop-path-add-selected');
@@ -11093,6 +15880,27 @@ function bindMovementPathProps(mesh) {
   if (enabledInput) {
     enabledInput.addEventListener('change', () => {
       withConfig(cfg => { cfg.enabled = !!enabledInput.checked; });
+    });
+  }
+
+  if (drawInput) {
+    drawInput.addEventListener('change', () => {
+      const targets = getPropertyTargets(mesh).filter(m => !['spawn', 'checkpoint', 'trigger'].includes(m.userData.type));
+      for (const t of targets) {
+        if (drawInput.checked) {
+          t.userData._drawAnimPath = true;
+          t.userData._drawAnimPathOrigin = t.position.clone();
+        } else {
+          if (t.userData._drawAnimPathOrigin) t.position.copy(t.userData._drawAnimPathOrigin);
+          delete t.userData._drawAnimPath;
+          delete t.userData._drawAnimPathOrigin;
+        }
+      }
+      if (!drawInput.checked) {
+        selBox.setFromObject(state.selectedObject);
+        transformControls.attach(state.selectedObject);
+      }
+      refreshSelectedPathPreview();
     });
   }
 
@@ -11331,6 +16139,269 @@ function bindCheckpointProps(mesh) {
       target.userData.checkpointConfig = normalizeCheckpointConfig(config);
     }
   });
+}
+
+function bindTeleportProps(mesh) {
+  const pairInput = document.getElementById('prop-teleport-pair');
+  if (!pairInput || state.selectedObject !== mesh) return;
+
+  const teleportTargets = getPropertyTargets(mesh).filter(t => t.userData.type === 'teleport');
+  if (!teleportTargets.length) return;
+
+  pairInput.addEventListener('change', () => {
+    for (const target of teleportTargets) {
+      const existing = normalizeTeleportConfig(target.userData.teleportConfig);
+      existing.pairLabel = pairInput.value;
+      target.userData.teleportConfig = existing;
+    }
+    markRestoreDirty();
+  });
+
+  const crossWorldCb = document.getElementById('prop-teleport-cross-world');
+  if (crossWorldCb) {
+    crossWorldCb.addEventListener('change', () => {
+      for (const target of teleportTargets) {
+        const existing = normalizeTeleportConfig(target.userData.teleportConfig);
+        existing.crossWorld = crossWorldCb.checked;
+        target.userData.teleportConfig = existing;
+      }
+      markRestoreDirty();
+      refreshProps();
+    });
+  }
+  const targetWorldSel = document.getElementById('prop-teleport-target-world');
+  if (targetWorldSel) {
+    targetWorldSel.addEventListener('change', () => {
+      for (const target of teleportTargets) {
+        const existing = normalizeTeleportConfig(target.userData.teleportConfig);
+        existing.targetWorld = targetWorldSel.value;
+        target.userData.teleportConfig = existing;
+      }
+      markRestoreDirty();
+    });
+  }
+  const previewBtn = document.getElementById('prop-teleport-preview');
+  if (previewBtn) {
+    previewBtn.addEventListener('click', () => {
+      const cfg = normalizeTeleportConfig(mesh.userData.teleportConfig);
+      if (!cfg.pairLabel) { previewBtn.textContent = 'No pair set'; setTimeout(() => { previewBtn.textContent = '👁 View Destination'; }, 1500); return; }
+      if (cfg.crossWorld) {
+        const tw = worlds.find(w => w.id === cfg.targetWorld);
+        previewBtn.textContent = tw ? `Destination: ${tw.name || tw.id}` : 'Target world not found';
+        setTimeout(() => { previewBtn.textContent = '👁 View Destination'; }, 2000);
+        return;
+      }
+      const dest = sceneObjects.find(o => o.userData.type === 'teleport' && (o.userData.label || '').toLowerCase() === cfg.pairLabel.toLowerCase() && o !== mesh && (o.userData.world || 'world_1') === activeWorldId);
+      if (!dest) { previewBtn.textContent = 'Pair not found'; setTimeout(() => { previewBtn.textContent = '👁 View Destination'; }, 1500); return; }
+      const dp = dest.position;
+      orbitControls.target.set(dp.x, dp.y, dp.z);
+      editorCam.position.set(dp.x + 5, dp.y + 4, dp.z + 5);
+      orbitControls.update();
+    });
+  }
+}
+
+function bindTextProps(mesh) {
+  if (state.selectedObject !== mesh) return;
+  const targets = getPropertyTargets(mesh).filter(t => t.userData.type === 'text' || t.userData.type === 'text3d');
+  const update = () => {
+    const content = document.getElementById('prop-text-content');
+    const font = document.getElementById('prop-text-font');
+    const size = document.getElementById('prop-text-size');
+    const color = document.getElementById('prop-text-color');
+    const bg = document.getElementById('prop-text-bg');
+    const bgTrans = document.getElementById('prop-text-bg-transparent');
+    const align = document.getElementById('prop-text-align');
+    const bold = document.getElementById('prop-text-bold');
+    const italic = document.getElementById('prop-text-italic');
+    for (const t of targets) {
+      t.userData.textConfig = normalizeTextConfig({
+        content: content?.value ?? 'Hello World',
+        fontFamily: font?.value ?? 'Arial',
+        fontSize: parseInt(size?.value, 10) || 48,
+        textColor: color?.value ?? '#ffffff',
+        bgColor: bgTrans?.checked ? 'transparent' : (bg?.value ?? '#000000'),
+        align: align?.value ?? 'center',
+        bold: !!bold?.checked,
+        italic: !!italic?.checked,
+      });
+      _applyTextTexture(t);
+    }
+    markRestoreDirty();
+  };
+  ['prop-text-content','prop-text-font','prop-text-size','prop-text-color','prop-text-bg','prop-text-bg-transparent','prop-text-align','prop-text-bold','prop-text-italic'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', update);
+    if (el) el.addEventListener('input', update);
+  });
+  const fontUploadBtn = document.getElementById('prop-text-font-upload');
+  const fontFileInput = document.getElementById('prop-text-font-file');
+  if (fontUploadBtn && fontFileInput) {
+    fontUploadBtn.addEventListener('click', () => fontFileInput.click());
+    fontFileInput.addEventListener('change', () => {
+      const file = fontFileInput.files[0];
+      if (!file) return;
+      const name = file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9 _-]/g, '');
+      if (!name) return;
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const entry = { name, dataUrl: reader.result };
+        if (!customFonts.find(f => f.name === name)) customFonts.push(entry);
+        await _registerCustomFont(entry);
+        const fontInput = document.getElementById('prop-text-font');
+        if (fontInput) { fontInput.value = name; update(); }
+        markRestoreDirty();
+        refreshProps();
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+}
+
+function bindScreenProps(mesh) {
+  if (state.selectedObject !== mesh) return;
+  const targets = getPropertyTargets(mesh).filter(t => t.userData.type === 'screen');
+  const typeSel = document.getElementById('prop-screen-type');
+  if (typeSel) typeSel.addEventListener('change', () => {
+    for (const t of targets) {
+      const sc = normalizeScreenConfig(t.userData.screenConfig);
+      sc.mediaType = typeSel.value;
+      t.userData.screenConfig = sc;
+      _applyScreenTexture(t);
+    }
+    markRestoreDirty();
+    refreshProps();
+  });
+  const colorInput = document.getElementById('prop-screen-color');
+  if (colorInput) colorInput.addEventListener('input', () => {
+    for (const t of targets) {
+      const sc = normalizeScreenConfig(t.userData.screenConfig);
+      sc.screenColor = colorInput.value;
+      t.userData.screenConfig = sc;
+      _applyScreenTexture(t);
+    }
+    markRestoreDirty();
+  });
+  const uploadBtn = document.getElementById('prop-screen-upload');
+  const fileInput = document.getElementById('prop-screen-file');
+  if (uploadBtn && fileInput) {
+    uploadBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        for (const t of targets) {
+          const sc = normalizeScreenConfig(t.userData.screenConfig);
+          sc.mediaType = 'image';
+          sc.imageData = reader.result;
+          t.userData.screenConfig = sc;
+          _applyScreenTexture(t);
+        }
+        markRestoreDirty();
+        refreshProps();
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+  // Video upload
+  const videoUploadBtn = document.getElementById('prop-screen-video-upload');
+  const videoFileInput = document.getElementById('prop-screen-video-file');
+  if (videoUploadBtn && videoFileInput) {
+    videoUploadBtn.addEventListener('click', () => videoFileInput.click());
+    videoFileInput.addEventListener('change', () => {
+      const file = videoFileInput.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        for (const t of targets) {
+          const sc = normalizeScreenConfig(t.userData.screenConfig);
+          sc.mediaType = 'video';
+          sc.videoData = reader.result;
+          t.userData.screenConfig = sc;
+          _applyScreenTexture(t);
+        }
+        markRestoreDirty();
+        refreshProps();
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+  // URL input
+  const urlInput = document.getElementById('prop-screen-url');
+  if (urlInput) urlInput.addEventListener('change', () => {
+    for (const t of targets) {
+      const sc = normalizeScreenConfig(t.userData.screenConfig);
+      sc.url = urlInput.value;
+      t.userData.screenConfig = sc;
+      _applyScreenTexture(t);
+    }
+    markRestoreDirty();
+  });
+  // HTML content textarea
+  const htmlInput = document.getElementById('prop-screen-html');
+  if (htmlInput) htmlInput.addEventListener('change', () => {
+    for (const t of targets) {
+      const sc = normalizeScreenConfig(t.userData.screenConfig);
+      sc.htmlContent = htmlInput.value;
+      t.userData.screenConfig = sc;
+      _applyScreenTexture(t);
+    }
+    markRestoreDirty();
+  });
+  // HTML file upload
+  const htmlUploadBtn = document.getElementById('prop-screen-html-upload');
+  const htmlFileInput = document.getElementById('prop-screen-html-file');
+  if (htmlUploadBtn && htmlFileInput) {
+    htmlUploadBtn.addEventListener('click', () => htmlFileInput.click());
+    htmlFileInput.addEventListener('change', () => {
+      const file = htmlFileInput.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        for (const t of targets) {
+          const sc = normalizeScreenConfig(t.userData.screenConfig);
+          sc.htmlContent = reader.result;
+          t.userData.screenConfig = sc;
+          _applyScreenTexture(t);
+        }
+        markRestoreDirty();
+        refreshProps();
+      };
+      reader.readAsText(file);
+    });
+  }
+  // Interactive checkbox
+  const interactiveCheck = document.getElementById('prop-screen-interactive');
+  if (interactiveCheck) interactiveCheck.addEventListener('change', () => {
+    for (const t of targets) {
+      const sc = normalizeScreenConfig(t.userData.screenConfig);
+      sc.interactive = interactiveCheck.checked;
+      t.userData.screenConfig = sc;
+    }
+    markRestoreDirty();
+  });
+}
+
+function bindCameraProps(mesh) {
+  if (state.selectedObject !== mesh) return;
+  const targets = getPropertyTargets(mesh).filter(t => t.userData.type === 'camera');
+  const fovInput = document.getElementById('prop-camera-fov');
+  const nearInput = document.getElementById('prop-camera-near');
+  const farInput = document.getElementById('prop-camera-far');
+  const update = () => {
+    for (const t of targets) {
+      t.userData.cameraConfig = normalizeCameraConfig({
+        fov: parseFloat(fovInput?.value) || 60,
+        near: parseFloat(nearInput?.value) || 0.1,
+        far: parseFloat(farInput?.value) || 1000,
+      });
+    }
+    markRestoreDirty();
+  };
+  if (fovInput) fovInput.addEventListener('change', update);
+  if (nearInput) nearInput.addEventListener('change', update);
+  if (farInput) farInput.addEventListener('change', update);
 }
 
 function bindTriggerStopProps(mesh) {
@@ -11807,6 +16878,52 @@ function bindControlActions(mesh) {
   });
 }
 
+function bindJointProps(mesh) {
+  if (!mesh || mesh.userData.type !== 'joint') return;
+  const jc = getMeshJointConfig(mesh);
+  if (!jc) return;
+
+  const parentInput = document.getElementById('prop-joint-parent');
+  const childInput = document.getElementById('prop-joint-child');
+  const axisSelect = document.getElementById('prop-joint-axis');
+  const modeSelect = document.getElementById('prop-joint-mode');
+  const speedInput = document.getElementById('prop-joint-speed');
+  const minInput = document.getElementById('prop-joint-min');
+  const maxInput = document.getElementById('prop-joint-max');
+
+  if (parentInput) parentInput.addEventListener('change', () => {
+    jc.parentLabel = parentInput.value.trim();
+    mesh.userData.jointConfig = jc;
+    updateJointIndicators();
+  });
+  if (childInput) childInput.addEventListener('change', () => {
+    jc.childLabel = childInput.value.trim();
+    mesh.userData.jointConfig = jc;
+    updateJointIndicators();
+  });
+  if (axisSelect) axisSelect.addEventListener('change', () => {
+    jc.axis = axisSelect.value;
+    mesh.userData.jointConfig = jc;
+    updateJointIndicators();
+  });
+  if (modeSelect) modeSelect.addEventListener('change', () => {
+    jc.mode = modeSelect.value;
+    mesh.userData.jointConfig = jc;
+  });
+  if (speedInput) speedInput.addEventListener('change', () => {
+    jc.speed = Math.max(0, parseFloat(speedInput.value) || 0);
+    mesh.userData.jointConfig = jc;
+  });
+  if (minInput) minInput.addEventListener('change', () => {
+    jc.minAngle = parseFloat(minInput.value) || -180;
+    mesh.userData.jointConfig = jc;
+  });
+  if (maxInput) maxInput.addEventListener('change', () => {
+    jc.maxAngle = parseFloat(maxInput.value) || 180;
+    mesh.userData.jointConfig = jc;
+  });
+}
+
 function refreshProps() {
   const m = state.selectedObject;
   if (!m) { hideProps(); return; }
@@ -11821,6 +16938,8 @@ function refreshProps() {
   const isTrigger = m.userData.type === 'trigger';
   const isTarget = m.userData.type === 'target';
   const isKeypad = m.userData.type === 'keypad';
+  const isJoint = m.userData.type === 'joint';
+  const isSkeleton = m.userData.type === 'skeleton';
   const canToggleSwitch = isSwitchableObjectType(m.userData.type);
   const switchConfig = getMeshSwitchConfig(m);
   const collisionMode = getMeshCollisionMode(m);
@@ -11830,6 +16949,10 @@ function refreshProps() {
     ? { center: new THREE.Vector3().fromArray(hitboxConfig.offset), size: new THREE.Vector3().fromArray(hitboxConfig.size) }
     : autoHitbox;
   const checkpointConfig = isCheckpoint ? getMeshCheckpointConfig(m) : null;
+  const isTeleport = m.userData.type === 'teleport';
+  const teleportConfig = isTeleport ? getMeshTeleportConfig(m) : null;
+  const isNpc = m.userData.type === 'npc';
+  const npcConfig = isNpc ? normalizeNpcConfig(m.userData.npcConfig) : null;
   const keypadConfig = isKeypad ? getMeshKeypadConfig(m) : null;
   const isSwitch = canToggleSwitch && switchConfig.enabled;
   const canEditControlFunctions = isTrigger || canToggleSwitch;
@@ -11846,22 +16969,25 @@ function refreshProps() {
     : '';
 
   const solidToggle = `<div class="prop-row"><span class="prop-key">Solid</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-solid-toggle" type="checkbox" ${m.userData.solid ? 'checked' : ''}/> Block</label></div></div>`;
-  const solidnessControls = `<div class="prop-row"><span class="prop-key">Dense</span><div class="prop-controls"><input id="prop-solidness-range" type="range" min="0" max="1" step="0.01" value="${clampMeshSolidness(m.userData.solidness ?? 1)}"/><input id="prop-solidness-number" type="number" min="0" max="1" step="0.01" value="${r3(clampMeshSolidness(m.userData.solidness ?? 1), 2)}"/></div></div>`;
+  const solidnessControls = `<div class="prop-row"><span class="prop-key" title="How much this object resists being pushed through (1 = fully solid, 0 = pass-through)">Density</span><div class="prop-controls"><input id="prop-solidness-range" type="range" min="0" max="1" step="0.01" value="${clampMeshSolidness(m.userData.solidness ?? 1)}"/><input id="prop-solidness-number" type="number" min="0" max="1" step="0.01" value="${r3(clampMeshSolidness(m.userData.solidness ?? 1), 2)}"/></div></div>`;
   const opacityControls = `<div class="prop-row"><span class="prop-key">Opacity</span><div class="prop-controls"><input id="prop-opacity-range" type="range" min="0.02" max="1" step="0.01" value="${clampMeshOpacity(m.userData.opacity ?? m.material.opacity ?? 1)}"/><input id="prop-opacity-number" type="number" min="0.02" max="1" step="0.01" value="${r3(clampMeshOpacity(m.userData.opacity ?? m.material.opacity ?? 1), 2)}"/></div></div>`;
-  const tractionToggle = `<div class="prop-row"><span class="prop-key">Traction</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-traction-toggle" type="checkbox" ${m.userData.traction ? 'checked' : ''}/> Carry XZ</label></div></div>`;
+  const curMetalness = m.material.metalness ?? 0;
+  const curRoughness = m.material.roughness ?? 0.5;
+  const reflectControls = `<div class="prop-row"><span class="prop-key">Metal</span><div class="prop-controls"><input id="prop-metalness-range" type="range" min="0" max="1" step="0.01" value="${r3(curMetalness, 2)}"/><input id="prop-metalness-number" type="number" min="0" max="1" step="0.01" value="${r3(curMetalness, 2)}"/></div></div><div class="prop-row"><span class="prop-key">Rough</span><div class="prop-controls"><input id="prop-roughness-range" type="range" min="0" max="1" step="0.01" value="${r3(curRoughness, 2)}"/><input id="prop-roughness-number" type="number" min="0" max="1" step="0.01" value="${r3(curRoughness, 2)}"/></div></div>`;
+  const tractionToggle = `<div class="prop-row"><span class="prop-key" title="When enabled, the player moves with this object (like standing on a moving platform)">Moving Platform</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-traction-toggle" type="checkbox" ${m.userData.traction ? 'checked' : ''}/> Carry player</label></div></div>`;
   const gameVisibleToggle = `<div class="prop-row"><span class="prop-key">In-Game</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-game-visible" type="checkbox" ${!m.userData.hiddenInGame ? 'checked' : ''}/> Visible</label></div></div>`;
-  const collisionControls = `<div class="prop-row"><span class="prop-key">Collision</span><div class="prop-controls"><select id="prop-collision-mode" style="font-size:10px;padding:2px 3px"><option value="aabb" ${collisionMode !== 'geometry' ? 'selected' : ''}>Box</option><option value="geometry" ${collisionMode === 'geometry' ? 'selected' : ''}>Geometry</option></select><span style="color:var(--muted);font-size:9px">geometry follows cut meshes</span></div></div>
+  const collisionControls = `<div class="prop-row"><span class="prop-key" title="How the game checks if the player bumps into this object">Collision</span><div class="prop-controls"><select id="prop-collision-mode" style="font-size:10px;padding:2px 3px"><option value="aabb" ${collisionMode !== 'geometry' ? 'selected' : ''}>Simple Box</option><option value="geometry" ${collisionMode === 'geometry' ? 'selected' : ''}>Exact Shape</option></select><span style="color:var(--muted);font-size:9px">exact shape = matches erased holes</span></div></div>
     ${collisionMode !== 'geometry' ? `<div class="prop-row"><span class="prop-key">Hitbox</span><div class="prop-controls"><select id="prop-hitbox-mode" style="font-size:10px;padding:2px 3px"><option value="auto" ${hitboxConfig.mode !== 'manual' ? 'selected' : ''}>Auto</option><option value="manual" ${hitboxConfig.mode === 'manual' ? 'selected' : ''}>Manual</option></select><button id="prop-hitbox-autofit" type="button" style="font-size:10px;padding:2px 6px">Auto Fit</button></div></div>
     <div class="prop-row"><span class="prop-key">Auto Box</span><span class="prop-val" style="font-size:9px">${r3(autoHitbox.size.x, 2)} × ${r3(autoHitbox.size.y, 2)} × ${r3(autoHitbox.size.z, 2)}</span></div>
-    ${hitboxConfig.mode === 'manual' ? `<div class="prop-row"><span class="prop-key">HB Size</span><div class="prop-controls"><input id="prop-hitbox-size-x" type="number" step="0.05" value="${r3(activeHitbox.size.x, 2)}" style="width:52px"/><input id="prop-hitbox-size-y" type="number" step="0.05" value="${r3(activeHitbox.size.y, 2)}" style="width:52px"/><input id="prop-hitbox-size-z" type="number" step="0.05" value="${r3(activeHitbox.size.z, 2)}" style="width:52px"/></div></div>
-    <div class="prop-row"><span class="prop-key">HB Offset</span><div class="prop-controls"><input id="prop-hitbox-offset-x" type="number" step="0.05" value="${r3(activeHitbox.center.x, 2)}" style="width:52px"/><input id="prop-hitbox-offset-y" type="number" step="0.05" value="${r3(activeHitbox.center.y, 2)}" style="width:52px"/><input id="prop-hitbox-offset-z" type="number" step="0.05" value="${r3(activeHitbox.center.z, 2)}" style="width:52px"/></div></div>` : ''}` : ''}`;
+    ${hitboxConfig.mode === 'manual' ? `<div class="prop-row"><span class="prop-key" title="Custom hitbox dimensions (width, height, depth)">Hitbox Size</span><div class="prop-controls"><input id="prop-hitbox-size-x" type="number" step="0.05" value="${r3(activeHitbox.size.x, 2)}" style="width:52px"/><input id="prop-hitbox-size-y" type="number" step="0.05" value="${r3(activeHitbox.size.y, 2)}" style="width:52px"/><input id="prop-hitbox-size-z" type="number" step="0.05" value="${r3(activeHitbox.size.z, 2)}" style="width:52px"/></div></div>
+    <div class="prop-row"><span class="prop-key" title="Move the hitbox center relative to the object">Hitbox Offset</span><div class="prop-controls"><input id="prop-hitbox-offset-x" type="number" step="0.05" value="${r3(activeHitbox.center.x, 2)}" style="width:52px"/><input id="prop-hitbox-offset-y" type="number" step="0.05" value="${r3(activeHitbox.center.y, 2)}" style="width:52px"/><input id="prop-hitbox-offset-z" type="number" step="0.05" value="${r3(activeHitbox.center.z, 2)}" style="width:52px"/></div></div>` : ''}` : ''}`;
 
   let lightControls = '';
   if (hasLight) {
     const dist = m.userData.lightDistance || LIGHT_BLOCK_DISTANCE;
     lightControls = `
       <div class="prop-row"><span class="prop-key">Bright</span><div class="prop-controls"><input id="prop-light-intensity-range" type="range" min="0" max="100" step="0.1" value="${getMeshLightIntensity(m)}"/><input id="prop-light-intensity-number" type="number" min="0" max="100" step="0.1" value="${r3(getMeshLightIntensity(m), 1)}"/></div></div>
-      <div class="prop-row"><span class="prop-key">Aura</span><div class="prop-controls"><input id="prop-light-distance-range" type="range" min="1" max="500" step="1" value="${dist}"/><input id="prop-light-distance-number" type="number" min="1" max="500" step="1" value="${dist}"/></div></div>`;
+      <div class="prop-row"><span class="prop-key" title="How far the light reaches">Range</span><div class="prop-controls"><input id="prop-light-distance-range" type="range" min="1" max="500" step="1" value="${dist}"/><input id="prop-light-distance-number" type="number" min="1" max="500" step="1" value="${dist}"/></div></div>`;
   }
 
   const emitToggle = !isLightType
@@ -11891,7 +17017,7 @@ function refreshProps() {
     return `<div class="prop-row" style="padding:2px 11px"><span class="prop-key" style="font-size:9px;min-width:24px">#${idx + 1}</span><div class="prop-controls" style="gap:4px;flex-wrap:wrap"><input class="prop-path-x" data-path-index="${idx}" type="number" step="0.1" value="${r3(px, 2)}" style="width:48px"/><input class="prop-path-y" data-path-index="${idx}" type="number" step="0.1" value="${r3(py, 2)}" style="width:48px"/><input class="prop-path-z" data-path-index="${idx}" type="number" step="0.1" value="${r3(pz, 2)}" style="width:48px"/><label style="display:flex;align-items:center;gap:2px;cursor:pointer;font-size:9px" title="Rotate to face this checkpoint"><input class="prop-path-face" data-path-index="${idx}" type="checkbox" ${cp.faceDirection ? 'checked' : ''}/> Face</label><input class="prop-path-fn" data-path-index="${idx}" list="prop-path-fn-options" type="text" value="${escapeHtml(cp.functionName || '')}" placeholder="on-arrive fn" style="width:94px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:1px 3px;font-size:10px"/><select class="prop-path-style" data-path-index="${idx}" style="font-size:9px;padding:1px 3px" title="Movement style to this point">${CHECKPOINT_MOVE_STYLES.map(s => `<option value="${s}" ${cpStyle === s ? 'selected' : ''}>${s}</option>`).join('')}</select><span style="font-size:8px;color:var(--muted)" title="Speed to this point (empty = path default)">Spd</span><input class="prop-path-cp-speed" data-path-index="${idx}" type="number" min="0" step="0.1" value="${cpSpeedDisplay}" placeholder="${cpSpeedPlaceholder}" style="width:44px" title="Speed to this point (empty = use path default ${cpSpeedPlaceholder})"/><span style="font-size:8px;color:var(--muted)" title="Wait duration (seconds) at this point before moving on">Wait</span><input class="prop-path-wait" data-path-index="${idx}" type="number" min="0" step="0.1" value="${r3(cpWait, 2)}" style="width:44px" title="Seconds to wait at this checkpoint"/><label style="display:flex;align-items:center;gap:2px;cursor:pointer;font-size:9px" title="Pause on arrival (requires function resume)"><input class="prop-path-pause" data-path-index="${idx}" type="checkbox" ${cp.pauseOnArrival ? 'checked' : ''}/> Pause</label><button class="prop-path-set-sel" data-path-index="${idx}" style="font-size:9px;padding:1px 5px">Sel</button><button class="prop-path-pick ${pickArmed ? 'active' : ''}" data-path-index="${idx}" style="font-size:9px;padding:1px 5px">Pick</button><button class="ct-del prop-path-del" data-path-index="${idx}" title="Delete checkpoint">✕</button></div></div>`;
   }).join('');
   const pathControls = canEditPath
-    ? `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Path</span><div class="prop-controls" style="gap:6px;flex-wrap:wrap"><label style="display:flex;align-items:center;gap:3px;cursor:pointer;font-size:9px"><input id="prop-path-enabled" type="checkbox" ${pathConfig.enabled ? 'checked' : ''}/> Ready</label><span style="font-size:9px;color:var(--muted)">Speed</span><input id="prop-path-speed" type="number" min="0.01" step="0.1" value="${r3(pathConfig.speed, 2)}" style="width:56px"/><label style="display:flex;align-items:center;gap:3px;cursor:pointer;font-size:9px"><input id="prop-path-loop" type="checkbox" ${pathConfig.loop ? 'checked' : ''}/> Loop</label><span style="font-size:9px;color:var(--muted)">Front</span><select id="prop-path-front-axis" style="font-size:9px;padding:1px 3px">${PATH_FRONT_AXES.map(a => `<option value="${a}" ${pathConfig.frontAxis === a ? 'selected' : ''}>${a}</option>`).join('')}</select></div></div><div class="prop-row" style="padding:2px 11px"><div class="prop-controls" style="gap:4px;flex-wrap:wrap"><button id="prop-path-add-selected" style="font-size:9px;padding:1px 6px">+ Sel Pos</button><button id="prop-path-add-camera" style="font-size:9px;padding:1px 6px">+ Cam Pos</button><button id="prop-path-clear" class="danger-btn" style="font-size:9px;padding:1px 6px">Clear</button><span style="font-size:9px;color:var(--muted)">Call with function action: path -> start</span></div></div><div class="prop-row" style="padding:0 11px 3px 11px"><span style="font-size:9px;color:var(--muted)">Pick = click in viewport to place checkpoint</span></div><datalist id="prop-path-fn-options">${pathFnOptions}</datalist>${pathRows || '<div class="prop-row" style="padding:2px 11px"><span class="prop-val" style="font-size:10px;color:var(--muted)">No checkpoints yet.</span></div>'}`
+    ? `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Path</span><div class="prop-controls" style="gap:6px;flex-wrap:wrap"><label style="display:flex;align-items:center;gap:3px;cursor:pointer;font-size:9px"><input id="prop-path-enabled" type="checkbox" ${pathConfig.enabled ? 'checked' : ''}/> Ready</label><label style="display:flex;align-items:center;gap:3px;cursor:pointer;font-size:9px" title="While checked, moving this object places checkpoints instead of moving existing ones"><input id="prop-path-draw" type="checkbox" ${m.userData._drawAnimPath ? 'checked' : ''}/> Draw</label><span style="font-size:9px;color:var(--muted)">Speed</span><input id="prop-path-speed" type="number" min="0.01" step="0.1" value="${r3(pathConfig.speed, 2)}" style="width:56px"/><label style="display:flex;align-items:center;gap:3px;cursor:pointer;font-size:9px"><input id="prop-path-loop" type="checkbox" ${pathConfig.loop ? 'checked' : ''}/> Loop</label><span style="font-size:9px;color:var(--muted)">Front</span><select id="prop-path-front-axis" style="font-size:9px;padding:1px 3px">${PATH_FRONT_AXES.map(a => `<option value="${a}" ${pathConfig.frontAxis === a ? 'selected' : ''}>${a}</option>`).join('')}</select></div></div><div class="prop-row" style="padding:2px 11px"><div class="prop-controls" style="gap:4px;flex-wrap:wrap"><button id="prop-path-add-selected" style="font-size:9px;padding:1px 6px">+ Sel Pos</button><button id="prop-path-add-camera" style="font-size:9px;padding:1px 6px">+ Cam Pos</button><button id="prop-path-clear" class="danger-btn" style="font-size:9px;padding:1px 6px">Clear</button><span style="font-size:9px;color:var(--muted)">Call with function action: path -> start</span></div></div><div class="prop-row" style="padding:0 11px 3px 11px"><span style="font-size:9px;color:var(--muted)">Pick = click in viewport to place checkpoint</span></div><datalist id="prop-path-fn-options">${pathFnOptions}</datalist>${pathRows || '<div class="prop-row" style="padding:2px 11px"><span class="prop-val" style="font-size:10px;color:var(--muted)">No checkpoints yet.</span></div>'}`
     : '';
 
   const switchControls = canToggleSwitch
@@ -11914,6 +17040,57 @@ function refreshProps() {
 
   const checkpointControls = isCheckpoint
     ? `<div class="prop-row"><span class="prop-key">Checkpt</span><div class="prop-controls"><select id="prop-checkpoint-interaction" style="font-size:10px;padding:2px 3px"><option value="touch" ${checkpointConfig.interaction === 'touch' ? 'selected' : ''}>Touch</option><option value="shoot" ${checkpointConfig.interaction === 'shoot' ? 'selected' : ''}>Shoot</option><option value="switch" ${checkpointConfig.interaction === 'switch' ? 'selected' : ''}>Switch</option></select><span style="color:var(--muted);font-size:9px">sets next respawn</span></div></div>`
+    : '';
+
+  const teleportControls = isTeleport
+    ? `<div class="prop-row"><span class="prop-key">Pair</span><div class="prop-controls"><input id="prop-teleport-pair" type="text" value="${escapeHtml(teleportConfig.pairLabel)}" placeholder="destination name" style="width:118px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px;font-family:inherit"/><span style="color:var(--muted);font-size:9px">Name of paired teleport block</span></div></div><div class="prop-row"><span class="prop-key">Cross-World</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:3px;cursor:pointer;font-size:11px"><input id="prop-teleport-cross-world" type="checkbox" ${teleportConfig.crossWorld ? 'checked' : ''}/> Enabled</label></div></div>${teleportConfig.crossWorld ? `<div class="prop-row"><span class="prop-key">Target World</span><div class="prop-controls"><select id="prop-teleport-target-world" style="font-size:10px;padding:2px 3px">${worlds.map(w => `<option value="${w.id}" ${teleportConfig.targetWorld === w.id ? 'selected' : ''}>${w.name || w.id}</option>`).join('')}</select></div></div>` : ''}<div class="prop-row"><span class="prop-key">Preview</span><div class="prop-controls"><button id="prop-teleport-preview" style="font-size:9px;padding:2px 6px" title="Snap camera to the paired teleport destination">👁 View Destination</button></div></div>`
+    : '';
+
+  // Text block controls
+  const isText = m.userData.type === 'text' || m.userData.type === 'text3d';
+  const textConfig = isText ? normalizeTextConfig(m.userData.textConfig) : null;
+  const textControls = isText
+    ? `<div class="prop-row"><span class="prop-key">Text</span><div class="prop-controls"><textarea id="prop-text-content" rows="3" style="width:170px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:3px 5px;font-size:11px;font-family:inherit;resize:vertical">${escapeHtml(textConfig.content)}</textarea></div></div><div class="prop-row"><span class="prop-key">Font</span><div class="prop-controls"><input id="prop-text-font" type="text" list="prop-text-font-list" value="${escapeHtml(textConfig.fontFamily)}" style="width:80px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px"/><datalist id="prop-text-font-list">${_getAvailableFontNames().map(n => `<option value="${escapeHtml(n)}"/>`).join('')}</datalist><input id="prop-text-size" type="number" min="8" max="200" step="1" value="${textConfig.fontSize}" style="width:44px" title="Font size"/><button id="prop-text-font-upload" style="font-size:8px;padding:1px 4px" title="Upload .ttf / .otf / .woff font file">+</button><input id="prop-text-font-file" type="file" accept=".ttf,.otf,.woff,.woff2" style="display:none"/></div></div><div class="prop-row"><span class="prop-key">Style</span><div class="prop-controls"><input id="prop-text-color" type="color" value="${textConfig.textColor}" title="Text color"/><input id="prop-text-bg" type="color" value="${textConfig.bgColor === 'transparent' ? '#000000' : textConfig.bgColor}" title="Background color"/><label style="font-size:9px;cursor:pointer"><input id="prop-text-bg-transparent" type="checkbox" ${textConfig.bgColor === 'transparent' ? 'checked' : ''}/> No BG</label></div></div><div class="prop-row"><span class="prop-key">Align</span><div class="prop-controls"><select id="prop-text-align" style="font-size:10px"><option value="left" ${textConfig.align === 'left' ? 'selected' : ''}>Left</option><option value="center" ${textConfig.align === 'center' ? 'selected' : ''}>Center</option><option value="right" ${textConfig.align === 'right' ? 'selected' : ''}>Right</option></select><label style="font-size:9px;cursor:pointer"><input id="prop-text-bold" type="checkbox" ${textConfig.bold ? 'checked' : ''}/> B</label><label style="font-size:9px;cursor:pointer"><input id="prop-text-italic" type="checkbox" ${textConfig.italic ? 'checked' : ''}/> I</label></div></div>`
+    : '';
+
+  // Screen/media controls
+  const isScreen = m.userData.type === 'screen';
+  const screenConfig = isScreen ? normalizeScreenConfig(m.userData.screenConfig) : null;
+  const _screenMediaOpts = [['color','Solid Color'],['image','Image'],['video','Video'],['url','Website URL'],['html','HTML']];
+  const screenControls = isScreen
+    ? `<div class="prop-row"><span class="prop-key">Media</span><div class="prop-controls"><select id="prop-screen-type" style="font-size:10px">${_screenMediaOpts.map(([v,l]) => `<option value="${v}" ${screenConfig.mediaType === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Interact</span><div class="prop-controls"><label style="font-size:10px;cursor:pointer"><input id="prop-screen-interactive" type="checkbox" ${screenConfig.interactive ? 'checked' : ''}/> Clickable in-game</label></div></div>` +
+      (screenConfig.mediaType === 'color' ? `<div class="prop-row"><span class="prop-key">Color</span><div class="prop-controls"><input id="prop-screen-color" type="color" value="${screenConfig.screenColor}"/></div></div>` : '') +
+      (screenConfig.mediaType === 'image' ? `<div class="prop-row"><span class="prop-key">Image</span><div class="prop-controls"><button id="prop-screen-upload" style="font-size:9px;padding:2px 6px">Upload Image</button><input id="prop-screen-file" type="file" accept="image/*" style="display:none"/></div></div>` : '') +
+      (screenConfig.mediaType === 'video' ? `<div class="prop-row"><span class="prop-key">Video</span><div class="prop-controls"><button id="prop-screen-video-upload" style="font-size:9px;padding:2px 6px">Upload Video</button><input id="prop-screen-video-file" type="file" accept="video/*" style="display:none"/></div></div>` : '') +
+      (screenConfig.mediaType === 'url' ? `<div class="prop-row"><span class="prop-key">URL</span><div class="prop-controls"><input id="prop-screen-url" type="text" value="${escapeHtml(screenConfig.url)}" placeholder="https://example.com" style="width:160px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px"/></div></div>` : '') +
+      (screenConfig.mediaType === 'html' ? `<div class="prop-row"><span class="prop-key">HTML</span><div class="prop-controls"><textarea id="prop-screen-html" rows="4" style="width:170px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:3px 5px;font-size:10px;font-family:monospace;resize:vertical" placeholder="&lt;h1&gt;Hello&lt;/h1&gt;">${escapeHtml(screenConfig.htmlContent)}</textarea></div></div><div class="prop-row"><div class="prop-controls"><button id="prop-screen-html-upload" style="font-size:9px;padding:2px 6px">Upload HTML File</button><input id="prop-screen-html-file" type="file" accept=".html,.htm" style="display:none"/></div></div>` : '')
+    : '';
+
+  // Camera controls
+  const isCamera = m.userData.type === 'camera';
+  const cameraConfig = isCamera ? normalizeCameraConfig(m.userData.cameraConfig) : null;
+  const cameraControls = isCamera
+    ? `<div class="prop-row"><span class="prop-key">FOV</span><div class="prop-controls"><input id="prop-camera-fov" type="number" min="10" max="150" step="1" value="${cameraConfig.fov}" style="width:56px"/></div></div><div class="prop-row"><span class="prop-key">Near</span><div class="prop-controls"><input id="prop-camera-near" type="number" min="0.01" step="0.1" value="${cameraConfig.near}" style="width:56px"/></div></div><div class="prop-row"><span class="prop-key">Far</span><div class="prop-controls"><input id="prop-camera-far" type="number" min="1" step="10" value="${cameraConfig.far}" style="width:56px"/></div></div>`
+    : '';
+
+  // NPC controls
+  const npcControls = isNpc
+    ? `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Identity</span></div>` +
+      `<div class="prop-row"><span class="prop-key">Name</span><div class="prop-controls"><input id="prop-npc-name" type="text" value="${escapeHtml(npcConfig.displayName)}" style="width:130px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px" placeholder="NPC name"/></div></div>` +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Appearance</span></div>` +
+      `<div class="prop-row"><span class="prop-key">Skin</span><div class="prop-controls"><input id="prop-npc-skin" type="color" value="${'#' + npcConfig.skinColor.toString(16).padStart(6, '0')}" title="Skin color"/><span style="font-size:9px;color:var(--muted)">Skin</span></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Shirt</span><div class="prop-controls"><input id="prop-npc-shirt" type="color" value="${'#' + npcConfig.shirtColor.toString(16).padStart(6, '0')}" title="Shirt color"/><span style="font-size:9px;color:var(--muted)">Shirt</span></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Pants</span><div class="prop-controls"><input id="prop-npc-pants" type="color" value="${'#' + npcConfig.pantsColor.toString(16).padStart(6, '0')}" title="Pants color"/><span style="font-size:9px;color:var(--muted)">Pants</span></div></div>` +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Motion</span></div>` +
+      `<div class="prop-row"><span class="prop-key">Behavior</span><div class="prop-controls"><select id="prop-npc-behavior" style="font-size:10px"><option value="idle" ${npcConfig.behavior === 'idle' ? 'selected' : ''}>Idle</option><option value="wander" ${npcConfig.behavior === 'wander' ? 'selected' : ''}>Wander</option><option value="patrol" ${npcConfig.behavior === 'patrol' ? 'selected' : ''}>Patrol (uses path)</option></select></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Walk Speed</span><div class="prop-controls"><input id="prop-npc-speed" type="number" min="0.1" max="10" step="0.1" value="${npcConfig.walkSpeed}" style="width:50px"/></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Wander Radius</span><div class="prop-controls"><input id="prop-npc-wander-radius" type="number" min="0.5" max="50" step="0.5" value="${npcConfig.wanderRadius}" style="width:50px" title="How far the NPC wanders from its origin"/></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Talk Range</span><div class="prop-controls"><input id="prop-npc-interact-dist" type="number" min="0.5" max="20" step="0.5" value="${npcConfig.interactDistance}" style="width:50px" title="How close the player must be to interact"/></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Face Player</span><div class="prop-controls"><label style="font-size:10px;cursor:pointer"><input id="prop-npc-face-player" type="checkbox" ${npcConfig.facePlayer ? 'checked' : ''}/> Turn toward player</label></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Idle Anim</span><div class="prop-controls"><label style="font-size:10px;cursor:pointer"><input id="prop-npc-idle-anim" type="checkbox" ${npcConfig.idleAnimation ? 'checked' : ''}/> Breathing / sway</label></div></div>` +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Dialogue</span><span style="font-size:9px;color:var(--muted);margin-left:auto">${npcConfig.dialogueLines.length} line${npcConfig.dialogueLines.length !== 1 ? 's' : ''}</span></div>` +
+      `<div class="prop-row"><div class="prop-controls" style="width:100%"><textarea id="prop-npc-dialogue" rows="6" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:4px 6px;font-size:11px;font-family:inherit;resize:vertical;line-height:1.4" placeholder="One line per dialogue message&#10;Player presses E to advance&#10;Last line closes the dialogue">${escapeHtml(npcConfig.dialogueLines.join('\n'))}</textarea></div></div>`
     : '';
 
   // Target health
@@ -12025,6 +17202,40 @@ function refreshProps() {
   }
 
   const escapedLabel = (m.userData.label || '').replace(/"/g, '&quot;');
+
+  // Joint controls
+  const jointConfig = isJoint ? getMeshJointConfig(m) : null;
+  const _jointLabelOpts = isJoint ? renderDatalistOptions(sceneObjects.filter(o => o !== m && o.userData.label).map(o => o.userData.label)) : '';
+
+  // Skeleton controls
+  const skelConfig = isSkeleton ? getMeshSkeletonConfig(m) : null;
+  const skelDefNames = Object.keys(skeletonDefinitions);
+  const skelDef = skelConfig?.definitionName ? skeletonDefinitions[skelConfig.definitionName] : null;
+  const skelAnimNames = skelDef ? Object.keys(skelDef.animations || {}) : [];
+  const skelPoseNames = skelDef ? Object.keys(skelDef.poses || {}) : [];
+  const skeletonControls = isSkeleton && skelConfig
+    ? `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Skeleton</span></div>
+       <div class="prop-row"><span class="prop-key">Definition</span><div class="prop-controls"><select id="prop-skel-def" style="font-size:10px;padding:2px 3px;max-width:130px"><option value="">(none)</option>${skelDefNames.map(n => `<option value="${escapeHtml(n)}" ${skelConfig.definitionName === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}</select><button id="prop-skel-new-def" style="font-size:9px;padding:2px 5px" title="Create new definition">+</button></div></div>
+       <div class="prop-row"><span class="prop-key">Editor</span><div class="prop-controls"><button id="prop-skel-open-editor" style="font-size:10px;padding:2px 8px" ${!skelConfig.definitionName ? 'disabled' : ''}>Open Skeleton Editor</button></div></div>
+       <div class="prop-row"><span class="prop-key">Animation</span><div class="prop-controls"><select id="prop-skel-anim" style="font-size:10px;padding:2px 3px;max-width:130px"><option value="">(none)</option>${skelAnimNames.map(n => `<option value="${escapeHtml(n)}" ${skelConfig.currentAnimation === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}</select></div></div>
+       <div class="prop-row"><span class="prop-key">Pose</span><div class="prop-controls"><select id="prop-skel-pose" style="font-size:10px;padding:2px 3px;max-width:130px"><option value="">(default)</option>${skelPoseNames.map(n => `<option value="${escapeHtml(n)}" ${skelConfig.currentPose === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}</select></div></div>
+       <div class="prop-row"><span class="prop-key">Auto Play</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-skel-autoplay" type="checkbox" ${skelConfig.playOnStart ? 'checked' : ''}/> On Start</label></div></div>
+       <div class="prop-row"><span class="prop-key">Loop</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-skel-loop" type="checkbox" ${skelConfig.loopAnimation ? 'checked' : ''}/> Loop Clip</label></div></div>
+       <div class="prop-row"><span class="prop-key">Speed</span><div class="prop-controls"><input id="prop-skel-speed" type="number" min="0" step="0.1" value="${skelConfig.animationSpeed}" style="width:60px"/><span style="color:var(--muted);font-size:9px">x</span></div></div>
+       <div class="prop-row"><span class="prop-key">Bones</span><span class="prop-val" style="font-size:9px;color:var(--muted)">${skelDef ? skelDef.bones.length : 0} bones, ${skelAnimNames.length} clips, ${skelPoseNames.length} poses</span></div>`
+    : '';
+  const jointControls = isJoint && jointConfig
+    ? `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Joint</span></div>
+       <div class="prop-row"><span class="prop-key">Parent</span><div class="prop-controls"><input id="prop-joint-parent" list="prop-joint-label-opts" type="text" value="${escapeHtml(jointConfig.parentLabel)}" placeholder="parent object name" style="width:130px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px;font-family:inherit"/></div></div>
+       <div class="prop-row"><span class="prop-key">Child</span><div class="prop-controls"><input id="prop-joint-child" list="prop-joint-label-opts" type="text" value="${escapeHtml(jointConfig.childLabel)}" placeholder="child object name" style="width:130px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px;font-family:inherit"/></div></div>
+       <datalist id="prop-joint-label-opts">${_jointLabelOpts}</datalist>
+       <div class="prop-row"><span class="prop-key">Axis</span><div class="prop-controls"><select id="prop-joint-axis" style="font-size:10px;padding:2px 3px">${JOINT_AXES.map(a => `<option value="${a}" ${jointConfig.axis === a ? 'selected' : ''}>${a}</option>`).join('')}</select></div></div>
+       <div class="prop-row"><span class="prop-key">Mode</span><div class="prop-controls"><select id="prop-joint-mode" style="font-size:10px;padding:2px 3px"><option value="auto" ${jointConfig.mode === 'auto' ? 'selected' : ''}>Auto (oscillate)</option><option value="manual" ${jointConfig.mode === 'manual' ? 'selected' : ''}>Manual (function)</option><option value="fixed" ${jointConfig.mode === 'fixed' ? 'selected' : ''}>Fixed (link only)</option></select></div></div>
+       <div class="prop-row"><span class="prop-key">Speed</span><div class="prop-controls"><input id="prop-joint-speed" type="number" min="0" step="0.1" value="${r3(jointConfig.speed, 2)}" style="width:60px"/><span style="color:var(--muted);font-size:9px">rot/s</span></div></div>
+       <div class="prop-row"><span class="prop-key">Min°</span><div class="prop-controls"><input id="prop-joint-min" type="number" step="1" value="${r3(jointConfig.minAngle, 1)}" style="width:60px"/></div></div>
+       <div class="prop-row"><span class="prop-key">Max°</span><div class="prop-controls"><input id="prop-joint-max" type="number" step="1" value="${r3(jointConfig.maxAngle, 1)}" style="width:60px"/></div></div>`
+    : '';
+
   propsContent.innerHTML = `
     <div class="props-category">
       <div class="props-cat-hdr" data-cat="identity">▾ Identity</div>
@@ -12032,7 +17243,7 @@ function refreshProps() {
         <div class="prop-row"><span class="prop-key">Type</span><span class="prop-val">${typeLabel(m.userData.type)}</span></div>
         <div class="prop-row"><span class="prop-key">Name</span><div class="prop-controls"><input id="prop-label" type="text" value="${escapedLabel}" placeholder="(none)" style="flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px;font-family:inherit"/></div></div>
         ${groupControls}
-        ${m.userData.editorGroupId ? `<div class="prop-row"><span class="prop-key">Group</span><span class="prop-val" style="font-size:9px;color:var(--accentHi)">${m.userData.editorGroupId} (${getEditorGroupMembers(m).length} objects)</span></div>` : ''}
+        ${m.userData.editorGroupId ? `<div class="prop-row"><span class="prop-key">Grouped</span><span class="prop-val" style="font-size:9px;color:var(--accentHi)">Yes — ${getEditorGroupMembers(m).length} objects</span></div>` : ''}
       </div>
     </div>
     <div class="props-category">
@@ -12049,6 +17260,7 @@ function refreshProps() {
         ${surfaceControls}
         ${shapeControls}
         ${opacityControls}
+        ${reflectControls}
         ${emitToggle}
         ${lightControls}
       </div>
@@ -12063,7 +17275,7 @@ function refreshProps() {
         ${gameVisibleToggle}
       </div>
     </div>
-    ${(pathControls || switchControls || switchRangeControls || keypadControls || checkpointControls || targetControls || triggerRulesHtml) ? `<div class="props-category">
+    ${(pathControls || switchControls || switchRangeControls || keypadControls || checkpointControls || targetControls || triggerRulesHtml || jointControls || skeletonControls || npcControls) ? `<div class="props-category">
       <div class="props-cat-hdr" data-cat="behavior">▾ Behavior</div>
       <div class="props-cat-body" data-cat="behavior">
         ${pathControls}
@@ -12071,8 +17283,20 @@ function refreshProps() {
         ${switchRangeControls}
         ${keypadControls}
         ${checkpointControls}
+        ${teleportControls}
         ${targetControls}
         ${triggerRulesHtml}
+        ${jointControls}
+        ${skeletonControls}
+        ${npcControls}
+      </div>
+    </div>` : ''}
+    ${(textControls || screenControls || cameraControls) ? `<div class="props-category">
+      <div class="props-cat-hdr" data-cat="content">▾ Content</div>
+      <div class="props-cat-body" data-cat="content">
+        ${textControls}
+        ${screenControls}
+        ${cameraControls}
       </div>
     </div>` : ''}
   `;
@@ -12113,6 +17337,7 @@ function refreshProps() {
   bindSolidToggle(m);
   bindSolidnessProps(m);
   bindOpacityProps(m);
+  bindReflectProps(m);
   bindTractionToggle(m);
   bindGameVisibleToggle(m);
   bindCollisionProps(m);
@@ -12121,6 +17346,7 @@ function refreshProps() {
   bindGroupProp(m);
   if (canEditPath) bindMovementPathProps(m);
   if (isCheckpoint) bindCheckpointProps(m);
+  if (isTeleport) bindTeleportProps(m);
   if (canToggleSwitch) bindSwitchProps(m);
   if (isKeypad) bindKeypadProps(m);
   if (isTarget) bindTargetHealthProp(m);
@@ -12129,7 +17355,78 @@ function refreshProps() {
     bindTriggerStopProps(m);
   }
   if (canEditControlFunctions) bindControlActions(m);
+  if (isJoint) bindJointProps(m);
+  if (isSkeleton) bindSkeletonProps(m);
+  if (isText) bindTextProps(m);
+  if (isScreen) bindScreenProps(m);
+  if (isCamera) bindCameraProps(m);
+  if (isNpc) bindNpcProps(m);
   refreshSelectedPathPreview();
+}
+
+function bindSkeletonProps(mesh) {
+  const defSelect = document.getElementById('prop-skel-def');
+  const newDefBtn = document.getElementById('prop-skel-new-def');
+  const openEditorBtn = document.getElementById('prop-skel-open-editor');
+  const animSelect = document.getElementById('prop-skel-anim');
+  const poseSelect = document.getElementById('prop-skel-pose');
+  const autoPlayCb = document.getElementById('prop-skel-autoplay');
+  const loopCb = document.getElementById('prop-skel-loop');
+  const speedInput = document.getElementById('prop-skel-speed');
+
+  if (defSelect) defSelect.addEventListener('change', () => {
+    mesh.userData.skeletonConfig.definitionName = defSelect.value;
+    refreshSkeletonMeshVisual(mesh);
+    refreshProps();
+  });
+  if (newDefBtn) newDefBtn.addEventListener('click', () => {
+    const name = prompt('Skeleton definition name:', 'Skeleton_' + Date.now().toString(36));
+    if (!name?.trim()) return;
+    const defName = name.trim();
+    if (!skeletonDefinitions[defName]) {
+      skeletonDefinitions[defName] = createDefaultSkeletonDefinition(defName);
+    }
+    mesh.userData.skeletonConfig.definitionName = defName;
+    refreshSkeletonMeshVisual(mesh);
+    refreshProps();
+  });
+  if (openEditorBtn) openEditorBtn.addEventListener('click', () => {
+    const cfg = getMeshSkeletonConfig(mesh);
+    if (cfg?.definitionName) openSkeletonEditor(cfg.definitionName);
+  });
+  if (animSelect) animSelect.addEventListener('change', () => {
+    mesh.userData.skeletonConfig.currentAnimation = animSelect.value;
+  });
+  if (poseSelect) poseSelect.addEventListener('change', () => {
+    mesh.userData.skeletonConfig.currentPose = poseSelect.value;
+    applySkeletonPoseToVisual(mesh);
+  });
+  if (autoPlayCb) autoPlayCb.addEventListener('change', () => {
+    mesh.userData.skeletonConfig.playOnStart = autoPlayCb.checked;
+  });
+  if (loopCb) loopCb.addEventListener('change', () => {
+    mesh.userData.skeletonConfig.loopAnimation = loopCb.checked;
+  });
+  if (speedInput) speedInput.addEventListener('change', () => {
+    mesh.userData.skeletonConfig.animationSpeed = Math.max(0, parseFloat(speedInput.value) || 1);
+  });
+}
+
+function applySkeletonPoseToVisual(mesh) {
+  const cfg = getMeshSkeletonConfig(mesh);
+  if (!cfg?.definitionName) return;
+  const def = skeletonDefinitions[cfg.definitionName];
+  if (!def) return;
+  const pose = cfg.currentPose ? def.poses?.[cfg.currentPose] : null;
+  if (!pose || !mesh.userData._skelBoneMap) return;
+  for (const [boneId, quat] of Object.entries(pose)) {
+    const bone = mesh.userData._skelBoneMap.get(boneId);
+    if (bone && Array.isArray(quat) && quat.length >= 4) {
+      bone.quaternion.set(quat[0], quat[1], quat[2], quat[3]);
+    }
+  }
+  mesh.userData._skelRootGroup?.updateMatrixWorld(true);
+  refreshSkeletonMeshVisual(mesh);
 }
 function hideProps() { propsPanel.style.display = 'none'; }
 
@@ -12476,10 +17773,70 @@ btnAddCondTrigger.addEventListener('click', () => {
   refreshCondTriggerUI();
 });
 
+// ─── Keybind UI wiring ──────────────────────────────────────────────────────
+function syncKeybindButtons() {
+  document.querySelectorAll('.keybind-btn').forEach(btn => {
+    const action = btn.dataset.action;
+    if (action && keybinds[action] !== undefined) {
+      btn.textContent = keybindLabel(keybinds[action]);
+    }
+  });
+}
+let _keybindListeningBtn = null;
+function stopKeybindListening() {
+  if (_keybindListeningBtn) {
+    _keybindListeningBtn.classList.remove('listening');
+    _keybindListeningBtn.textContent = keybindLabel(keybinds[_keybindListeningBtn.dataset.action]);
+    _keybindListeningBtn = null;
+  }
+}
+document.querySelectorAll('.keybind-btn').forEach(btn => {
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (_keybindListeningBtn === btn) { stopKeybindListening(); return; }
+    stopKeybindListening();
+    _keybindListeningBtn = btn;
+    btn.classList.add('listening');
+    btn.textContent = 'Press a key…';
+  });
+});
+document.addEventListener('keydown', (e) => {
+  if (!_keybindListeningBtn) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const action = _keybindListeningBtn.dataset.action;
+  keybinds[action] = e.code;
+  stopKeybindListening();
+  updatePlayHint();
+}, true);
+document.addEventListener('mousedown', (e) => {
+  if (!_keybindListeningBtn) return;
+  const action = _keybindListeningBtn.dataset.action;
+  if (action === 'shoot') {
+    e.preventDefault();
+    e.stopPropagation();
+    keybinds[action] = 'mouse' + e.button;
+    stopKeybindListening();
+    updatePlayHint();
+    return;
+  }
+  // If clicking outside a keybind button and not awaiting mouse bind, stop listening
+  if (!e.target.classList.contains('keybind-btn')) {
+    stopKeybindListening();
+  }
+}, true);
+{
+  const resetBtn = document.getElementById('btn-reset-keybinds');
+  if (resetBtn) resetBtn.addEventListener('click', () => {
+    Object.assign(keybinds, DEFAULT_KEYBINDS);
+    syncKeybindButtons();
+    updatePlayHint();
+  });
+}
+
 // ─── Control functions UI (project-level function editor) ────────────────────
 function refreshControlFunctionsUI() {
   if (!controlFunctionsListEl) return;
-
   ensureControlFunctionGroups();
   const search = String(controlFnSearchInput?.value ?? '').trim().toLowerCase();
   const visible = controlFunctions
@@ -12502,7 +17859,8 @@ function refreshControlFunctionsUI() {
       const isSetBool = action.actionType === 'setBool';
       const isPlayerStats = action.actionType === 'playerStats';
       const isTeleport = action.actionType === 'teleport';
-      const moveOpts = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool || isPlayerStats || isTeleport) ? '' : getMoveTargetOptions(action.refType, action.refValue);
+      const isSkeletonAct = action.actionType === 'skeleton';
+      const moveOpts = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool || isPlayerStats || isTeleport || isSkeletonAct) ? '' : getMoveTargetOptions(action.refType, action.refValue);
       const moveListId = `cfn-target-opts-${fnIdx}-${actIdx}`;
       const fnListId = `cfn-fn-opts-${fnIdx}-${actIdx}`;
       const audioListId = `cfn-audio-opts-${fnIdx}-${actIdx}`;
@@ -12524,6 +17882,8 @@ function refreshControlFunctionsUI() {
         ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Bool</span><input class="cfn-set-bool-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${boolListId}" type="text" value="${escapeHtml(action.setBoolName || '')}" placeholder="doorOpen" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${boolListId}">${knownBoolNames}</datalist><select class="cfn-set-bool-value" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="true" ${action.setBoolValue === true ? 'selected' : ''}>true</option><option value="false" ${action.setBoolValue === false ? 'selected' : ''}>false</option><option value="toggle" ${action.setBoolValue === 'toggle' ? 'selected' : ''}>toggle</option></select></div>`
         : isPlayerStats
         ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Target</span><select class="cfn-ps-target-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="name" ${action.playerStatTargetType === 'name' ? 'selected' : ''}>name</option><option value="group" ${action.playerStatTargetType === 'group' ? 'selected' : ''}>group</option></select><input class="cfn-ps-target" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.playerStatTarget || '')}" placeholder="Player" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Stat</span><select class="cfn-ps-key" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PLAYER_STAT_KEYS.map(k => `<option value="${k}" ${action.playerStatKey === k ? 'selected' : ''}>${k}</option>`).join('')}</select><select class="cfn-ps-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PLAYER_STAT_OPS.map(op => `<option value="${op}" ${action.playerStatOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select><input class="cfn-ps-value" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="1" value="${action.playerStatValue}" style="width:64px;font-size:9px"/></div><div style="font-size:8px;color:#444d56;margin-left:42px">Only affects players matching the target. Non-player objects are ignored.</div>`
+        : isSkeletonAct
+        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Skeleton</span><select class="cfn-ref-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="group" ${action.refType === 'group' ? 'selected' : ''}>group</option><option value="name" ${action.refType === 'name' ? 'selected' : ''}>name</option></select><input class="cfn-ref-val" data-fn="${fnIdx}" data-act="${actIdx}" list="${moveListId}" type="text" value="${escapeHtml(action.refValue)}" placeholder="skeleton name" style="flex:1;min-width:70px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${moveListId}">${getMoveTargetOptions(action.refType, action.refValue)}</datalist></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Cmd</span><select class="cfn-skel-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${SKELETON_ANIM_COMMANDS.map(cmd => `<option value="${cmd}" ${action.skelAnimCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Clip</span><input class="cfn-skel-clip" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.skelAnimClip || '')}" placeholder="animation clip name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Speed</span><input class="cfn-skel-speed" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" min="0" value="${action.skelAnimSpeed ?? 1}" style="width:52px;font-size:9px"/></div>`
         : isTeleport
         ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Mode</span><select class="cfn-teleport-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${TELEPORT_MODES.map(m => `<option value="${m}" ${action.teleportMode === m ? 'selected' : ''}>${m}</option>`).join('')}</select></div>${action.teleportMode === 'coords' ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Coords</span><input class="cfn-teleport-x" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[0]}" style="width:52px;font-size:9px"/><input class="cfn-teleport-y" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[1]}" style="width:52px;font-size:9px"/><input class="cfn-teleport-z" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[2]}" style="width:52px;font-size:9px"/></div>` : ''}${action.teleportMode === 'object' ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Object</span><input class="cfn-teleport-target-ref" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.teleportTargetRef || '')}" placeholder="object name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div>` : ''}<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">World</span><select class="cfn-teleport-world" data-fn="${fnIdx}" data-act="${actIdx}" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"><option value="" ${!action.teleportWorldId ? 'selected' : ''}>(current world)</option>${worlds.map(w => `<option value="${w.id}" ${action.teleportWorldId === w.id ? 'selected' : ''}>${escapeHtml(w.name || w.id)}</option>`).join('')}</select></div>`
         : isAudio
@@ -12539,12 +17899,12 @@ function refreshControlFunctionsUI() {
           : `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To (orig)</span><input class="cfn-ox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[0]}" style="width:42px;font-size:9px"/><input class="cfn-oy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[1]}" style="width:42px;font-size:9px"/><input class="cfn-oz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[2]}" style="width:42px;font-size:9px"/></div>
           <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From (orig)</span><input class="cfn-sox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-soy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-soz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[2]}" style="width:42px;font-size:9px"/></div>
           <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`;
-      const posReadout = (!isLight && !isPlayerGroup && !isFunctionControl && !isAudio && !isPath && !isSetVar && !isSetBool && !isPlayerStats && !isTeleport) ? `<div class="cfn-pos-readout" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:8px;color:var(--accentHi);margin-left:34px;min-height:12px;font-family:monospace;opacity:0.8"></div>` : '';
-      const targetRefHtml = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool || isPlayerStats || isTeleport)
+      const posReadout = (!isLight && !isPlayerGroup && !isFunctionControl && !isAudio && !isPath && !isSetVar && !isSetBool && !isPlayerStats && !isTeleport && !isSkeletonAct) ? `<div class="cfn-pos-readout" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:8px;color:var(--accentHi);margin-left:34px;min-height:12px;font-family:monospace;opacity:0.8"></div>` : '';
+      const targetRefHtml = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool || isPlayerStats || isTeleport || isSkeletonAct)
         ? `<span style="font-size:8px;color:var(--muted);min-width:56px">player</span>`
         : `<select class="cfn-ref-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="group" ${action.refType === 'group' ? 'selected' : ''}>group</option><option value="name" ${action.refType === 'name' ? 'selected' : ''}>name</option></select><input class="cfn-ref-val" data-fn="${fnIdx}" data-act="${actIdx}" list="${moveListId}" type="text" value="${escapeHtml(action.refValue)}" style="width:70px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${moveListId}">${moveOpts}</datalist>`;
       return `<div style="border-left:2px solid var(--border);margin-left:4px;padding-left:6px;margin-bottom:4px">
-        <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">#${actIdx+1}</span>${targetRefHtml}<select class="cfn-action-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="move" ${action.actionType === 'move' ? 'selected' : ''}>move</option><option value="rotate" ${action.actionType === 'rotate' ? 'selected' : ''}>rotate</option><option value="light" ${action.actionType === 'light' ? 'selected' : ''}>light</option><option value="audio" ${action.actionType === 'audio' ? 'selected' : ''}>audio</option><option value="path" ${action.actionType === 'path' ? 'selected' : ''}>path</option><option value="functionControl" ${action.actionType === 'functionControl' ? 'selected' : ''}>function ctrl</option><option value="playerGroup" ${action.actionType === 'playerGroup' ? 'selected' : ''}>player group</option><option value="setVar" ${action.actionType === 'setVar' ? 'selected' : ''}>set var</option><option value="setBool" ${action.actionType === 'setBool' ? 'selected' : ''}>set bool</option><option value="playerStats" ${action.actionType === 'playerStats' ? 'selected' : ''}>player stats</option><option value="teleport" ${action.actionType === 'teleport' ? 'selected' : ''}>teleport</option></select><button class="ct-del cfn-del-act" data-fn="${fnIdx}" data-act="${actIdx}" title="Remove action">✕</button></div>
+        <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">#${actIdx+1}</span>${targetRefHtml}<select class="cfn-action-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="move" ${action.actionType === 'move' ? 'selected' : ''}>move</option><option value="rotate" ${action.actionType === 'rotate' ? 'selected' : ''}>rotate</option><option value="light" ${action.actionType === 'light' ? 'selected' : ''}>light</option><option value="audio" ${action.actionType === 'audio' ? 'selected' : ''}>audio</option><option value="path" ${action.actionType === 'path' ? 'selected' : ''}>path</option><option value="functionControl" ${action.actionType === 'functionControl' ? 'selected' : ''}>function ctrl</option><option value="playerGroup" ${action.actionType === 'playerGroup' ? 'selected' : ''}>player group</option><option value="setVar" ${action.actionType === 'setVar' ? 'selected' : ''}>set var</option><option value="setBool" ${action.actionType === 'setBool' ? 'selected' : ''}>set bool</option><option value="playerStats" ${action.actionType === 'playerStats' ? 'selected' : ''}>player stats</option><option value="teleport" ${action.actionType === 'teleport' ? 'selected' : ''}>teleport</option><option value="skeleton" ${action.actionType === 'skeleton' ? 'selected' : ''}>skeleton</option></select><button class="ct-del cfn-del-act" data-fn="${fnIdx}" data-act="${actIdx}" title="Remove action">✕</button></div>
         ${primaryHtml}${posReadout}
       </div>`;
     }).join('');
@@ -12989,6 +18349,29 @@ function bindControlFunctionsUI() {
     });
   });
 
+  // Skeleton action bindings
+  controlFunctionsListEl.querySelectorAll('.cfn-skel-cmd').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.skelAnimCommand = SKELETON_ANIM_COMMANDS.includes(sel.value) ? sel.value : 'play'; });
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-skel-clip').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.skelAnimClip = input.value.trim(); });
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-skel-speed').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.skelAnimSpeed = Math.max(0, parseFloat(input.value) || 1); });
+    });
+  });
+
   controlFunctionsListEl.querySelectorAll('.cfn-style').forEach(sel => {
     sel.addEventListener('change', () => {
       const fnIdx = parseInt(sel.dataset.fn, 10);
@@ -13116,9 +18499,11 @@ function updateVisibility(cam) {
         m.material.visible = !hideDisplayOnly;
       }
 
+      // Keep point lights on even when mesh is out of render distance
       if (m.userData.pointLight) {
-        m.userData.pointLight.visible = false;
-        if (!shadowOff) m.userData.pointLight.castShadow = false;
+        const lightVisible = dist2 < ld2;
+        m.userData.pointLight.visible = lightVisible;
+        if (!shadowOff) m.userData.pointLight.castShadow = lightVisible && dist2 < ld2 * 0.5;
       }
       continue;
     }
@@ -13247,6 +18632,78 @@ function updateRuntimeOptimizer(nowMs, dt) {
   }
 }
 
+// ─── Portal view rendering ────────────────────────────────────────────────────
+const _portalDiscGeo = new THREE.CircleGeometry(0.58, 32);
+const _portalTmpPos = new THREE.Vector3();
+const _portalRTs = [
+  new THREE.WebGLRenderTarget(256, 256),
+  new THREE.WebGLRenderTarget(256, 256)
+];
+const _portalCam = new THREE.PerspectiveCamera(75, 1, 0.1, 200);
+
+function _ensurePortalDisc(mesh, rtIndex) {
+  if (mesh.userData._portalDisc) return mesh.userData._portalDisc;
+  const mat = new THREE.MeshBasicMaterial({ map: _portalRTs[rtIndex].texture, side: THREE.DoubleSide, transparent: true });
+  const disc = new THREE.Mesh(_portalDiscGeo, mat);
+  disc.userData._isPortalDisc = true;
+  disc.renderOrder = 1;
+  mesh.add(disc);
+  mesh.userData._portalDisc = disc;
+  return disc;
+}
+
+function _renderPortalViews() {
+  if (!state.isPlaytest) return;
+  let rendered = 0;
+  for (const m of sceneObjects) {
+    if (m.userData.type !== 'teleport') continue;
+    // Hide portal disc if not in playtest or no pair
+    if (m.userData._portalDisc) m.userData._portalDisc.visible = false;
+
+    _portalTmpPos.setFromMatrixPosition(m.matrixWorld);
+    const dist = _portalTmpPos.distanceTo(fpsPos);
+    if (dist > PORTAL_MAX_DIST) continue;
+    if (rendered >= 2) continue; // max 2 active portal renders per frame
+
+    const config = getMeshTeleportConfig(m);
+    if (!config.pairLabel) continue;
+    // Only same-world portals for live rendering
+    if (config.crossWorld) continue;
+
+    const dest = sceneObjects.find(o =>
+      o !== m && o.userData.type === 'teleport' &&
+      (o.userData.label || '').toLowerCase() === config.pairLabel.toLowerCase() &&
+      (o.userData.world || 'world_1') === _playtestWorldId
+    );
+    if (!dest) continue;
+
+    const disc = _ensurePortalDisc(m, rendered);
+    disc.visible = true;
+
+    // Position portal camera at destination, facing the same direction as the player
+    _portalCam.position.copy(dest.position);
+    _portalCam.position.y += 0.7;
+    _portalCam.rotation.set(fpsPitch, fpsYaw, 0, 'YXZ');
+    _portalCam.fov = fpsCam.fov;
+    _portalCam.updateProjectionMatrix();
+
+    // Render scene from destination perspective
+    disc.visible = false;
+    const destDisc = dest.userData._portalDisc;
+    if (destDisc) destDisc.visible = false;
+
+    renderer.setRenderTarget(_portalRTs[rendered]);
+    renderer.render(scene, _portalCam);
+    renderer.setRenderTarget(null);
+
+    disc.material.map = _portalRTs[rendered].texture;
+    disc.material.needsUpdate = true;
+    disc.visible = true;
+    if (destDisc) destDisc.visible = false;
+    rendered++;
+  }
+}
+
 // ─── Animation loop ───────────────────────────────────────────────────────────
 const _fwd   = new THREE.Vector3();
 const _right = new THREE.Vector3();
@@ -13268,6 +18725,7 @@ function animate(t) {
       updateCoordHud();
       updateVisibility(fpsCam);
       updateCheckpointIndicators(t / 1000);
+      syncSkyToCamera(fpsCam);
       renderer.render(scene, fpsCam);
       return;
     }
@@ -13275,6 +18733,10 @@ function animate(t) {
     updateRuntimeOptimizer(t, dt);
     updateTriggerMoveAnimations(t / 1000);
     updateMovementPathAnimations(dt);
+    updateJointAnimations(dt);
+    updateSkeletonAnimations(dt);
+    updateNpcBehaviors(dt, t / 1000);
+    _showNpcInteractHint();
     updateRuntimeAudioInstances();
     const dayCycleEnabled = !!(sunDayCycleEnabledInput && sunDayCycleEnabledInput.checked);
     const dayCycleDuration = clampSunDayDuration(parseFloat(sunDayDurationInput.value));
@@ -13289,14 +18751,31 @@ function animate(t) {
     // ── Cloud wind animation ──
     _updateCloudWind(dt);
 
+    // ── Crouch transition ──
+    {
+      const rate = CROUCH_TRANSITION_SPEED * dt;
+      // When uncrouching, check if standing up would cause a collision
+      if (!fpsCrouching && _fpsCurrentHeight < gameRules.height) {
+        if (collidesAt(fpsPos, gameRules.height)) {
+          fpsCrouching = true;
+        }
+      }
+      const th = fpsCrouching ? gameRules.crouchHeight : gameRules.height;
+      const te = fpsCrouching ? (gameRules.crouchHeight - 0.15) : gameRules.eyeHeight;
+      if (_fpsCurrentHeight < th) _fpsCurrentHeight = Math.min(th, _fpsCurrentHeight + rate);
+      else if (_fpsCurrentHeight > th) _fpsCurrentHeight = Math.max(th, _fpsCurrentHeight - rate);
+      if (_fpsCurrentEyeHeight < te) _fpsCurrentEyeHeight = Math.min(te, _fpsCurrentEyeHeight + rate);
+      else if (_fpsCurrentEyeHeight > te) _fpsCurrentEyeHeight = Math.max(te, _fpsCurrentEyeHeight - rate);
+    }
+
     // FPS movement
     _fwd.set(0, 0, -1).applyEuler(new THREE.Euler(0, fpsYaw, 0));
     _right.set(1, 0, 0).applyEuler(new THREE.Euler(0, fpsYaw, 0));
     _move.set(0, 0, 0);
-    if (fpsKeys.has('KeyW') || fpsKeys.has('ArrowUp'))    _move.addScaledVector(_fwd, 1);
-    if (fpsKeys.has('KeyS') || fpsKeys.has('ArrowDown'))  _move.addScaledVector(_fwd, -1);
-    if (fpsKeys.has('KeyA') || fpsKeys.has('ArrowLeft'))  _move.addScaledVector(_right, -1);
-    if (fpsKeys.has('KeyD') || fpsKeys.has('ArrowRight')) _move.addScaledVector(_right, 1);
+    if (fpsKeys.has(keybinds.forward) || fpsKeys.has('ArrowUp'))    _move.addScaledVector(_fwd, 1);
+    if (fpsKeys.has(keybinds.backward) || fpsKeys.has('ArrowDown'))  _move.addScaledVector(_fwd, -1);
+    if (fpsKeys.has(keybinds.left) || fpsKeys.has('ArrowLeft'))  _move.addScaledVector(_right, -1);
+    if (fpsKeys.has(keybinds.right) || fpsKeys.has('ArrowRight')) _move.addScaledVector(_right, 1);
     // ── Sprint stamina & air-sprint logic ──────────────────────────────
     const wantsSprint = fpsSprinting; // player is holding R
     let canSprint = false;
@@ -13356,7 +18835,8 @@ function animate(t) {
     }
 
     if (_move.lengthSq() > 0) {
-      const speed = canSprint ? resolveGameRule('sprintSpeed', 12) : BASE_FPS_SPEED;
+      let speed = canSprint ? resolveGameRule('sprintSpeed', 12) : BASE_FPS_SPEED;
+      if (fpsCrouching) speed *= 0.5;
       _move.normalize().multiplyScalar(speed * dt);
     }
 
@@ -13437,7 +18917,7 @@ function animate(t) {
         if (fpsPos.y === 0 && fpsVelY === 0) fpsGrounded = true;
       }
     } else {
-      const flyDir = (fpsKeys.has('Space') || fpsKeys.has('KeyE') ? 1 : 0) - (fpsKeys.has('ShiftLeft') || fpsKeys.has('KeyQ') ? 1 : 0);
+      const flyDir = (fpsKeys.has('Space') || fpsKeys.has('KeyE') ? 1 : 0) - (fpsKeys.has(keybinds.crouch) || fpsKeys.has('KeyQ') ? 1 : 0);
       const flySpeed = (canSprint ? resolveGameRule('sprintSpeed', 12) : BASE_FPS_SPEED) * dt;
       if (flyDir !== 0) {
         movePlayerVertical(flyDir * flySpeed);
@@ -13466,6 +18946,7 @@ function animate(t) {
 
     // Trigger block overlap detection
     checkTriggerBlocks();
+    checkTeleportBlocks();
     checkCheckpointBlocks();
 
     // Re-evaluate trigger calls continuously so condition changes can start/stop actions.
@@ -13488,6 +18969,9 @@ function animate(t) {
     updateCheckpointIndicators(t / 1000);
     updateOrbitIndicator();
     updateSpawnDirectionIndicators();
+    updateJointIndicators();
+    syncSkyToCamera(fpsCam);
+    _renderPortalViews();
     renderer.render(scene, fpsCam);
     for (const m of sceneObjects) {
       _playtestPrevPositions.set(m, m.position.clone());
@@ -13510,6 +18994,8 @@ function animate(t) {
     updateVisibility(editorCam);
     updateCheckpointIndicators(t / 1000);
     updateSpawnDirectionIndicators();
+    updateJointIndicators();
+    syncSkyToCamera(editorCam);
     renderer.render(scene, editorCam);
   }
 }
@@ -13536,17 +19022,20 @@ const _objlibSort      = document.getElementById('objlib-sort');
 const _objlibCount     = document.getElementById('objlib-count');
 
 const OBJLIB_CATEGORIES = {
-  structure: { label: 'Structure', types: ['wall', 'floor'] },
+  structure: { label: 'Structure', types: ['wall', 'floor', 'terrain'] },
   shapes:    { label: 'Shapes',    types: ['cube', 'sphere', 'cylinder', 'cone', 'pyramid', 'prism', 'torus'] },
   flat:      { label: 'Flat / 2D', types: ['plane2d', 'triangle2d', 'circle2d', 'polygon2d'] },
-  gameplay:  { label: 'Gameplay',  types: ['spawn', 'checkpoint', 'target', 'trigger', 'keypad', 'light', 'pivot'] },
+  gameplay:  { label: 'Gameplay',  types: ['spawn', 'checkpoint', 'target', 'trigger', 'teleport', 'keypad', 'light', 'pivot', 'joint', 'skeleton'] },
+  characters: { label: 'Characters', types: ['npc'] },
+  media:     { label: 'Media',     types: ['text', 'text3d', 'screen', 'camera'] },
 };
 
 const OBJLIB_TYPE_ICONS = {
   wall: '🧱', floor: '⬜', target: '🎯', light: '💡', spawn: '🟢', checkpoint: '🔵',
-  trigger: '⚡', keypad: '🔢', cube: '📦', sphere: '🔮', cylinder: '🛢️', cone: '🔺',
+  trigger: '⚡', teleport: '🌀', keypad: '🔢', cube: '📦', sphere: '🔮', cylinder: '🛢️', cone: '🔺',
   pyramid: '🔻', prism: '⬡', torus: '⭕', plane2d: '▬', triangle2d: '◺', circle2d: '●',
-  polygon2d: '⬠', pivot: '🔶',
+  polygon2d: '⬠', pivot: '🔶', joint: '🔗', skeleton: '🦴', terrain: '🏔️',
+  text: '📝', text3d: '🔤', screen: '🖥️', camera: '🎥', npc: '🧑',
 };
 
 function _objlibCategoryOf(type) {
@@ -13797,6 +19286,7 @@ refreshControlFunctionsUI();
 syncFogUI();
 syncFovUI();
 refreshWorldUI();
+refreshCustomObjectUI();
 refreshStatus();
 
 // Boot storage (IndexedDB + localStorage migration) then show UI
@@ -13815,26 +19305,16 @@ _bootStorage().then(async () => {
       showStudio();
     }
   } else {
-    // Check for auto-restore data
+    // Cache auto-restore data; offer it when the user opens a project
     try {
-      const restoreData = await _idbGet(_RESTORE_IDB_KEY);
-      if (restoreData?.payload) {
-        const when = restoreData.savedAt ? new Date(restoreData.savedAt).toLocaleString() : 'unknown time';
-        const projLabel = restoreData.projectName ? ` ("${restoreData.projectName}")` : '';
-        if (confirm(`Unsaved progress found${projLabel} from ${when}.\n\nRestore it?\n\n(Click Cancel to discard and use your last manual save.)`)) {
-          const json = typeof restoreData.payload === 'string' ? restoreData.payload : JSON.stringify(restoreData.payload);
-          currentProjectId = restoreData.projectId || null;
-          currentProjectName = restoreData.projectName || '';
-          loadLevelJSON(json, { pushHistory: false });
-          clearRestoreSlot();
-          showStudio();
-          return;
-        }
-        clearRestoreSlot();
-      }
-    } catch { /* ignore restore errors */ }
+      _pendingRestore = await _idbGet(_RESTORE_IDB_KEY);
+      if (_pendingRestore && !_pendingRestore.payload) _pendingRestore = null;
+    } catch { _pendingRestore = null; }
     showMainMenu();
   }
+}).catch(err => {
+  console.error('Boot storage failed:', err);
+  showMainMenu();
 });
 requestAnimationFrame(animate);
 
