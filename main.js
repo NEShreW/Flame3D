@@ -41,20 +41,27 @@ async function _idbGet(key) {
   }
 }
 
-/** Write a value to IndexedDB by key. */
+/** Write a value to IndexedDB by key (serialized per-key to prevent race conditions). */
+const _idbWriteQueues = new Map();
 async function _idbSet(key, value) {
-  const db = await _openIDB();
-  try {
-    return await new Promise((resolve, reject) => {
-      const tx = db.transaction(_IDB_STORE, 'readwrite');
-      const store = tx.objectStore(_IDB_STORE);
-      const req = store.put(value, key);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-    });
-  } finally {
-    db.close();
-  }
+  const prev = _idbWriteQueues.get(key) || Promise.resolve();
+  const work = prev.then(async () => {
+    const db = await _openIDB();
+    try {
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(_IDB_STORE, 'readwrite');
+        const store = tx.objectStore(_IDB_STORE);
+        const req = store.put(value, key);
+        req.onsuccess = () => resolve();
+        req.onerror = () => reject(req.error);
+      });
+    } finally {
+      db.close();
+    }
+  });
+  // Keep queue reference but don't let errors break the chain for future writes
+  _idbWriteQueues.set(key, work.catch(() => {}));
+  return work;
 }
 
 /**
@@ -67,11 +74,9 @@ const _storageCache = {
   _ready: false,
 };
 
-/** Flush projects cache to IndexedDB (fire-and-forget with error alert). */
+/** Flush projects cache to IndexedDB. Returns the write promise. */
 function _flushProjects() {
-  _idbSet('flame3d_projects_v1', _storageCache.projects).catch(err => {
-    alert('Failed to persist projects to storage: ' + err.message);
-  });
+  return _idbSet('flame3d_projects_v1', _storageCache.projects);
 }
 
 /** Flush runtime library cache to IndexedDB (fire-and-forget). */
@@ -100,11 +105,19 @@ function _flushRestore() {
         if (idx >= 0) {
           projects[idx].payload = payload;
           projects[idx].updatedAt = data.savedAt;
-          _flushProjects();
+          _flushProjects().catch(err => {
+            console.warn('[Autosave] Project list flush failed:', err);
+          });
         }
       }
     }).catch(err => {
       console.warn('[Autosave] IDB write failed:', err);
+      // Re-mark dirty and schedule a retry so a transient storage error doesn't
+      // silently swallow unsaved progress.
+      _restoreDirty = true;
+      if (!_restoreTimer) {
+        _restoreTimer = setTimeout(() => { _restoreTimer = null; if (_restoreDirty) _flushRestore(); }, 5000);
+      }
     });
   } catch (err) {
     console.warn('[Autosave] Serialization failed:', err);
@@ -125,7 +138,9 @@ function markRestoreDirty() {
 function clearRestoreSlot() {
   _restoreDirty = false;
   if (_restoreTimer) { clearTimeout(_restoreTimer); _restoreTimer = null; }
-  _idbSet(_RESTORE_IDB_KEY, null).catch(() => {});
+  _idbSet(_RESTORE_IDB_KEY, null).catch(err => {
+    console.warn('[Restore] Failed to clear restore slot:', err);
+  });
 }
 
 /** Pending auto-restore data (set at boot, consumed when entering studio). */
@@ -184,7 +199,8 @@ async function _bootStorage() {
           await _idbSet('flame3d_projects_v1', projects);
           localStorage.removeItem('flame3d_projects_v1');
         }
-      } catch {
+      } catch (err) {
+        console.warn('[Boot] localStorage project migration failed:', err);
         projects = [];
       }
     }
@@ -200,7 +216,8 @@ async function _bootStorage() {
           await _idbSet('flame3d_runtime_library_v1', rtLib);
           localStorage.removeItem('flame3d_runtime_library_v1');
         }
-      } catch {
+      } catch (err) {
+        console.warn('[Boot] localStorage runtime library migration failed:', err);
         rtLib = [];
       }
     }
@@ -373,10 +390,12 @@ const scaleSideYSelect = document.getElementById('scale-side-y');
 const scaleSideZSelect = document.getElementById('scale-side-z');
 
 // ─── Editor state ────────────────────────────────────────────────────────────
+const MODES = { PLACE: 'place', SELECT: 'select', DELETE: 'delete', PAINT: 'paint', ERASE: 'erase' };
+const TRANSFORMS = { TRANSLATE: 'translate', ROTATE: 'rotate', SCALE: 'scale' };
 const state = {
-  mode:          'place',      // place | select | delete | paint | erase
+  mode:          MODES.PLACE,      // place | select | delete | paint | erase
   placingType:   'wall',       // wall | floor | target | light
-  transformMode: 'translate',  // translate | rotate | scale
+  transformMode: TRANSFORMS.TRANSLATE,  // translate | rotate | scale
   snapSize:      1,
   defaultLightIntensity: 3,
   chunkRenderRadius: 2,
@@ -401,6 +420,8 @@ const state = {
 };
 
 const sceneObjects = [];   // all placed meshes
+const MAX_UNDO = 80;
+const GHOST_OPACITY = 0.42;
 const undoStack    = [];
 const redoStack    = [];
 let _nextEditorGroupId = 1;
@@ -1413,6 +1434,9 @@ function setGridVisible(visible) {
 // ─── Coordinate HUD + looked-at object ──────────────────────────────────────
 const _coordRay = new THREE.Raycaster();
 const _coordCenter = new THREE.Vector2(0, 0);
+let _lastCoordHudTime = 0;
+let _lastCoordHudAimText = '';
+const _COORD_HUD_THROTTLE_MS = 150;
 
 function updateCoordHud() {
   if (!coordHud) return;
@@ -1427,20 +1451,26 @@ function updateCoordHud() {
 
   let text = `Pos  X:${pos.x.toFixed(1)}  Y:${pos.y.toFixed(1)}  Z:${pos.z.toFixed(1)}`;
 
-  // Raycast from center of screen to find looked-at object
-  _coordRay.setFromCamera(_coordCenter, cam);
-  const hits = _coordRay.intersectObjects(sceneObjects, false);
-  if (hits.length > 0) {
-    const hit = hits[0];
-    const obj = hit.object;
-    const label = typeLabel(obj.userData?.type) || obj.name || 'Object';
-    const op = obj.position;
-    const hp = hit.point;
-    text += `\nAim  ${label} @ ${op.x.toFixed(1)},${op.y.toFixed(1)},${op.z.toFixed(1)}`;
-    text += `\nHit  X:${hp.x.toFixed(1)}  Y:${hp.y.toFixed(1)}  Z:${hp.z.toFixed(1)}`;
+  // Throttle the expensive raycast to avoid running it every frame
+  const now = performance.now();
+  if (now - _lastCoordHudTime >= _COORD_HUD_THROTTLE_MS) {
+    _lastCoordHudTime = now;
+    _coordRay.setFromCamera(_coordCenter, cam);
+    const hits = _coordRay.intersectObjects(sceneObjects, false);
+    if (hits.length > 0) {
+      const hit = hits[0];
+      const obj = hit.object;
+      const label = typeLabel(obj.userData?.type) || obj.name || 'Object';
+      const op = obj.position;
+      const hp = hit.point;
+      _lastCoordHudAimText = `\nAim  ${label} @ ${op.x.toFixed(1)},${op.y.toFixed(1)},${op.z.toFixed(1)}`;
+      _lastCoordHudAimText += `\nHit  X:${hp.x.toFixed(1)}  Y:${hp.y.toFixed(1)}  Z:${hp.z.toFixed(1)}`;
+    } else {
+      _lastCoordHudAimText = '';
+    }
   }
 
-  coordHud.textContent = text;
+  coordHud.textContent = text + _lastCoordHudAimText;
 }
 
 // ─── Object definitions ──────────────────────────────────────────────────────
@@ -2113,27 +2143,31 @@ function openSkeletonEditor(definitionName) {
       </div>
       <div style="padding:6px 10px;border-bottom:1px solid #222;display:flex;gap:4px;flex-wrap:wrap">
         <button id="skel-btn-add-bone" style="font-size:10px;padding:2px 6px;background:#225;border:1px solid #447;color:#aad;border-radius:3px;cursor:pointer" title="Add child bone to selected (or root)">+ Bone</button>
-        <button id="skel-btn-del-bone" style="font-size:10px;padding:2px 6px;background:#422;border:1px solid #744;color:#daa;border-radius:3px;cursor:pointer" title="Delete selected bone">✕ Bone</button>
+        <button id="skel-btn-del-bone" style="font-size:10px;padding:2px 6px;background:#422;border:1px solid #744;color:#daa;border-radius:3px;cursor:pointer" title="Delete selected bone (Del)">✕ Bone</button>
+        <button id="skel-btn-dup-bone" style="font-size:10px;padding:2px 6px;background:#225;border:1px solid #447;color:#aad;border-radius:3px;cursor:pointer" title="Duplicate selected bone (Ctrl+D)">⊕ Dup</button>
         <button id="skel-btn-humanoid" style="font-size:10px;padding:2px 6px;background:#332200;border:1px solid #664;color:#ffcc66;border-radius:3px;cursor:pointer" title="Load humanoid template">🦴 Humanoid</button>
+        <button id="skel-btn-import-fbx" style="font-size:10px;padding:2px 6px;background:#223;border:1px solid #446;color:#aaf;border-radius:3px;cursor:pointer" title="Import animation from .fbx file">📁 Import FBX</button>
+        <button id="skel-btn-import-fbx-skin" style="font-size:10px;padding:2px 6px;background:#232;border:1px solid #464;color:#afa;border-radius:3px;cursor:pointer" title="Import mesh/skin from .fbx file as full-body mesh skins">🧍 Import Skin</button>
       </div>
       <div style="padding:4px 10px;font-size:9px;font-weight:700;color:#889;border-bottom:1px solid #1a1a1a">BONE TREE</div>
       <div id="skel-bone-tree" style="flex:1;overflow-y:auto;padding:4px 0;font-size:11px"></div>
       <div id="skel-bone-props" style="border-top:1px solid #222;padding:6px 10px;font-size:10px;display:none">
         <div style="font-size:9px;font-weight:700;color:#889;margin-bottom:4px">BONE PROPERTIES</div>
         <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px"><span style="width:40px;color:#889">Name</span><input id="skel-bone-name" type="text" style="flex:1;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/></div>
-        <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px"><span style="width:40px;color:#889">Length</span><input id="skel-bone-length" type="number" min="0.01" step="0.05" style="width:55px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/></div>
-        <div style="font-size:9px;color:#667;margin:4px 0 2px">Position (offset from parent)</div>
+        <div style="font-size:9px;color:#667;margin:4px 0 2px">Head (world)</div>
         <div style="display:flex;gap:3px;margin-bottom:3px">
-          <span style="color:#e44;font-size:9px">X</span><input id="skel-bone-px" type="number" step="0.05" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
-          <span style="color:#4e4;font-size:9px">Y</span><input id="skel-bone-py" type="number" step="0.05" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
-          <span style="color:#48f;font-size:9px">Z</span><input id="skel-bone-pz" type="number" step="0.05" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
+          <span style="color:#e44;font-size:9px">X</span><input id="skel-bone-hx" type="number" step="0.01" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
+          <span style="color:#4e4;font-size:9px">Y</span><input id="skel-bone-hy" type="number" step="0.01" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
+          <span style="color:#48f;font-size:9px">Z</span><input id="skel-bone-hz" type="number" step="0.01" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
         </div>
-        <div style="font-size:9px;color:#667;margin:4px 0 2px">Rotation (degrees)</div>
+        <div style="font-size:9px;color:#667;margin:4px 0 2px">Tail (world)</div>
         <div style="display:flex;gap:3px;margin-bottom:3px">
-          <span style="color:#e44;font-size:9px">X</span><input id="skel-bone-rx" type="number" step="1" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
-          <span style="color:#4e4;font-size:9px">Y</span><input id="skel-bone-ry" type="number" step="1" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
-          <span style="color:#48f;font-size:9px">Z</span><input id="skel-bone-rz" type="number" step="1" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
+          <span style="color:#e44;font-size:9px">X</span><input id="skel-bone-tx" type="number" step="0.01" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
+          <span style="color:#4e4;font-size:9px">Y</span><input id="skel-bone-ty" type="number" step="0.01" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
+          <span style="color:#48f;font-size:9px">Z</span><input id="skel-bone-tz" type="number" step="0.01" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
         </div>
+        <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px"><span style="width:40px;color:#889">Roll</span><input id="skel-bone-roll" type="number" step="1" style="width:55px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/> <span style="color:#556;font-size:9px">deg</span></div>
+        <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px"><label style="color:#889;font-size:9px;display:flex;align-items:center;gap:4px"><input id="skel-bone-connected" type="checkbox" style="margin:0"/> Connected</label></div>
         <button id="skel-bone-edit-skin" style="font-size:10px;padding:2px 6px;background:#224;border:1px solid #446;color:#aaf;border-radius:3px;cursor:pointer;margin-top:2px" title="Edit voxel skin for this bone">🎨 Edit Bone Skin</button>
       </div>
     </div>
@@ -2148,8 +2182,13 @@ function openSkeletonEditor(definitionName) {
           <span style="font-size:9px;color:#889">/ Dur:</span>
           <input id="skel-tl-duration" type="number" min="0.1" step="0.1" value="1" style="width:45px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:1px 4px;font-size:10px"/>
           <label style="display:flex;align-items:center;gap:2px;font-size:9px;color:#889;cursor:pointer"><input id="skel-tl-loop" type="checkbox" checked style="margin:0"/>Loop</label>
-          <button id="skel-tl-add-kf" style="font-size:10px;padding:1px 6px;background:#222;border:1px solid #444;color:#ddd;border-radius:3px;cursor:pointer">◆ Add Keyframe</button>
-          <button id="skel-tl-del-kf" style="font-size:10px;padding:1px 6px;background:#322;border:1px solid #544;color:#daa;border-radius:3px;cursor:pointer">✕ Keyframe</button>
+          <span style="font-size:9px;color:#889">Spd:</span>
+          <input id="skel-tl-speed" type="range" min="0.1" max="3" step="0.1" value="1" style="width:50px" title="Playback speed"/>
+          <span id="skel-tl-speed-val" style="font-size:9px;color:#aaa;min-width:20px">1×</span>
+          <button id="skel-tl-add-kf" style="font-size:10px;padding:1px 6px;background:#222;border:1px solid #444;color:#ddd;border-radius:3px;cursor:pointer">◆ Add KF</button>
+          <button id="skel-tl-del-kf" style="font-size:10px;padding:1px 6px;background:#322;border:1px solid #544;color:#daa;border-radius:3px;cursor:pointer">✕ KF</button>
+          <button id="skel-tl-copy-kf" style="font-size:10px;padding:1px 6px;background:#222;border:1px solid #444;color:#ddd;border-radius:3px;cursor:pointer" title="Copy current bone pose">📋 Copy</button>
+          <button id="skel-tl-paste-kf" style="font-size:10px;padding:1px 6px;background:#222;border:1px solid #444;color:#ddd;border-radius:3px;cursor:pointer" title="Paste as keyframe at playhead">📌 Paste</button>
           <select id="skel-tl-clip" style="font-size:10px;padding:1px 4px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;margin-left:auto"></select>
           <button id="skel-tl-new-clip" style="font-size:10px;padding:1px 6px;background:#222;border:1px solid #444;color:#ddd;border-radius:3px;cursor:pointer">+ Clip</button>
           <button id="skel-tl-del-clip" style="font-size:10px;padding:1px 6px;background:#322;border:1px solid #544;color:#daa;border-radius:3px;cursor:pointer">✕ Clip</button>
@@ -2162,9 +2201,10 @@ function openSkeletonEditor(definitionName) {
     <div id="skel-right-panel" style="width:180px;min-width:140px;background:#101418;display:flex;flex-direction:column;border-left:1px solid #222">
       <div style="padding:6px 10px;border-bottom:1px solid #222;font-size:9px;font-weight:700;color:#889">POSES</div>
       <div id="skel-pose-list" style="flex:1;overflow-y:auto;padding:4px 0;font-size:10px"></div>
-      <div style="padding:4px 10px;border-top:1px solid #222;display:flex;gap:4px">
+      <div style="padding:4px 10px;border-top:1px solid #222;display:flex;gap:4px;flex-wrap:wrap">
         <button id="skel-pose-save" style="font-size:10px;padding:2px 6px;background:#1a2a1a;border:1px solid #2a4a2a;color:#8f8;border-radius:3px;cursor:pointer;flex:1">Save Pose</button>
         <button id="skel-pose-load" style="font-size:10px;padding:2px 6px;background:#222;border:1px solid #444;color:#ddd;border-radius:3px;cursor:pointer;flex:1">Load Pose</button>
+        <button id="skel-pose-mirror" style="font-size:10px;padding:2px 6px;background:#224;border:1px solid #446;color:#aaf;border-radius:3px;cursor:pointer;flex:1" title="Mirror pose left↔right">↔ Mirror</button>
       </div>
       <div style="padding:6px 10px;border-top:1px solid #222;border-bottom:1px solid #222;font-size:9px;font-weight:700;color:#889">ACTIONS</div>
       <div style="padding:4px 10px;display:flex;flex-direction:column;gap:3px">
@@ -2172,13 +2212,13 @@ function openSkeletonEditor(definitionName) {
       </div>
       <div style="padding:6px 10px;border-top:1px solid #222;font-size:9px;color:#667;line-height:1.6;overflow-y:auto">
         <div style="font-weight:700;color:#889;margin-bottom:4px">📖 How to Use</div>
-        <div><b style="color:#ffaa22">1.</b> Click <b>🦴 Humanoid</b> to load a template skeleton, or <b>+ Bone</b> to add bones manually.</div>
-        <div><b style="color:#ffaa22">2.</b> Click a bone in the <b>Bone Tree</b> to select it. Edit its Name, Length, Position, and Rotation in the properties below.</div>
-        <div><b style="color:#ffaa22">3.</b> Click <b>🎨 Edit Bone Skin</b> to paint voxels onto the selected bone.</div>
-        <div><b style="color:#ffaa22">4.</b> Use the <b>Timeline</b> at the bottom to animate: click <b>+ Clip</b> to create an animation clip, set the time, pose the bones, then click <b>◆ Add Keyframe</b>.</div>
-        <div><b style="color:#ffaa22">5.</b> Press <b>▶</b> to preview the animation. Use <b>Loop</b> and <b>Speed</b> controls.</div>
-        <div><b style="color:#ffaa22">6.</b> Use <b>Save Pose</b> to store a pose snapshot and <b>Load Pose</b> to apply it.</div>
-        <div style="margin-top:4px;color:#556">🖱 Drag to orbit, scroll to zoom in the 3D view.</div>
+        <div><b style="color:#ffaa22">1.</b> Click <b>🦴 Humanoid</b> to load a template, or <b>+ Bone</b> to add manually. <b>⊕ Dup</b> duplicates the selected bone.</div>
+        <div><b style="color:#ffaa22">2.</b> Click bones in the <b>tree</b> or <b>3D view</b> to select. Edit properties below, or <b>drag the gizmo</b> in 3D (press <b>G</b>=move, <b>R</b>=rotate).</div>
+        <div><b style="color:#ffaa22">3.</b> <b>🎨 Edit Bone Skin</b> — paint voxels onto the selected bone.</div>
+        <div><b style="color:#ffaa22">4.</b> <b>Timeline:</b> <b>+ Clip</b> to create a clip → pose bones → <b>◆ Add KF</b>. Use <b>📋 Copy / 📌 Paste</b> to duplicate poses between times.</div>
+        <div><b style="color:#ffaa22">5.</b> <b>📁 Import FBX</b> — import animations from Mixamo or other .fbx files directly onto your skeleton.</div>
+        <div><b style="color:#ffaa22">6.</b> <b>↔ Mirror</b> swaps left/right pose. <b>Save/Load Pose</b> for snapshots.</div>
+        <div style="margin-top:4px;color:#556">🖱 Orbit, scroll zoom. <b>Del</b>=delete bone, <b>Ctrl+D</b>=dup, <b>Space</b>=play/stop, <b>←/→</b>=nudge time.</div>
       </div>
     </div>
   `;
@@ -2281,7 +2321,7 @@ function openSkeletonEditor(definitionName) {
       // Sphere marker
       const isSelected = skeletonEditorState.selectedBoneId === bd.id;
       const isRoot = bd.parent === null;
-      const hasSkin = !!def.boneSkins[bd.id]?.voxels?.length;
+      const hasSkin = !!(def.boneSkins[bd.id]?.voxels?.length || def.boneSkins[bd.id]?.type === 'mesh');
       let color = BONE_COLORS.default;
       if (isSelected) color = BONE_COLORS.selected;
       else if (hasSkin) color = BONE_COLORS.hasSkin;
@@ -2307,7 +2347,7 @@ function openSkeletonEditor(definitionName) {
       }
 
       // Bone length indicator (small line extending from bone)
-      const endPos = new THREE.Vector3(0, bd.length, 0);
+      const endPos = new THREE.Vector3(0, boneLength(bd), 0);
       endPos.applyQuaternion(threeBone.getWorldQuaternion(new THREE.Quaternion()));
       endPos.add(worldPos);
       const lenGeo = new THREE.BufferGeometry().setFromPoints([worldPos, endPos]);
@@ -2318,7 +2358,65 @@ function openSkeletonEditor(definitionName) {
     rebuildBoneSkinVisuals();
   }
 
-  // ─── Rebuild per-bone voxel skins ───────────────────────────────────────────
+  // ─── Lightweight: update bone marker positions without rebuilding skeleton ──
+  function updateBoneMarkerPositions() {
+    if (!skeletonResult?.boneMap) return;
+
+    // Clear old visuals only (markers/lines), keep skeleton structure intact
+    while (boneVisualGroup.children.length) {
+      const c = boneVisualGroup.children[0];
+      boneVisualGroup.remove(c);
+      c.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+    }
+
+    for (const bd of def.bones) {
+      const threeBone = skeletonResult.boneMap.get(bd.id);
+      if (!threeBone) continue;
+
+      const worldPos = new THREE.Vector3();
+      threeBone.getWorldPosition(worldPos);
+
+      // Sphere marker
+      const isSelected = skeletonEditorState.selectedBoneId === bd.id;
+      const isRoot = bd.parent === null;
+      const hasSkin = !!(def.boneSkins[bd.id]?.voxels?.length || def.boneSkins[bd.id]?.type === 'mesh');
+      let color = BONE_COLORS.default;
+      if (isSelected) color = BONE_COLORS.selected;
+      else if (hasSkin) color = BONE_COLORS.hasSkin;
+      else if (isRoot) color = BONE_COLORS.root;
+
+      const markerMat = new THREE.MeshBasicMaterial({ color });
+      const marker = new THREE.Mesh(boneSphereGeo, markerMat);
+      marker.position.copy(worldPos);
+      marker.userData._boneId = bd.id;
+      boneVisualGroup.add(marker);
+
+      // Line to parent
+      if (bd.parent) {
+        const parentBone = skeletonResult.boneMap.get(bd.parent);
+        if (parentBone) {
+          const parentPos = new THREE.Vector3();
+          parentBone.getWorldPosition(parentPos);
+          const lineGeo = new THREE.BufferGeometry().setFromPoints([parentPos, worldPos]);
+          const lineColor = isSelected ? 0xffee44 : 0x667788;
+          const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: lineColor }));
+          boneVisualGroup.add(line);
+        }
+      }
+
+      // Bone length indicator
+      const endPos = new THREE.Vector3(0, boneLength(bd), 0);
+      endPos.applyQuaternion(threeBone.getWorldQuaternion(new THREE.Quaternion()));
+      endPos.add(worldPos);
+      const lenGeo = new THREE.BufferGeometry().setFromPoints([worldPos, endPos]);
+      const lenLine = new THREE.Line(lenGeo, new THREE.LineBasicMaterial({ color: color, linewidth: 1, opacity: 0.5, transparent: true }));
+      boneVisualGroup.add(lenLine);
+    }
+
+    rebuildBoneSkinVisuals();
+  }
+
+  // ─── Rebuild per-bone skin visuals (mesh or voxel) ───────────────────────────
   function rebuildBoneSkinVisuals() {
     while (boneSkinGroup.children.length) {
       const c = boneSkinGroup.children[0];
@@ -2328,44 +2426,64 @@ function openSkeletonEditor(definitionName) {
     if (!skeletonResult) return;
 
     for (const [boneId, skinDef] of Object.entries(def.boneSkins)) {
-      if (!skinDef?.voxels?.length) continue;
       const threeBone = skeletonResult.boneMap.get(boneId);
       if (!threeBone) continue;
 
       const boneDef = def.bones.find(b => b.id === boneId);
-      const boneLen = boneDef?.length || 0.3;
-
-      // Build voxel group for this bone
-      const gridSize = normalizeSkinGridSize(skinDef.gridSize || { x: 4, y: 4, z: 4 });
-      const voxels = skinDef.voxels;
-      const cellSize = boneLen / Math.max(gridSize.x, gridSize.y, gridSize.z);
-
-      // Group voxels by color
-      const byColor = new Map();
-      for (const v of voxels) {
-        const col = v.color ?? 0x7f8ea0;
-        if (!byColor.has(col)) byColor.set(col, []);
-        byColor.get(col).push(v);
-      }
-
+      const boneLen = boneDef ? boneLength(boneDef) : 0.3;
       const boneGroup = new THREE.Group();
-      const sharedGeo = new THREE.BoxGeometry(cellSize * 0.95, cellSize * 0.95, cellSize * 0.95);
 
-      for (const [color, colorVoxels] of byColor) {
-        const mat = new THREE.MeshStandardMaterial({ color });
-        const instMesh = new THREE.InstancedMesh(sharedGeo, mat, colorVoxels.length);
-        const mtx = new THREE.Matrix4();
-        for (let i = 0; i < colorVoxels.length; i++) {
-          const v = colorVoxels[i];
-          mtx.makeTranslation(
-            (v.x - gridSize.x / 2 + 0.5) * cellSize,
-            (v.y - gridSize.y / 2 + 0.5) * cellSize + boneLen / 2,
-            (v.z - gridSize.z / 2 + 0.5) * cellSize
-          );
-          instMesh.setMatrixAt(i, mtx);
+      if (skinDef?.type === 'mesh' && skinDef.vertices?.length && skinDef.indices?.length) {
+        // ── Mesh skin path ──
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(skinDef.vertices, 3));
+        geo.setIndex(skinDef.indices);
+        if (skinDef.colors?.length) {
+          const floatColors = new Float32Array(skinDef.colors.length);
+          for (let i = 0; i < skinDef.colors.length; i++) floatColors[i] = skinDef.colors[i] / 255;
+          geo.setAttribute('color', new THREE.Float32BufferAttribute(floatColors, 3));
         }
-        instMesh.instanceMatrix.needsUpdate = true;
-        boneGroup.add(instMesh);
+        geo.computeVertexNormals();
+        const mat = new THREE.MeshStandardMaterial({
+          vertexColors: !!(skinDef.colors?.length),
+          roughness: 0.7, metalness: 0.1,
+          side: THREE.DoubleSide,
+          color: skinDef.colors?.length ? 0xffffff : 0x7f8ea0,
+        });
+        boneGroup.add(new THREE.Mesh(geo, mat));
+
+      } else if (skinDef?.voxels?.length) {
+        // ── Voxel skin path (legacy) ──
+        const gridSize = normalizeSkinGridSize(skinDef.gridSize || { x: 4, y: 4, z: 4 });
+        const voxels = skinDef.voxels;
+        const cellSize = boneLen / Math.max(gridSize.x, gridSize.y, gridSize.z);
+
+        const byColor = new Map();
+        for (const v of voxels) {
+          const col = v.color ?? 0x7f8ea0;
+          if (!byColor.has(col)) byColor.set(col, []);
+          byColor.get(col).push(v);
+        }
+
+        const sharedGeo = new THREE.BoxGeometry(cellSize * 0.95, cellSize * 0.95, cellSize * 0.95);
+        for (const [color, colorVoxels] of byColor) {
+          const mat = new THREE.MeshStandardMaterial({ color });
+          const instMesh = new THREE.InstancedMesh(sharedGeo, mat, colorVoxels.length);
+          const mtx = new THREE.Matrix4();
+          for (let i = 0; i < colorVoxels.length; i++) {
+            const v = colorVoxels[i];
+            mtx.makeTranslation(
+              (v.x - gridSize.x / 2 + 0.5) * cellSize,
+              (v.y - gridSize.y / 2 + 0.5) * cellSize + boneLen / 2,
+              (v.z - gridSize.z / 2 + 0.5) * cellSize
+            );
+            instMesh.setMatrixAt(i, mtx);
+          }
+          instMesh.instanceMatrix.needsUpdate = true;
+          boneGroup.add(instMesh);
+        }
+      } else {
+        continue; // no skin data
       }
 
       // Attach to bone world transform
@@ -2374,7 +2492,17 @@ function openSkeletonEditor(definitionName) {
       threeBone.getWorldPosition(boneWorldPos);
       threeBone.getWorldQuaternion(boneWorldQuat);
       boneGroup.position.copy(boneWorldPos);
-      boneGroup.quaternion.copy(boneWorldQuat);
+      // Mesh skins: apply FBX bind-pose world quat correction
+      // Voxel skins: apply alignment correction to orient grid along bone direction
+      const isMeshSkin = skinDef?.type === 'mesh';
+      const bindWorldQuat = isMeshSkin && def.boneBindWorldQuats?.[boneId];
+      if (bindWorldQuat) {
+        const bwq = new THREE.Quaternion(bindWorldQuat[0], bindWorldQuat[1], bindWorldQuat[2], bindWorldQuat[3]);
+        boneGroup.quaternion.copy(boneWorldQuat).multiply(bwq);
+      } else {
+        const isVoxelSkin = !isMeshSkin;
+        boneGroup.quaternion.copy(boneWorldQuat);
+      }
       boneGroup.userData._skinBoneId = boneId;
       boneSkinGroup.add(boneGroup);
     }
@@ -2399,7 +2527,7 @@ function openSkeletonEditor(definitionName) {
     function renderBone(b, depth) {
       const indent = depth * 14;
       const isSel = skeletonEditorState.selectedBoneId === b.id;
-      const hasSkin = !!def.boneSkins[b.id]?.voxels?.length;
+      const hasSkin = !!(def.boneSkins[b.id]?.voxels?.length || def.boneSkins[b.id]?.type === 'mesh');
       const skinIcon = hasSkin ? '🎨' : '';
       const children = childrenMap.get(b.id) || [];
       let html = `<div class="skel-bone-item" data-bone-id="${b.id}" style="padding:2px 6px 2px ${6 + indent}px;cursor:pointer;background:${isSel ? '#2a3040' : 'transparent'};border-left:2px solid ${isSel ? '#ffaa22' : 'transparent'};display:flex;align-items:center;gap:3px" title="${b.id}">
@@ -2424,6 +2552,7 @@ function openSkeletonEditor(definitionName) {
         refreshBoneTree();
         refreshBoneProps();
         rebuildBoneVisuals();
+        if (typeof attachTransformToBone === 'function') attachTransformToBone(el.dataset.boneId);
       });
     });
   }
@@ -2476,6 +2605,7 @@ function openSkeletonEditor(definitionName) {
 
     refreshBoneTree();
     rebuildBoneVisuals();
+    markRestoreDirty();
   }
 
   // Wire bone property inputs
@@ -2499,6 +2629,7 @@ function openSkeletonEditor(definitionName) {
     refreshBoneTree();
     refreshBoneProps();
     rebuildBoneVisuals();
+    markRestoreDirty();
   });
 
   document.getElementById('skel-btn-del-bone').addEventListener('click', () => {
@@ -2533,6 +2664,7 @@ function openSkeletonEditor(definitionName) {
     refreshBoneTree();
     refreshBoneProps();
     rebuildBoneVisuals();
+    markRestoreDirty();
   });
 
   // ─── Humanoid template ──────────────────────────────────────────────────────
@@ -2549,6 +2681,59 @@ function openSkeletonEditor(definitionName) {
     rebuildBoneVisuals();
     refreshPoseList();
     refreshClipSelect();
+    markRestoreDirty();
+  });
+
+  // ─── Duplicate bone ─────────────────────────────────────────────────────────
+  function duplicateSelectedBone() {
+    const bid = skeletonEditorState.selectedBoneId;
+    const boneDef = bid ? def.bones.find(b => b.id === bid) : null;
+    if (!boneDef) return;
+    const newBone = createDefaultBone({
+      name: boneDef.name + '_copy',
+      parent: boneDef.parent,
+      position: [...boneDef.position],
+      rotation: [...boneDef.rotation],
+      length: boneDef.length,
+    });
+    def.bones.push(newBone);
+    skeletonEditorState.selectedBoneId = newBone.id;
+    refreshBoneTree();
+    refreshBoneProps();
+    rebuildBoneVisuals();
+    markRestoreDirty();
+  }
+  document.getElementById('skel-btn-dup-bone').addEventListener('click', duplicateSelectedBone);
+
+  // ─── TransformControls for interactive bone editing ─────────────────────────
+  const skelTransformCtrl = new TransformControls(skelCamera, skelCanvas);
+  skelTransformCtrl.setSize(0.6);
+  skelTransformCtrl.setSpace('local');
+  skelScene.add(skelTransformCtrl);
+  skelTransformCtrl.addEventListener('dragging-changed', (e) => {
+    skelControls.enabled = !e.value;
+  });
+  let _skelTransformTarget = null;
+
+  function attachTransformToBone(boneId) {
+    if (!skeletonResult?.boneMap) { skelTransformCtrl.detach(); _skelTransformTarget = null; return; }
+    const threeBone = skeletonResult.boneMap.get(boneId);
+    if (!threeBone) { skelTransformCtrl.detach(); _skelTransformTarget = null; return; }
+    skelTransformCtrl.attach(threeBone);
+    _skelTransformTarget = boneId;
+  }
+
+  skelTransformCtrl.addEventListener('objectChange', () => {
+    if (!_skelTransformTarget) return;
+    const boneDef = def.bones.find(b => b.id === _skelTransformTarget);
+    const threeBone = skeletonResult?.boneMap?.get(_skelTransformTarget);
+    if (!boneDef || !threeBone) return;
+    boneDef.position = [threeBone.position.x, threeBone.position.y, threeBone.position.z];
+    boneDef.rotation = threeBone.quaternion.toArray();
+    refreshBoneProps();
+    skeletonResult.rootGroup.updateMatrixWorld(true);
+    rebuildBoneVisuals();
+    if (_skelTransformTarget) attachTransformToBone(_skelTransformTarget);
   });
 
   // ─── 3D bone click selection (raycasting) ──────────────────────────────────
@@ -2557,6 +2742,7 @@ function openSkeletonEditor(definitionName) {
 
   skelCanvas.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return;
+    if (skelTransformCtrl.dragging) return;
     const rect = skelCanvas.getBoundingClientRect();
     _skelMouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     _skelMouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -2569,6 +2755,7 @@ function openSkeletonEditor(definitionName) {
       refreshBoneTree();
       refreshBoneProps();
       rebuildBoneVisuals();
+      attachTransformToBone(boneHit.object.userData._boneId);
     }
   });
 
@@ -2590,11 +2777,12 @@ function openSkeletonEditor(definitionName) {
           const poseName = e.target.dataset.pose;
           delete def.poses[poseName];
           refreshPoseList();
+          markRestoreDirty();
           return;
         }
         const poseName = el.dataset.pose;
         if (def.poses[poseName] && skeletonResult?.boneMap) {
-          applyPoseToSkeleton(skeletonResult.boneMap, def.poses[poseName]);
+          applyPoseToSkeleton(skeletonResult.boneMap, def.poses[poseName], skeletonResult.restLocalQuats);
           skeletonResult.rootGroup.updateMatrixWorld(true);
           rebuildBoneVisuals();
         }
@@ -2606,8 +2794,9 @@ function openSkeletonEditor(definitionName) {
     if (!skeletonResult?.boneMap) return;
     const name = prompt('Pose name:', 'Pose_' + (Object.keys(def.poses).length + 1));
     if (!name?.trim()) return;
-    def.poses[name.trim()] = capturePoseFromSkeleton(skeletonResult.boneMap);
+    def.poses[name.trim()] = capturePoseFromSkeleton(skeletonResult.boneMap, skeletonResult.restLocalQuats);
     refreshPoseList();
+    markRestoreDirty();
   });
 
   document.getElementById('skel-pose-load').addEventListener('click', () => {
@@ -2616,10 +2805,20 @@ function openSkeletonEditor(definitionName) {
     const name = prompt('Load pose name:\n' + names.join(', '));
     if (!name?.trim() || !def.poses[name.trim()]) return;
     if (skeletonResult?.boneMap) {
-      applyPoseToSkeleton(skeletonResult.boneMap, def.poses[name.trim()]);
+      applyPoseToSkeleton(skeletonResult.boneMap, def.poses[name.trim()], skeletonResult.restLocalQuats);
       skeletonResult.rootGroup.updateMatrixWorld(true);
       rebuildBoneVisuals();
     }
+  });
+
+  // ─── Mirror pose ───────────────────────────────────────────────────────────
+  document.getElementById('skel-pose-mirror').addEventListener('click', () => {
+    if (!skeletonResult?.boneMap) return;
+    const currentPose = capturePoseFromSkeleton(skeletonResult.boneMap, skeletonResult.restLocalQuats);
+    const mirrored = mirrorPose(currentPose);
+    applyPoseToSkeleton(skeletonResult.boneMap, mirrored, skeletonResult.restLocalQuats);
+    skeletonResult.rootGroup.updateMatrixWorld(true);
+    rebuildBoneVisuals();
   });
 
   // ─── Per-bone voxel skin editing ───────────────────────────────────────────
@@ -2814,6 +3013,7 @@ function openSkeletonEditor(definitionName) {
       subOverlay.remove();
       rebuildBoneVisuals();
       refreshBoneTree();
+      markRestoreDirty();
     });
     document.getElementById('bskin-cancel').addEventListener('click', () => {
       bAnimId = null;
@@ -2884,6 +3084,7 @@ function openSkeletonEditor(definitionName) {
     skeletonEditorState.currentClipName = name.trim();
     refreshClipSelect();
     drawTimeline();
+    markRestoreDirty();
   });
 
   // Delete clip
@@ -2894,6 +3095,7 @@ function openSkeletonEditor(definitionName) {
     skeletonEditorState.currentClipName = Object.keys(def.animations)[0] || '';
     refreshClipSelect();
     drawTimeline();
+    markRestoreDirty();
   });
 
   // Switch clip
@@ -2908,10 +3110,39 @@ function openSkeletonEditor(definitionName) {
     const clip = getCurrentClip();
     if (clip) clip.duration = Math.max(0.1, parseFloat(tlDurInput.value) || 1);
     drawTimeline();
+    markRestoreDirty();
   });
   tlLoopInput.addEventListener('change', () => {
     const clip = getCurrentClip();
     if (clip) clip.loop = tlLoopInput.checked;
+    markRestoreDirty();
+  });
+
+  // Speed control
+  let _skelPlaybackSpeed = 1;
+  const tlSpeedInput = document.getElementById('skel-tl-speed');
+  const tlSpeedVal = document.getElementById('skel-tl-speed-val');
+  tlSpeedInput.addEventListener('input', () => {
+    _skelPlaybackSpeed = parseFloat(tlSpeedInput.value) || 1;
+    tlSpeedVal.textContent = _skelPlaybackSpeed.toFixed(1) + '×';
+  });
+
+  // Copy/paste keyframe pose
+  let _skelClipboard = null;
+  document.getElementById('skel-tl-copy-kf').addEventListener('click', () => {
+    if (!skeletonResult?.boneMap) return;
+    _skelClipboard = capturePoseFromSkeleton(skeletonResult.boneMap, skeletonResult.restLocalQuats);
+  });
+  document.getElementById('skel-tl-paste-kf').addEventListener('click', () => {
+    if (!_skelClipboard) { alert('Nothing copied. Click 📋 Copy first.'); return; }
+    const clip = getCurrentClip();
+    if (!clip) { alert('Create a clip first.'); return; }
+    const time = skeletonEditorState.playheadTime;
+    clip.keyframes = clip.keyframes.filter(kf => Math.abs(kf.time - time) > 0.001);
+    clip.keyframes.push({ time, bones: JSON.parse(JSON.stringify(_skelClipboard)) });
+    clip.keyframes.sort((a, b) => a.time - b.time);
+    drawTimeline();
+    markRestoreDirty();
   });
 
   // Time input
@@ -2928,9 +3159,10 @@ function openSkeletonEditor(definitionName) {
     const time = skeletonEditorState.playheadTime;
     // Remove existing keyframe at same time (within tolerance)
     clip.keyframes = clip.keyframes.filter(kf => Math.abs(kf.time - time) > 0.001);
-    clip.keyframes.push({ time, bones: capturePoseFromSkeleton(skeletonResult.boneMap) });
+    clip.keyframes.push({ time, bones: capturePoseFromSkeleton(skeletonResult.boneMap, skeletonResult.restLocalQuats) });
     clip.keyframes.sort((a, b) => a.time - b.time);
     drawTimeline();
+    markRestoreDirty();
   });
 
   // Delete keyframe nearest to playhead
@@ -2946,11 +3178,12 @@ function openSkeletonEditor(definitionName) {
     }
     clip.keyframes.splice(nearest, 1);
     drawTimeline();
+    markRestoreDirty();
   });
 
-  // Click on timeline track to set playhead
+  // Click/drag on timeline track to scrub playhead
   const tlTrack = document.getElementById('skel-tl-track');
-  tlTrack.addEventListener('pointerdown', (e) => {
+  function _tlScrub(e) {
     const rect = tlTrack.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const clip = getCurrentClip();
@@ -2960,6 +3193,13 @@ function openSkeletonEditor(definitionName) {
     tlTimeInput.value = skeletonEditorState.playheadTime;
     previewAtPlayhead();
     drawTimeline();
+  }
+  tlTrack.addEventListener('pointerdown', (e) => {
+    _tlScrub(e);
+    const onMove = (ev) => _tlScrub(ev);
+    const onUp = () => { window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp); };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
   });
 
   // Draw timeline
@@ -3031,9 +3271,9 @@ function openSkeletonEditor(definitionName) {
     const boneIds = def.bones.map(b => b.id);
     const pose = evaluateAnimationAtTime(clip, skeletonEditorState.playheadTime, boneIds);
     if (pose) {
-      applyPoseToSkeleton(skeletonResult.boneMap, pose);
+      applyPoseToSkeleton(skeletonResult.boneMap, pose, skeletonResult.restLocalQuats);
       skeletonResult.rootGroup.updateMatrixWorld(true);
-      rebuildBoneVisuals();
+      updateBoneMarkerPositions();
     }
   }
 
@@ -3048,6 +3288,125 @@ function openSkeletonEditor(definitionName) {
   document.getElementById('skel-tl-stop').addEventListener('click', () => {
     skeletonEditorState.isPlaying = false;
   });
+
+  // ─── Import FBX (placed after timeline variables are initialized) ───────────
+  document.getElementById('skel-btn-import-fbx').addEventListener('click', () => {
+    if (!def.bones.length) {
+      alert('Add bones first (e.g. load 🦴 Humanoid template) before importing FBX animations.');
+      return;
+    }
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.fbx';
+    input.style.display = 'none';
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        const buf = await file.arrayBuffer();
+        const imported = await importFBXAnimationToDefinition(buf, def);
+        let msg = `Imported ${imported.length} clip(s) from "${file.name}":\n`;
+        for (const ic of imported) {
+          def.animations[ic.name] = ic.clip;
+          msg += `  • ${ic.name} — ${ic.totalKeyframes} keyframes, ${ic.mappedBones} bones mapped\n`;
+        }
+        skeletonEditorState.currentClipName = imported[0].name;
+        refreshClipSelect();
+        drawTimeline();
+        markRestoreDirty();
+        alert(msg);
+      } catch (err) {
+        alert('FBX import failed: ' + err.message);
+        console.warn('FBX import error:', err);
+      }
+    });
+    document.body.appendChild(input);
+    input.click();
+    input.remove();
+  });
+
+  // ─── Import FBX Skin (mesh → voxel skins) ──────────────────────────────────
+  document.getElementById('skel-btn-import-fbx-skin').addEventListener('click', () => {
+    if (!def.bones.length) {
+      alert('Add bones first (e.g. load 🦴 Humanoid template) before importing FBX skins.');
+      return;
+    }
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.fbx';
+    input.style.display = 'none';
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      try {
+        const buf = await file.arrayBuffer();
+        const result = await importFBXSkinToDefinition(buf, def);
+        rebuildBoneVisuals();
+        refreshBoneTree();
+        markRestoreDirty();
+        alert(
+          `FBX Skin imported from "${file.name}":\n` +
+          `  • ${result.bonesWithSkin} bones received mesh skins\n` +
+          `  • ${result.totalTris} total triangles\n` +
+          `  • ${result.assignedVerts}/${result.totalVerts} vertices assigned`
+        );
+      } catch (err) {
+        alert('FBX skin import failed: ' + err.message);
+        console.warn('FBX skin import error:', err);
+      }
+    });
+    document.body.appendChild(input);
+    input.click();
+    input.remove();
+  });
+
+  // ─── Keyboard shortcuts inside skeleton editor ─────────────────────────────
+  function _skelKeyHandler(e) {
+    if (!skeletonEditorOverlayEl) return;
+    // Ignore if typing in an input
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+    const key = e.key;
+    if (key === 'Delete' || key === 'Backspace') {
+      document.getElementById('skel-btn-del-bone')?.click();
+      e.preventDefault();
+    } else if (key === 'd' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      duplicateSelectedBone();
+    } else if (key === ' ') {
+      e.preventDefault();
+      if (skeletonEditorState.isPlaying) {
+        skeletonEditorState.isPlaying = false;
+      } else {
+        document.getElementById('skel-tl-play')?.click();
+      }
+    } else if (key === 'ArrowLeft') {
+      e.preventDefault();
+      const clip = getCurrentClip();
+      const step = clip ? clip.duration / 20 : 0.05;
+      skeletonEditorState.playheadTime = Math.max(0, skeletonEditorState.playheadTime - step);
+      tlTimeInput.value = skeletonEditorState.playheadTime.toFixed(2);
+      previewAtPlayhead();
+      drawTimeline();
+    } else if (key === 'ArrowRight') {
+      e.preventDefault();
+      const clip = getCurrentClip();
+      const dur = clip?.duration || 1;
+      const step = dur / 20;
+      skeletonEditorState.playheadTime = Math.min(dur, skeletonEditorState.playheadTime + step);
+      tlTimeInput.value = skeletonEditorState.playheadTime.toFixed(2);
+      previewAtPlayhead();
+      drawTimeline();
+    } else if (key === 'g' || key === 'G') {
+      skelTransformCtrl.setMode('translate');
+    } else if (key === 'r' || key === 'R') {
+      skelTransformCtrl.setMode('rotate');
+    } else if (key === 'Escape') {
+      skelTransformCtrl.detach();
+      _skelTransformTarget = null;
+    }
+  }
+  window.addEventListener('keydown', _skelKeyHandler);
+  overlay._skelKeyHandler = _skelKeyHandler;
 
   // ─── Close button ──────────────────────────────────────────────────────────
   document.getElementById('skel-btn-close').addEventListener('click', () => {
@@ -3066,7 +3425,7 @@ function openSkeletonEditor(definitionName) {
       const clip = getCurrentClip();
       if (clip && skeletonResult?.boneMap) {
         const now = performance.now() / 1000;
-        const elapsed = now - skeletonEditorState.playStartWall;
+        const elapsed = (now - skeletonEditorState.playStartWall) * _skelPlaybackSpeed;
         let t = skeletonEditorState.playStartTime + elapsed;
         if (clip.loop) {
           t = ((t % clip.duration) + clip.duration) % clip.duration;
@@ -3080,9 +3439,9 @@ function openSkeletonEditor(definitionName) {
         const boneIds = def.bones.map(b => b.id);
         const pose = evaluateAnimationAtTime(clip, t, boneIds);
         if (pose) {
-          applyPoseToSkeleton(skeletonResult.boneMap, pose);
+          applyPoseToSkeleton(skeletonResult.boneMap, pose, skeletonResult.restLocalQuats);
           skeletonResult.rootGroup.updateMatrixWorld(true);
-          rebuildBoneVisuals();
+          updateBoneMarkerPositions();
         }
         drawTimeline();
       } else {
@@ -3109,11 +3468,13 @@ function closeSkeletonEditor() {
   if (skeletonEditorState?._animFrameId) cancelAnimationFrame(skeletonEditorState._animFrameId);
   if (skeleton3DState?.renderer) skeleton3DState.renderer.dispose();
   if (skeletonEditorOverlayEl._skelResizeObserver) skeletonEditorOverlayEl._skelResizeObserver.disconnect();
+  if (skeletonEditorOverlayEl._skelKeyHandler) window.removeEventListener('keydown', skeletonEditorOverlayEl._skelKeyHandler);
   skeletonEditorOverlayEl.remove();
   skeletonEditorOverlayEl = null;
   skeletonEditorState = null;
   skeleton3DState = null;
-  // Refresh scene visuals for any skeleton meshes
+  // Persist any unsaved changes and refresh scene visuals
+  markRestoreDirty();
   refreshAllSkeletonVisuals();
 }
 
@@ -3150,10 +3511,12 @@ function refreshSkeletonMeshVisual(mesh) {
     const worldPos = new THREE.Vector3();
     threeBone.getWorldPosition(worldPos);
 
-    const hasSkin = !!def.boneSkins[bd.id]?.voxels?.length;
+    const hasSkin = !!(def.boneSkins[bd.id]?.voxels?.length || def.boneSkins[bd.id]?.type === 'mesh');
     const color = hasSkin ? 0x6688ff : (bd.parent ? 0xcccccc : 0x44ff88);
     const marker = new THREE.Mesh(sphereGeo, new THREE.MeshBasicMaterial({ color }));
     marker.position.copy(worldPos);
+    marker.userData._boneId = bd.id;
+    marker.userData._childType = 'marker';
     group.add(marker);
 
     if (bd.parent) {
@@ -3162,44 +3525,80 @@ function refreshSkeletonMeshVisual(mesh) {
         const pPos = new THREE.Vector3();
         parentBone.getWorldPosition(pPos);
         const lineGeo = new THREE.BufferGeometry().setFromPoints([pPos, worldPos]);
-        group.add(new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0x667788 })));
+        const boneLine = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0x667788 }));
+        boneLine.userData._boneId = bd.id;
+        boneLine.userData._childType = 'line';
+        group.add(boneLine);
       }
     }
 
     // Bone skins
     if (hasSkin) {
       const skinDef = def.boneSkins[bd.id];
-      const gridSize = normalizeSkinGridSize(skinDef.gridSize || { x: 4, y: 4, z: 4 });
-      const cellSize = bd.length / Math.max(gridSize.x, gridSize.y, gridSize.z);
-      const voxels = skinDef.voxels;
-      const byColor = new Map();
-      for (const v of voxels) {
-        const col = v.color ?? 0x7f8ea0;
-        if (!byColor.has(col)) byColor.set(col, []);
-        byColor.get(col).push(v);
-      }
       const boneQuat = new THREE.Quaternion();
       threeBone.getWorldQuaternion(boneQuat);
       const skinG = new THREE.Group();
-      const sharedGeo = new THREE.BoxGeometry(cellSize * 0.95, cellSize * 0.95, cellSize * 0.95);
-      for (const [col, cvoxels] of byColor) {
-        const mat = new THREE.MeshStandardMaterial({ color: col });
-        const inst = new THREE.InstancedMesh(sharedGeo, mat, cvoxels.length);
-        const mtx = new THREE.Matrix4();
-        for (let i = 0; i < cvoxels.length; i++) {
-          const v = cvoxels[i];
-          mtx.makeTranslation(
-            (v.x - gridSize.x / 2 + 0.5) * cellSize,
-            (v.y - gridSize.y / 2 + 0.5) * cellSize + bd.length / 2,
-            (v.z - gridSize.z / 2 + 0.5) * cellSize
-          );
-          inst.setMatrixAt(i, mtx);
+
+      if (skinDef.type === 'mesh' && skinDef.vertices?.length && skinDef.indices?.length) {
+        // Mesh skin
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(skinDef.vertices, 3));
+        geo.setIndex(skinDef.indices);
+        if (skinDef.colors?.length) {
+          const fc = new Float32Array(skinDef.colors.length);
+          for (let ci = 0; ci < skinDef.colors.length; ci++) fc[ci] = skinDef.colors[ci] / 255;
+          geo.setAttribute('color', new THREE.Float32BufferAttribute(fc, 3));
         }
-        inst.instanceMatrix.needsUpdate = true;
-        skinG.add(inst);
+        geo.computeVertexNormals();
+        const mat = new THREE.MeshStandardMaterial({
+          vertexColors: !!(skinDef.colors?.length),
+          roughness: 0.7, metalness: 0.1, side: THREE.DoubleSide,
+          color: skinDef.colors?.length ? 0xffffff : 0x7f8ea0,
+        });
+        skinG.add(new THREE.Mesh(geo, mat));
+      } else {
+        // Voxel skin (legacy)
+        const gridSize = normalizeSkinGridSize(skinDef.gridSize || { x: 4, y: 4, z: 4 });
+        const cellSize = boneLength(bd) / Math.max(gridSize.x, gridSize.y, gridSize.z);
+        const voxels = skinDef.voxels;
+        const byColor = new Map();
+        for (const v of voxels) {
+          const col = v.color ?? 0x7f8ea0;
+          if (!byColor.has(col)) byColor.set(col, []);
+          byColor.get(col).push(v);
+        }
+        const sharedGeo = new THREE.BoxGeometry(cellSize * 0.95, cellSize * 0.95, cellSize * 0.95);
+        for (const [col, cvoxels] of byColor) {
+          const mat = new THREE.MeshStandardMaterial({ color: col });
+          const inst = new THREE.InstancedMesh(sharedGeo, mat, cvoxels.length);
+          const mtx = new THREE.Matrix4();
+          for (let i = 0; i < cvoxels.length; i++) {
+            const v = cvoxels[i];
+            mtx.makeTranslation(
+              (v.x - gridSize.x / 2 + 0.5) * cellSize,
+              (v.y - gridSize.y / 2 + 0.5) * cellSize + boneLength(bd) / 2,
+              (v.z - gridSize.z / 2 + 0.5) * cellSize
+            );
+            inst.setMatrixAt(i, mtx);
+          }
+          inst.instanceMatrix.needsUpdate = true;
+          skinG.add(inst);
+        }
       }
       skinG.position.copy(worldPos);
-      skinG.quaternion.copy(boneQuat);
+      // Mesh skins: apply FBX bind-pose world quat correction (vertices are in FBX bone-local space)
+      // Voxel skins: apply alignment correction to orient grid along bone direction
+      const isMeshSkin = skinDef.type === 'mesh';
+      const bindWorldQuat = isMeshSkin && def.boneBindWorldQuats?.[bd.id];
+      if (bindWorldQuat) {
+        const bwq = new THREE.Quaternion(bindWorldQuat[0], bindWorldQuat[1], bindWorldQuat[2], bindWorldQuat[3]);
+        skinG.quaternion.copy(boneQuat).multiply(bwq);
+        skinG.userData._boneBindWorldQuat = bwq;
+      } else {
+        skinG.quaternion.copy(boneQuat);
+      }
+      skinG.userData._boneId = bd.id;
+      skinG.userData._childType = 'skin';
       group.add(skinG);
     }
   }
@@ -3207,6 +3606,7 @@ function refreshSkeletonMeshVisual(mesh) {
   mesh.userData._skelVisualGroup = group;
   mesh.userData._skelBoneMap = result.boneMap;
   mesh.userData._skelRootGroup = result.rootGroup;
+  mesh.userData._skelRestLocalQuats = result.restLocalQuats;
   mesh.userData._skelDef = def;
   mesh.add(group);
 }
@@ -3275,6 +3675,7 @@ function commitSkinEditorChange(beforeSnapshot) {
     return;
   }
   skinEditorState.undoStack.push(before);
+  if (skinEditorState.undoStack.length > MAX_UNDO) skinEditorState.undoStack.splice(0, skinEditorState.undoStack.length - MAX_UNDO);
   skinEditorState.redoStack.length = 0;
   syncSkinEditorHistoryUi();
 }
@@ -4180,6 +4581,7 @@ function commitSculptChange(before) {
   const after = captureSculptSnapshot();
   if (JSON.stringify(before) === JSON.stringify(after)) return;
   sculptEditorState.undoStack.push(before);
+  if (sculptEditorState.undoStack.length > MAX_UNDO) sculptEditorState.undoStack.splice(0, sculptEditorState.undoStack.length - MAX_UNDO);
   sculptEditorState.redoStack.length = 0;
 }
 
@@ -5158,25 +5560,128 @@ function getMeshSkeletonConfig(mesh) {
 
 // ─── Skeleton definitions (project-level registry) ───────────────────────────
 function createDefaultBone(overrides = {}) {
+  const head = Array.isArray(overrides.head) ? overrides.head.slice(0, 3).map(v => Number(v) || 0) : [0, 0, 0];
+  const tail = Array.isArray(overrides.tail) ? overrides.tail.slice(0, 3).map(v => Number(v) || 0) : [head[0], head[1] + 0.3, head[2]];
+  // Backward compat: convert old position+length+rotation to head/tail
+  if (!overrides.head && !overrides.tail && (overrides.position || overrides.length != null)) {
+    // Old format: position is offset from parent, length is bone extent
+    // We'll accept the old fields but they'll be converted in normalizeSkeletonDefinition
+  }
   return {
     id: overrides.id || ('bone_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6)),
     name: overrides.name || 'Bone',
     parent: overrides.parent ?? null,
-    position: Array.isArray(overrides.position) ? overrides.position.slice(0, 3) : [0, 0, 0],
-    rotation: Array.isArray(overrides.rotation) ? overrides.rotation.slice(0, 4) : [0, 0, 0, 1],
-    length: Math.max(0.01, Number.isFinite(overrides.length) ? overrides.length : 0.3),
+    connected: overrides.connected ?? false,
+    head,
+    tail,
+    roll: Number.isFinite(overrides.roll) ? overrides.roll : 0,
   };
 }
 
 function normalizeBone(raw = {}) {
+  // Backward compat: convert old position+length format to head/tail
+  if (raw.position && !raw.head && !raw.tail) {
+    return createDefaultBone({
+      id: raw.id,
+      name: raw.name,
+      parent: raw.parent,
+      connected: raw.connected,
+      head: [0, 0, 0],   // will be resolved below in _resolveOldBonePositions
+      tail: [0, 0.3, 0],
+      roll: 0,
+      _oldPosition: raw.position,
+      _oldLength: raw.length,
+      _oldRotation: raw.rotation,
+    });
+  }
   return createDefaultBone({
     id: raw.id,
     name: raw.name,
     parent: raw.parent,
-    position: raw.position,
-    rotation: raw.rotation,
-    length: raw.length,
+    connected: raw.connected,
+    head: raw.head,
+    tail: raw.tail,
+    roll: raw.roll,
   });
+}
+
+/** Convert old-format bones (position+length+rotation) to head/tail world positions. */
+function _resolveOldBonePositions(bones) {
+  const boneMap = new Map();
+  for (const b of bones) boneMap.set(b.id, b);
+
+  // Build THREE hierarchy temporarily to compute world positions
+  const threeBones = new Map();
+  const rootBones = [];
+  for (const bd of bones) {
+    const bone = new THREE.Bone();
+    const pos = bd._oldPosition || bd.position || [0, 0, 0];
+    const rot = bd._oldRotation || bd.rotation || [0, 0, 0, 1];
+    const len = bd._oldLength || bd.length || 0.3;
+    bone.position.set(pos[0] || 0, pos[1] || 0, pos[2] || 0);
+    if (Array.isArray(rot) && rot.length >= 4) {
+      bone.quaternion.set(rot[0], rot[1], rot[2], rot[3]);
+    }
+    bone.userData._len = Math.max(0.01, len);
+    bone.userData._id = bd.id;
+    threeBones.set(bd.id, bone);
+  }
+  for (const bd of bones) {
+    const bone = threeBones.get(bd.id);
+    if (bd.parent && threeBones.has(bd.parent)) {
+      threeBones.get(bd.parent).add(bone);
+    } else {
+      rootBones.push(bone);
+    }
+  }
+  const group = new THREE.Group();
+  for (const r of rootBones) group.add(r);
+  group.updateMatrixWorld(true);
+
+  // Compute head and tail world positions from children average direction
+  const wp = new THREE.Vector3();
+  for (const bd of bones) {
+    const bone = threeBones.get(bd.id);
+    bone.getWorldPosition(wp);
+    bd.head = [wp.x, wp.y, wp.z];
+
+    // Compute tail: the bone's "natural" direction derived from children positions
+    const children = bones.filter(b => b.parent === bd.id);
+    const dir = new THREE.Vector3();
+    if (children.length > 0) {
+      for (const child of children) {
+        const cb = threeBones.get(child.id);
+        const cp = new THREE.Vector3();
+        cb.getWorldPosition(cp);
+        dir.add(cp);
+      }
+      dir.divideScalar(children.length).sub(wp);
+    } else {
+      // Leaf bone: direction from parent to this bone
+      dir.set(bd._oldPosition?.[0] || 0, bd._oldPosition?.[1] || 0, bd._oldPosition?.[2] || 0);
+      if (dir.lengthSq() < 1e-10) dir.set(0, 1, 0);
+    }
+    if (dir.lengthSq() < 1e-10) dir.set(0, 1, 0);
+    dir.normalize().multiplyScalar(bone.userData._len);
+    bd.tail = [wp.x + dir.x, wp.y + dir.y, wp.z + dir.z];
+    bd.roll = 0;
+    bd.connected = !!bd.parent;
+    delete bd._oldPosition;
+    delete bd._oldLength;
+    delete bd._oldRotation;
+    delete bd.position;
+    delete bd.rotation;
+    delete bd.length;
+  }
+  return bones;
+}
+
+/** Compute bone length from head/tail distance. */
+function boneLength(boneDef) {
+  const dx = boneDef.tail[0] - boneDef.head[0];
+  const dy = boneDef.tail[1] - boneDef.head[1];
+  const dz = boneDef.tail[2] - boneDef.head[2];
+  return Math.max(0.01, Math.sqrt(dx * dx + dy * dy + dz * dz));
 }
 
 function createDefaultSkeletonDefinition(name = 'Unnamed') {
@@ -5186,12 +5691,17 @@ function createDefaultSkeletonDefinition(name = 'Unnamed') {
     poses: {},
     animations: {},
     boneSkins: {},
+    boneBindWorldQuats: {},
   };
 }
 
 function normalizeSkeletonDefinition(def = {}) {
   const name = String(def.name ?? 'Unnamed').trim() || 'Unnamed';
-  const bones = Array.isArray(def.bones) ? def.bones.map(normalizeBone) : [];
+  let bones = Array.isArray(def.bones) ? def.bones.map(normalizeBone) : [];
+  // Backward compat: if any bone has old-style `position` field, resolve to head/tail
+  if (bones.some(b => b._oldPosition || b.position)) {
+    bones = _resolveOldBonePositions(bones);
+  }
   const poses = {};
   if (def.poses && typeof def.poses === 'object') {
     for (const [poseName, poseData] of Object.entries(def.poses)) {
@@ -5236,10 +5746,29 @@ function normalizeSkeletonDefinition(def = {}) {
   if (def.boneSkins && typeof def.boneSkins === 'object') {
     for (const [boneId, skinRaw] of Object.entries(def.boneSkins)) {
       if (!skinRaw || typeof skinRaw !== 'object') continue;
-      boneSkins[boneId] = normalizeCustomBlockSkin(skinRaw);
+      if (skinRaw.type === 'mesh') {
+        // Mesh skins: preserve vertices/indices/colors arrays as-is
+        boneSkins[boneId] = {
+          type: 'mesh',
+          vertices: Array.isArray(skinRaw.vertices) ? skinRaw.vertices : [],
+          indices: Array.isArray(skinRaw.indices) ? skinRaw.indices : [],
+          colors: Array.isArray(skinRaw.colors) ? skinRaw.colors : [],
+        };
+      } else {
+        boneSkins[boneId] = normalizeCustomBlockSkin(skinRaw);
+      }
     }
   }
-  return { name, bones, poses, animations, boneSkins };
+  // Preserve FBX bind-pose world quaternions for mesh skin correction
+  const boneBindWorldQuats = {};
+  if (def.boneBindWorldQuats && typeof def.boneBindWorldQuats === 'object') {
+    for (const [boneId, quat] of Object.entries(def.boneBindWorldQuats)) {
+      if (Array.isArray(quat) && quat.length >= 4) {
+        boneBindWorldQuats[boneId] = quat.slice(0, 4).map(Number);
+      }
+    }
+  }
+  return { name, bones, poses, animations, boneSkins, boneBindWorldQuats };
 }
 
 function serializeSkeletonDefinitions() {
@@ -5265,55 +5794,135 @@ function setSkeletonDefinitionsMap(map = {}) {
 
 function createHumanoidSkeleton(name = 'Humanoid') {
   const def = createDefaultSkeletonDefinition(name);
-  const b = (id, nm, parent, pos, len) => ({ id, name: nm, parent, position: pos, rotation: [0,0,0,1], length: len });
+  // Blender-style: each bone is defined by head and tail world positions
+  const b = (id, nm, parent, head, tail, connected = true) => ({
+    id, name: nm, parent, connected, head, tail, roll: 0,
+  });
   def.bones = [
-    b('root',       'Root',        null,       [0,   0,    0],    0.2),
-    b('spine',      'Spine',       'root',     [0,   0.2,  0],    0.25),
-    b('chest',      'Chest',       'spine',    [0,   0.25, 0],    0.25),
-    b('neck',       'Neck',        'chest',    [0,   0.25, 0],    0.1),
-    b('head',       'Head',        'neck',     [0,   0.1,  0],    0.2),
-    b('shoulderL',  'Shoulder L',  'chest',    [-0.18, 0.2, 0],   0.1),
-    b('upperArmL',  'Upper Arm L', 'shoulderL',[-0.1, 0,   0],    0.25),
-    b('lowerArmL',  'Lower Arm L', 'upperArmL',[-0.25,0,   0],    0.22),
-    b('handL',      'Hand L',      'lowerArmL',[-0.22,0,   0],    0.1),
-    b('shoulderR',  'Shoulder R',  'chest',    [0.18, 0.2, 0],    0.1),
-    b('upperArmR',  'Upper Arm R', 'shoulderR',[0.1,  0,   0],    0.25),
-    b('lowerArmR',  'Lower Arm R', 'upperArmR',[0.25, 0,   0],    0.22),
-    b('handR',      'Hand R',      'lowerArmR',[0.22, 0,   0],    0.1),
-    b('hipL',       'Hip L',       'root',     [-0.1, 0,   0],    0.1),
-    b('upperLegL',  'Upper Leg L', 'hipL',     [0,   -0.1, 0],    0.3),
-    b('lowerLegL',  'Lower Leg L', 'upperLegL',[0,   -0.3, 0],    0.28),
-    b('footL',      'Foot L',      'lowerLegL',[0,   -0.28,0.06], 0.12),
-    b('hipR',       'Hip R',       'root',     [0.1,  0,   0],    0.1),
-    b('upperLegR',  'Upper Leg R', 'hipR',     [0,   -0.1, 0],    0.3),
-    b('lowerLegR',  'Lower Leg R', 'upperLegR',[0,   -0.3, 0],    0.28),
-    b('footR',      'Foot R',      'lowerLegR',[0,   -0.28,0.06], 0.12),
+    b('root',        'Root',        null,        [0,   0,    0],     [0,   0.2,   0],    false),
+    b('spine',       'Spine',       'root',      [0,   0.2,  0],     [0,   0.45,  0]),
+    b('chest',       'Chest',       'spine',     [0,   0.45, 0],     [0,   0.7,   0]),
+    b('neck',        'Neck',        'chest',     [0,   0.7,  0],     [0,   0.8,   0]),
+    b('head',        'Head',        'neck',      [0,   0.8,  0],     [0,   1.0,   0]),
+    b('shoulderL',   'Shoulder L',  'chest',     [-0.08, 0.65, 0],   [-0.18, 0.65, 0],   false),
+    b('upperArmL',   'Upper Arm L', 'shoulderL', [-0.18, 0.65, 0],   [-0.43, 0.65, 0]),
+    b('lowerArmL',   'Lower Arm L', 'upperArmL', [-0.43, 0.65, 0],   [-0.65, 0.65, 0]),
+    b('handL',       'Hand L',      'lowerArmL', [-0.65, 0.65, 0],   [-0.75, 0.65, 0]),
+    b('shoulderR',   'Shoulder R',  'chest',     [0.08,  0.65, 0],   [0.18,  0.65, 0],   false),
+    b('upperArmR',   'Upper Arm R', 'shoulderR', [0.18,  0.65, 0],   [0.43,  0.65, 0]),
+    b('lowerArmR',   'Lower Arm R', 'upperArmR', [0.43,  0.65, 0],   [0.65,  0.65, 0]),
+    b('handR',       'Hand R',      'lowerArmR', [0.65,  0.65, 0],   [0.75,  0.65, 0]),
+    b('hipL',        'Hip L',       'root',      [-0.1,  0,    0],   [-0.1, -0.05, 0],    false),
+    b('upperLegL',   'Upper Leg L', 'hipL',      [-0.1, -0.05, 0],   [-0.1, -0.35, 0]),
+    b('lowerLegL',   'Lower Leg L', 'upperLegL', [-0.1, -0.35, 0],   [-0.1, -0.63, 0]),
+    b('footL',       'Foot L',      'lowerLegL', [-0.1, -0.63, 0],   [-0.1, -0.63, 0.12]),
+    b('hipR',        'Hip R',       'root',      [0.1,  0,    0],   [0.1, -0.05, 0],     false),
+    b('upperLegR',   'Upper Leg R', 'hipR',      [0.1, -0.05, 0],   [0.1, -0.35, 0]),
+    b('lowerLegR',   'Lower Leg R', 'upperLegR', [0.1, -0.35, 0],   [0.1, -0.63, 0]),
+    b('footR',       'Foot R',      'lowerLegR', [0.1, -0.63, 0],   [0.1, -0.63, 0.12]),
   ];
-  // Default T-pose is just the bone positions (no rotations needed)
+  // T-Pose: all identity deltas (no rotation from rest)
   const tPose = {};
   for (const bone of def.bones) tPose[bone.id] = [0, 0, 0, 1];
   def.poses['T-Pose'] = tPose;
   return def;
 }
 
-// ─── THREE.js skeleton builder ───────────────────────────────────────────────
+// ─── Blender-style bone rest matrix computation ──────────────────────────────
+
+/**
+ * Compute the world-space rest matrix for a bone from head/tail/roll.
+ * Local Y axis = head→tail (bone direction).
+ * Roll rotates around Y axis.
+ * Returns a THREE.Matrix4.
+ */
+function _computeBoneRestMatrix(head, tail, roll) {
+  const hv = new THREE.Vector3(head[0], head[1], head[2]);
+  const tv = new THREE.Vector3(tail[0], tail[1], tail[2]);
+  const dir = new THREE.Vector3().subVectors(tv, hv);
+  const len = dir.length();
+  if (len < 1e-10) {
+    return new THREE.Matrix4().makeTranslation(hv.x, hv.y, hv.z);
+  }
+  dir.normalize();
+
+  // Y axis = bone direction (head→tail)
+  const yAxis = dir.clone();
+
+  // Choose a reference vector that isn't parallel to yAxis
+  const ref = Math.abs(yAxis.y) < 0.999
+    ? new THREE.Vector3(0, 1, 0)
+    : new THREE.Vector3(0, 0, 1);
+
+  // X axis = perpendicular to Y
+  const xAxis = new THREE.Vector3().crossVectors(yAxis, ref).normalize();
+  // Z axis = perpendicular to both
+  const zAxis = new THREE.Vector3().crossVectors(xAxis, yAxis).normalize();
+
+  // Apply roll around the bone (Y) axis
+  if (roll !== 0) {
+    const rollQuat = new THREE.Quaternion().setFromAxisAngle(yAxis, roll);
+    xAxis.applyQuaternion(rollQuat);
+    zAxis.applyQuaternion(rollQuat);
+  }
+
+  const m = new THREE.Matrix4();
+  m.makeBasis(xAxis, yAxis, zAxis);
+  m.setPosition(hv);
+  return m;
+}
+
+// ─── THREE.js skeleton builder (Blender-style head/tail) ─────────────────────
 function buildThreeBonesFromDef(def) {
   if (!def?.bones?.length) return null;
+
   const boneMap = new Map();
+  const restWorldMatrices = new Map();
+  const restLocalQuats = new Map(); // for pose system: bone rest quaternion in local space
+
+  // Compute world-space rest matrix for each bone
+  for (const bd of def.bones) {
+    const worldMat = _computeBoneRestMatrix(bd.head, bd.tail, bd.roll || 0);
+    restWorldMatrices.set(bd.id, worldMat);
+  }
+
+  // Create THREE.Bone objects with proper local transforms
   const rootBones = [];
-  // Create all THREE.Bone objects
   for (const bd of def.bones) {
     const bone = new THREE.Bone();
     bone.name = bd.id;
-    bone.position.set(bd.position[0] || 0, bd.position[1] || 0, bd.position[2] || 0);
-    if (Array.isArray(bd.rotation) && bd.rotation.length >= 4) {
-      bone.quaternion.set(bd.rotation[0], bd.rotation[1], bd.rotation[2], bd.rotation[3]);
+
+    const worldMat = restWorldMatrices.get(bd.id);
+
+    if (bd.parent && restWorldMatrices.has(bd.parent)) {
+      // Child bone: local transform = inverse(parent_world) * this_world
+      const parentWorldInv = restWorldMatrices.get(bd.parent).clone().invert();
+      const localMat = parentWorldInv.clone().multiply(worldMat);
+      const pos = new THREE.Vector3();
+      const quat = new THREE.Quaternion();
+      const scl = new THREE.Vector3();
+      localMat.decompose(pos, quat, scl);
+      bone.position.copy(pos);
+      bone.quaternion.copy(quat);
+    } else {
+      // Root bone: local = world
+      const pos = new THREE.Vector3();
+      const quat = new THREE.Quaternion();
+      const scl = new THREE.Vector3();
+      worldMat.decompose(pos, quat, scl);
+      bone.position.copy(pos);
+      bone.quaternion.copy(quat);
     }
+
+    // Store rest quaternion for pose delta system
+    restLocalQuats.set(bd.id, bone.quaternion.clone());
+
     bone.userData._boneDefId = bd.id;
-    bone.userData._boneLength = bd.length;
+    bone.userData._boneLength = boneLength(bd);
     boneMap.set(bd.id, bone);
   }
-  // Set up hierarchy
+
+  // Set up parent-child hierarchy
   for (const bd of def.bones) {
     const bone = boneMap.get(bd.id);
     if (bd.parent && boneMap.has(bd.parent)) {
@@ -5322,31 +5931,44 @@ function buildThreeBonesFromDef(def) {
       rootBones.push(bone);
     }
   }
+
   // Build skeleton
   const allBones = [];
   const rootGroup = new THREE.Group();
-  for (const root of rootBones) {
-    rootGroup.add(root);
-  }
+  for (const root of rootBones) rootGroup.add(root);
   rootGroup.traverse(obj => { if (obj.isBone) allBones.push(obj); });
   const skeleton = new THREE.Skeleton(allBones);
-  return { skeleton, rootGroup, boneMap, allBones };
+  return { skeleton, rootGroup, boneMap, allBones, restLocalQuats };
 }
 
-function applyPoseToSkeleton(boneMap, pose) {
-  if (!boneMap || !pose) return;
-  for (const [boneId, quat] of Object.entries(pose)) {
-    const bone = boneMap.get(boneId);
-    if (bone && Array.isArray(quat) && quat.length >= 4) {
-      bone.quaternion.set(quat[0], quat[1], quat[2], quat[3]);
+function applyPoseToSkeleton(boneMap, pose, restLocalQuats) {
+  if (!boneMap) return;
+  for (const [boneId, bone] of boneMap) {
+    const restQ = restLocalQuats?.get(boneId);
+    if (!restQ) continue;
+    const delta = pose?.[boneId];
+    if (delta && Array.isArray(delta) && delta.length >= 4) {
+      // Pose delta: final = rest * delta
+      const dq = new THREE.Quaternion(delta[0], delta[1], delta[2], delta[3]);
+      bone.quaternion.copy(restQ).multiply(dq);
+    } else {
+      // No pose data: use rest orientation
+      bone.quaternion.copy(restQ);
     }
   }
 }
 
-function capturePoseFromSkeleton(boneMap) {
+function capturePoseFromSkeleton(boneMap, restLocalQuats) {
   const pose = {};
   for (const [boneId, bone] of boneMap) {
-    pose[boneId] = bone.quaternion.toArray();
+    const restQ = restLocalQuats?.get(boneId);
+    if (restQ) {
+      // Delta = inverse(rest) * current
+      const delta = restQ.clone().invert().multiply(bone.quaternion.clone());
+      pose[boneId] = delta.toArray();
+    } else {
+      pose[boneId] = bone.quaternion.toArray();
+    }
   }
   return pose;
 }
@@ -5386,6 +6008,548 @@ function evaluateAnimationAtTime(animDef, time, boneIds) {
   const segDur = next.time - prev.time;
   const segT = segDur > 0 ? (t - prev.time) / segDur : 0;
   return interpolatePoses(prev.bones, next.bones, segT, boneIds);
+}
+
+// ─── FBX Import helpers ──────────────────────────────────────────────────────
+const _MIXAMO_BONE_MAP = {
+  // Mixamo naming (with and without colon, with and without "rig")
+  'hips': 'root', 'pelvis': 'root',
+  'spine': 'spine', 'spine1': 'chest', 'spine2': 'chest', 'chest': 'chest',
+  'neck': 'neck', 'head': 'head',
+  'leftshoulder': 'shoulderL', 'righthoulder': 'shoulderR',
+  'leftshoulder': 'shoulderL', 'rightshoulder': 'shoulderR',
+  'leftarm': 'upperArmL', 'rightarm': 'upperArmR',
+  'leftforearm': 'lowerArmL', 'rightforearm': 'lowerArmR',
+  'lefthand': 'handL', 'righthand': 'handR',
+  'leftupleg': 'upperLegL', 'rightupleg': 'upperLegR',
+  'leftthigh': 'upperLegL', 'rightthigh': 'upperLegR',
+  'leftleg': 'lowerLegL', 'rightleg': 'lowerLegR',
+  'leftshin': 'lowerLegL', 'rightshin': 'lowerLegR',
+  'leftfoot': 'footL', 'rightfoot': 'footR',
+  'lefthip': 'hipL', 'righthip': 'hipR',
+  'lefttoebase': 'footL', 'righttoebase': 'footR',
+};
+
+function _normalizeBoneName(name) {
+  // Strip common prefixes, collapse whitespace/underscores, lowercase
+  return name
+    .replace(/^mixamorig[:\s]*/i, '')  // "mixamorig:Hips" -> "Hips", "mixamorigHips" -> "Hips"
+    .replace(/^Armature[\|\/]/i, '')    // "Armature|Hips" -> "Hips"
+    .toLowerCase()
+    .replace(/[\s_:]+/g, '');
+}
+
+function _mapFBXBoneName(fbxName, defBoneIds) {
+  // Direct match
+  if (defBoneIds.has(fbxName)) return fbxName;
+
+  const normalized = _normalizeBoneName(fbxName);
+
+  // Try mapping table
+  const mapped = _MIXAMO_BONE_MAP[normalized];
+  if (mapped && defBoneIds.has(mapped)) return mapped;
+
+  // Fuzzy match against skeleton bone IDs
+  for (const id of defBoneIds) {
+    const idNorm = _normalizeBoneName(id);
+    if (idNorm === normalized) return id;
+  }
+  // Substring match (e.g. "leftupleg" contains "upperleg" or vice versa)
+  for (const id of defBoneIds) {
+    const idNorm = _normalizeBoneName(id);
+    if (normalized.includes(idNorm) || idNorm.includes(normalized)) return id;
+  }
+  return null;
+}
+
+async function importFBXAnimationToDefinition(arrayBuffer, def) {
+  const { FBXLoader } = await import('three/addons/loaders/FBXLoader.js');
+  const loader = new FBXLoader();
+  const fbx = loader.parse(arrayBuffer, '');
+  fbx.updateMatrixWorld(true);
+
+  const defBoneIds = new Set(def.bones.map(b => b.id));
+  const clips = fbx.animations || [];
+  if (!clips.length) throw new Error('No animation clips found in FBX file.');
+
+  // Log all track names for debugging
+  console.log('[FBX Import] Found', clips.length, 'clip(s). Tracks:');
+  for (const clip of clips) {
+    for (const track of clip.tracks) {
+      console.log('  Track:', track.name, '| Values:', track.values.length, '| Times:', track.times.length);
+    }
+  }
+
+  // ─── Build FBX bone hierarchy mapping ──────────────────────────────────────
+  // Map ALL FBX bones by name for hierarchy evaluation
+  const fbxBonesByName = new Map();
+  // Map Flame3D bone IDs to FBX bone objects
+  const fbxBoneByFlameId = new Map();
+  fbx.traverse(obj => {
+    if (obj.isBone || obj.type === 'Bone') {
+      fbxBonesByName.set(obj.name, obj);
+      const mapped = _mapFBXBoneName(obj.name, defBoneIds);
+      if (mapped && !fbxBoneByFlameId.has(mapped)) {
+        fbxBoneByFlameId.set(mapped, obj);
+      }
+    }
+  });
+
+  // Extract FBX bind-pose world quaternions (before any animation changes)
+  const fbxBindWorldQuats = new Map();
+  for (const [flameId, fbxBone] of fbxBoneByFlameId) {
+    const q = new THREE.Quaternion();
+    fbxBone.getWorldQuaternion(q);
+    fbxBindWorldQuats.set(flameId, q);
+  }
+  // Save bind-pose local quaternions for all FBX bones (to restore later)
+  const savedBindQuats = new Map();
+  for (const [name, bone] of fbxBonesByName) {
+    savedBindQuats.set(name, bone.quaternion.clone());
+  }
+
+  // Store bind world quats in definition (needed for mesh skin correction at render time)
+  if (!def.boneBindWorldQuats) def.boneBindWorldQuats = {};
+  for (const [flameId, q] of fbxBindWorldQuats) {
+    def.boneBindWorldQuats[flameId] = q.toArray();
+  }
+
+  const importedClips = [];
+  for (const clip of clips) {
+    // ─── Collect ALL quaternion tracks (mapped + unmapped) for full hierarchy eval
+    // Map: fbxBoneName -> entries[]
+    const allFBXQuatTracks = new Map();
+    // Map: flameId -> entries[]  (mapped bones only)
+    const boneQuatTracks = new Map();
+    const unmappedBones = new Set();
+
+    for (const track of clip.tracks) {
+      const dotIdx = track.name.lastIndexOf('.');
+      if (dotIdx < 0) continue;
+      const fbxBoneName = track.name.slice(0, dotIdx);
+      const property = track.name.slice(dotIdx + 1);
+
+      let entries = null;
+      if (property === 'quaternion') {
+        entries = [];
+        for (let i = 0; i < track.times.length; i++) {
+          entries.push({
+            time: track.times[i],
+            quat: [track.values[i * 4], track.values[i * 4 + 1], track.values[i * 4 + 2], track.values[i * 4 + 3]],
+          });
+        }
+      } else if (property === 'rotation' && track.values.length === track.times.length * 3) {
+        entries = [];
+        const _euler = new THREE.Euler();
+        const _quat = new THREE.Quaternion();
+        for (let i = 0; i < track.times.length; i++) {
+          _euler.set(track.values[i * 3], track.values[i * 3 + 1], track.values[i * 3 + 2]);
+          _quat.setFromEuler(_euler);
+          entries.push({ time: track.times[i], quat: _quat.toArray() });
+        }
+      }
+      if (!entries) continue;
+
+      // Store track for ALL FBX bones (for hierarchy evaluation)
+      if (!allFBXQuatTracks.has(fbxBoneName)) {
+        allFBXQuatTracks.set(fbxBoneName, entries);
+      }
+
+      // Also track mapped bones separately
+      const boneId = _mapFBXBoneName(fbxBoneName, defBoneIds);
+      if (boneId) {
+        if (!boneQuatTracks.has(boneId)) {
+          boneQuatTracks.set(boneId, entries);
+        }
+      } else {
+        unmappedBones.add(fbxBoneName);
+      }
+    }
+
+    if (unmappedBones.size) {
+      console.warn('[FBX Import] Unmapped bones:', Array.from(unmappedBones).join(', '));
+    }
+    console.log('[FBX Import] Mapped bones:', Array.from(boneQuatTracks.keys()).join(', '));
+
+    if (!boneQuatTracks.size) continue;
+
+    // Gather all unique times across mapped bone tracks
+    const allTimesSet = new Set();
+    for (const entries of boneQuatTracks.values()) {
+      for (const e of entries) allTimesSet.add(Math.round(e.time * 1000) / 1000);
+    }
+    let allTimes = Array.from(allTimesSet).sort((a, b) => a - b);
+
+    // Reduce keyframe density if too many
+    if (allTimes.length > 120) {
+      const step = Math.ceil(allTimes.length / 120);
+      allTimes = allTimes.filter((_, i) => i % step === 0 || i === allTimes.length - 1);
+    }
+
+    // ─── Helper: set all FBX bones to their animated quaternions at time t
+    function _setFBXHierarchyToTime(time) {
+      for (const [fbxBoneName, entries] of allFBXQuatTracks) {
+        const bone = fbxBonesByName.get(fbxBoneName);
+        if (!bone) continue;
+        const q = _sampleQuatTrack(entries, time);
+        bone.quaternion.set(q[0], q[1], q[2], q[3]);
+      }
+      // Bones without animation tracks keep their bind-pose quaternion (already set)
+      fbx.updateMatrixWorld(true);
+    }
+
+    // ─── Build retargeted keyframes ──────────────────────────────────────────
+    // For each time: evaluate full FBX hierarchy, compute retargeted local quats
+    // Retarget formula: L_retarget(B) = W_P_bind * inv(W_P_anim) * W_B_anim * inv(W_B_bind)
+    // where W_P = FBX bone mapped to Flame3D PARENT of B
+    const keyframes = allTimes.map(time => {
+      _setFBXHierarchyToTime(time);
+
+      const bones = {};
+      for (const [flameId] of boneQuatTracks) {
+        const fbxBone = fbxBoneByFlameId.get(flameId);
+        if (!fbxBone) continue;
+
+        // Get this bone's animated world quaternion
+        const W_B_anim = new THREE.Quaternion();
+        fbxBone.getWorldQuaternion(W_B_anim);
+        const W_B_bind = fbxBindWorldQuats.get(flameId);
+
+        // Find the Flame3D parent's FBX bone for retargeting
+        const flameBoneDef = def.bones.find(b => b.id === flameId);
+        const flameParentId = flameBoneDef?.parent;
+        const fbxParentBone = flameParentId ? fbxBoneByFlameId.get(flameParentId) : null;
+
+        let L_retarget;
+        if (fbxParentBone && fbxBindWorldQuats.has(flameParentId)) {
+          // Non-root: L = W_P_bind * inv(W_P_anim) * W_B_anim * inv(W_B_bind)
+          const W_P_anim = new THREE.Quaternion();
+          fbxParentBone.getWorldQuaternion(W_P_anim);
+          const W_P_bind = fbxBindWorldQuats.get(flameParentId);
+
+          L_retarget = new THREE.Quaternion()
+            .copy(W_P_bind)
+            .multiply(W_P_anim.clone().invert())
+            .multiply(W_B_anim)
+            .multiply(W_B_bind.clone().invert());
+        } else {
+          // Root bone (or parent unmapped): L = W_B_anim * inv(W_B_bind)
+          L_retarget = new THREE.Quaternion()
+            .copy(W_B_anim)
+            .multiply(W_B_bind.clone().invert());
+        }
+
+        bones[flameId] = L_retarget.toArray();
+      }
+      return { time, bones };
+    });
+
+    // Restore FBX bones to bind pose
+    for (const [name, q] of savedBindQuats) {
+      const bone = fbxBonesByName.get(name);
+      if (bone) bone.quaternion.copy(q);
+    }
+    fbx.updateMatrixWorld(true);
+
+    const duration = clip.duration || allTimes[allTimes.length - 1] || 1;
+    importedClips.push({
+      name: clip.name || 'Imported_' + (importedClips.length + 1),
+      clip: { duration, loop: true, keyframes },
+      mappedBones: boneQuatTracks.size,
+      totalKeyframes: keyframes.length,
+    });
+  }
+  if (!importedClips.length) {
+    throw new Error(
+      'No matching bone animations found.\n' +
+      'Your skeleton bones: ' + Array.from(defBoneIds).join(', ') + '\n' +
+      'Tip: Load the 🦴 Humanoid template first, then import the FBX.'
+    );
+  }
+  return importedClips;
+}
+
+/** Sample a quaternion value from a track at a given time via SLERP interpolation */
+function _sampleQuatTrack(entries, time) {
+  if (!entries.length) return [0, 0, 0, 1];
+  if (entries.length === 1) return [...entries[0].quat];
+  // Before first
+  if (time <= entries[0].time) return [...entries[0].quat];
+  // After last
+  if (time >= entries[entries.length - 1].time) return [...entries[entries.length - 1].quat];
+  // Find surrounding entries
+  for (let i = 0; i < entries.length - 1; i++) {
+    if (time >= entries[i].time && time <= entries[i + 1].time) {
+      const segDur = entries[i + 1].time - entries[i].time;
+      const t = segDur > 0 ? (time - entries[i].time) / segDur : 0;
+      const _qa = new THREE.Quaternion().fromArray(entries[i].quat);
+      const _qb = new THREE.Quaternion().fromArray(entries[i + 1].quat);
+      _qa.slerp(_qb, t);
+      return _qa.toArray();
+    }
+  }
+  return [...entries[entries.length - 1].quat];
+}
+
+// ─── FBX Skin (mesh) Import ──────────────────────────────────────────────────
+// Stores actual mesh triangles per bone for proper full-body skins.
+// Data: { type:'mesh', vertices:[x,y,z,...], indices:[i0,i1,i2,...], colors:[r,g,b,...] }
+// Vertices in bone-local space, uniformly scaled to Flame3D proportions.
+async function importFBXSkinToDefinition(arrayBuffer, def) {
+  const { FBXLoader } = await import('three/addons/loaders/FBXLoader.js');
+  const loader = new FBXLoader();
+  const fbx = loader.parse(arrayBuffer, '');
+  fbx.updateMatrixWorld(true);
+
+  const defBoneIds = new Set(def.bones.map(b => b.id));
+  if (!defBoneIds.size) throw new Error('No bones in skeleton definition. Load a template first.');
+
+  // Build Flame3D rest-pose skeleton for height measurement
+  const restResult = buildThreeBonesFromDef(def);
+  if (!restResult) throw new Error('Failed to build rest-pose skeleton.');
+  restResult.rootGroup.updateMatrixWorld(true);
+
+  // Build FBX bone name → Flame3D bone ID mapping
+  const fbxBoneNameToId = new Map();
+  const fbxBoneByFlameId = new Map();
+  fbx.traverse(obj => {
+    if (obj.isBone || obj.type === 'Bone') {
+      const mapped = _mapFBXBoneName(obj.name, defBoneIds);
+      if (mapped) {
+        fbxBoneNameToId.set(obj.name, mapped);
+        if (!fbxBoneByFlameId.has(mapped)) fbxBoneByFlameId.set(mapped, obj);
+      }
+    }
+  });
+  console.log('[FBX Skin] Bone mapping:', Object.fromEntries(fbxBoneNameToId));
+
+  // Store FBX bind-pose world quaternions for mesh skin correction at render time
+  if (!def.boneBindWorldQuats) def.boneBindWorldQuats = {};
+  for (const [flameId, fbxBone] of fbxBoneByFlameId) {
+    const q = new THREE.Quaternion();
+    fbxBone.getWorldQuaternion(q);
+    def.boneBindWorldQuats[flameId] = q.toArray();
+  }
+
+  // Compute global scale factor: Flame3D height / FBX height
+  const _tmpV = new THREE.Vector3();
+  let fbxMinY = Infinity, fbxMaxY = -Infinity;
+  for (const fbxBone of fbxBoneByFlameId.values()) {
+    fbxBone.getWorldPosition(_tmpV);
+    fbxMinY = Math.min(fbxMinY, _tmpV.y);
+    fbxMaxY = Math.max(fbxMaxY, _tmpV.y);
+  }
+  let flameMinY = Infinity, flameMaxY = -Infinity;
+  for (const bd of def.bones) {
+    const tb = restResult.boneMap.get(bd.id);
+    if (!tb) continue;
+    tb.getWorldPosition(_tmpV);
+    flameMinY = Math.min(flameMinY, _tmpV.y);
+    flameMaxY = Math.max(flameMaxY, _tmpV.y);
+  }
+  const fbxHeight = Math.max(fbxMaxY - fbxMinY, 0.01);
+  const flameHeight = Math.max(flameMaxY - flameMinY, 0.01);
+  const uniformScale = flameHeight / fbxHeight;
+  console.log(`[FBX Skin] Scale: Flame3D ${flameHeight.toFixed(3)} / FBX ${fbxHeight.toFixed(1)} = ${uniformScale.toFixed(6)}`);
+
+  // Collect meshes
+  const meshes = [];
+  fbx.traverse(obj => {
+    if ((obj.isSkinnedMesh || obj.isMesh) && obj.geometry?.attributes?.position) {
+      meshes.push(obj);
+    }
+  });
+  if (!meshes.length) throw new Error('No meshes found in FBX file.');
+
+  // Per-bone geometry accumulator
+  const boneGeo = new Map();
+  for (const id of defBoneIds) boneGeo.set(id, { vertMap: new Map(), verts: [], colors: [], faces: [] });
+
+  let totalVerts = 0, assignedVerts = 0;
+  const _pos = new THREE.Vector3();
+  const _offset = new THREE.Vector3();
+  const _bonePos = new THREE.Vector3();
+  const _boneQuatInv = new THREE.Quaternion();
+
+  for (const mesh of meshes) {
+    mesh.updateMatrixWorld(true);
+    const geo = mesh.geometry;
+    const posAttr = geo.attributes.position;
+    const vertCount = posAttr.count;
+    totalVerts += vertCount;
+
+    // Texture sampling setup
+    const uvAttr = geo.attributes.uv || null;
+    const colorAttr = geo.attributes.color || null;
+    let texCtx = null, texW = 0, texH = 0;
+    const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+    if (mat?.map?.image) {
+      try {
+        const img = mat.map.image;
+        texW = img.width || img.naturalWidth || 64;
+        texH = img.height || img.naturalHeight || 64;
+        const cnv = document.createElement('canvas');
+        cnv.width = texW; cnv.height = texH;
+        texCtx = cnv.getContext('2d', { willReadFrequently: true });
+        texCtx.drawImage(img, 0, 0, texW, texH);
+      } catch { texCtx = null; }
+    }
+    let matColor = [127, 142, 160];
+    if (mat?.color) {
+      const c = mat.color;
+      matColor = [Math.round(c.r * 255), Math.round(c.g * 255), Math.round(c.b * 255)];
+    }
+
+    // Skin weight data
+    const skinIdxAttr = geo.attributes.skinIndex;
+    const skinWtAttr = geo.attributes.skinWeight;
+    const hasSkinning = mesh.isSkinnedMesh && skinIdxAttr && skinWtAttr && mesh.skeleton;
+    const fbxIdxToBoneId = new Map();
+    const fbxIdxToFbxBone = new Map();
+    if (hasSkinning) {
+      for (let i = 0; i < mesh.skeleton.bones.length; i++) {
+        const fbxBone = mesh.skeleton.bones[i];
+        const mapped = fbxBoneNameToId.get(fbxBone.name);
+        if (mapped) { fbxIdxToBoneId.set(i, mapped); fbxIdxToFbxBone.set(i, fbxBone); }
+      }
+    }
+
+    // Helper: get color at vertex index
+    function _sampleColor(vi) {
+      let r = matColor[0], g = matColor[1], b = matColor[2];
+      if (texCtx && uvAttr) {
+        const u = uvAttr.getX(vi), v = uvAttr.getY(vi);
+        const px = THREE.MathUtils.clamp(Math.floor(((u % 1) + 1) % 1 * texW), 0, texW - 1);
+        const py = THREE.MathUtils.clamp(Math.floor((1 - ((v % 1) + 1) % 1) * texH), 0, texH - 1);
+        const pixel = texCtx.getImageData(px, py, 1, 1).data;
+        r = pixel[0]; g = pixel[1]; b = pixel[2];
+      } else if (colorAttr) {
+        r = Math.round(colorAttr.getX(vi) * 255);
+        g = Math.round(colorAttr.getY(vi) * 255);
+        b = Math.round(colorAttr.getZ(vi) * 255);
+      }
+      return [r, g, b];
+    }
+
+    // Helper: ensure a vertex exists in a bone's buffer, return local index
+    function _ensureVert(boneId, origIdx) {
+      const bg = boneGeo.get(boneId);
+      const key = `${mesh.uuid}_${origIdx}`;
+      if (bg.vertMap.has(key)) return bg.vertMap.get(key);
+      // Compute bone-local position
+      _pos.set(posAttr.getX(origIdx), posAttr.getY(origIdx), posAttr.getZ(origIdx));
+      _pos.applyMatrix4(mesh.matrixWorld);
+      const fbxBone = fbxBoneByFlameId.get(boneId);
+      if (!fbxBone) return 0;
+      fbxBone.getWorldPosition(_bonePos);
+      fbxBone.getWorldQuaternion(_boneQuatInv);
+      _boneQuatInv.invert();
+      _offset.copy(_pos).sub(_bonePos).applyQuaternion(_boneQuatInv).multiplyScalar(uniformScale);
+      const localIdx = bg.verts.length / 3;
+      bg.vertMap.set(key, localIdx);
+      bg.verts.push(_offset.x, _offset.y, _offset.z);
+      const [r, g, b] = _sampleColor(origIdx);
+      bg.colors.push(r, g, b);
+      return localIdx;
+    }
+
+    // Assign each vertex to its best bone
+    const vertBoneAssign = new Array(vertCount).fill(null);
+    for (let vi = 0; vi < vertCount; vi++) {
+      _pos.set(posAttr.getX(vi), posAttr.getY(vi), posAttr.getZ(vi));
+      _pos.applyMatrix4(mesh.matrixWorld);
+      let bestBoneId = null, bestWeight = 0;
+      if (hasSkinning) {
+        let bestIdx = -1;
+        for (let w = 0; w < 4; w++) {
+          const boneIdx = skinIdxAttr.getComponent(vi, w);
+          const weight = skinWtAttr.getComponent(vi, w);
+          if (weight > bestWeight && fbxIdxToBoneId.has(boneIdx)) { bestIdx = boneIdx; bestWeight = weight; }
+        }
+        if (bestIdx >= 0) bestBoneId = fbxIdxToBoneId.get(bestIdx);
+      }
+      if (!bestBoneId) {
+        let minDist = Infinity;
+        for (const [flameId, fbxBone] of fbxBoneByFlameId) {
+          fbxBone.getWorldPosition(_bonePos);
+          const d = _pos.distanceTo(_bonePos);
+          if (d < minDist) { minDist = d; bestBoneId = flameId; }
+        }
+      }
+      if (!bestBoneId) continue;
+      assignedVerts++;
+      vertBoneAssign[vi] = bestBoneId;
+      _ensureVert(bestBoneId, vi);
+    }
+
+    // Collect triangles — assign each face to majority-vote bone
+    const index = geo.index;
+    if (index) {
+      for (let fi = 0; fi < index.count; fi += 3) {
+        const a = index.getX(fi), b = index.getX(fi + 1), c = index.getX(fi + 2);
+        const bA = vertBoneAssign[a], bB = vertBoneAssign[b], bC = vertBoneAssign[c];
+        if (!bA && !bB && !bC) continue;
+        const faceBone = (bA === bB || bA === bC) ? bA : (bB === bC) ? bB : (bA || bB || bC);
+        if (!faceBone || !boneGeo.has(faceBone)) continue;
+        const iA = _ensureVert(faceBone, a);
+        const iB = _ensureVert(faceBone, b);
+        const iC = _ensureVert(faceBone, c);
+        boneGeo.get(faceBone).faces.push(iA, iB, iC);
+      }
+    } else {
+      for (let fi = 0; fi < vertCount; fi += 3) {
+        const bA = vertBoneAssign[fi], bB = vertBoneAssign[fi+1], bC = vertBoneAssign[fi+2];
+        const faceBone = (bA === bB || bA === bC) ? bA : (bB === bC) ? bB : (bA || bB || bC);
+        if (!faceBone || !boneGeo.has(faceBone)) continue;
+        const iA = _ensureVert(faceBone, fi);
+        const iB = _ensureVert(faceBone, fi+1);
+        const iC = _ensureVert(faceBone, fi+2);
+        boneGeo.get(faceBone).faces.push(iA, iB, iC);
+      }
+    }
+  }
+
+  // Write mesh skins into def.boneSkins
+  let bonesWithSkin = 0, totalTris = 0;
+  for (const [boneId, bg] of boneGeo) {
+    if (!bg.faces.length || !bg.verts.length) continue;
+    def.boneSkins[boneId] = {
+      type: 'mesh',
+      vertices: bg.verts,
+      indices: bg.faces,
+      colors: bg.colors,
+    };
+    bonesWithSkin++;
+    totalTris += bg.faces.length / 3;
+  }
+  console.log(`[FBX Skin] ${totalVerts} verts, ${assignedVerts} assigned, ${bonesWithSkin} bones, ${totalTris} tris`);
+  return { bonesWithSkin, totalTris, totalVerts, assignedVerts };
+}
+
+// ─── Humanoid mirror pairs ───────────────────────────────────────────────────
+const _MIRROR_BONE_PAIRS = [
+  ['shoulderL', 'shoulderR'], ['upperArmL', 'upperArmR'], ['lowerArmL', 'lowerArmR'], ['handL', 'handR'],
+  ['hipL', 'hipR'], ['upperLegL', 'upperLegR'], ['lowerLegL', 'lowerLegR'], ['footL', 'footR'],
+];
+
+function mirrorPose(pose) {
+  const mirrored = {};
+  for (const [id, q] of Object.entries(pose)) {
+    mirrored[id] = [...q];
+  }
+  for (const [l, r] of _MIRROR_BONE_PAIRS) {
+    const lq = pose[l], rq = pose[r];
+    if (lq) mirrored[r] = [lq[0], -lq[1], -lq[2], lq[3]];
+    if (rq) mirrored[l] = [rq[0], -rq[1], -rq[2], rq[3]];
+  }
+  // Mirror center bones (flip Y and Z rotation)
+  for (const id of Object.keys(pose)) {
+    if (!_MIRROR_BONE_PAIRS.flat().includes(id) && mirrored[id]) {
+      const q = pose[id];
+      mirrored[id] = [-q[0], q[1], q[2], -q[3]]; // negate X and W for X-axis mirror
+    }
+  }
+  return mirrored;
 }
 
 function createDefaultCheckpointConfig() {
@@ -5564,7 +6728,7 @@ function _applyScreenTexture(mesh) {
     video.loop = true;
     video.muted = true;
     video.playsInline = true;
-    video.play().catch(() => {});
+    video.play().catch(err => { console.warn('[Video] Autoplay blocked or failed:', err.message); });
     const tex = new THREE.VideoTexture(video);
     tex.minFilter = THREE.LinearFilter;
     if (mesh.material.map) mesh.material.map.dispose();
@@ -5756,9 +6920,15 @@ const _npcInteractCooldown = 0.5; // seconds between interactions
 
 function _getNpcState(mesh) {
   if (_npcRuntimeStates.has(mesh.uuid)) return _npcRuntimeStates.get(mesh.uuid);
-  const s = { wanderTarget: null, wanderTimer: 0, dialogueIndex: 0, originPos: mesh.position.clone(), walkPhase: 0 };
+  const s = { wanderTarget: null, wanderTimer: 0, dialogueIndex: 0, originPos: mesh.position.clone(), walkPhase: 0, patrolIndex: 0 };
   _npcRuntimeStates.set(mesh.uuid, s);
   return s;
+}
+
+function _getPathForMesh(mesh) {
+  const cfg = normalizeMovementPathConfig(mesh?.userData?.movementPath);
+  if (!cfg.checkpoints || !cfg.checkpoints.length) return null;
+  return cfg.checkpoints.map(cp => new THREE.Vector3(cp.pos[0], cp.pos[1], cp.pos[2]));
 }
 
 function updateNpcBehaviors(dt, time) {
@@ -5767,16 +6937,7 @@ function updateNpcBehaviors(dt, time) {
     const cfg = normalizeNpcConfig(m.userData.npcConfig);
     const st = _getNpcState(m);
     const group = m.getObjectByName('npc_head')?.parent;
-    // Idle animation
-    if (cfg.idleAnimation && group) {
-      const head = group.getObjectByName('npc_head');
-      const lArm = group.getObjectByName('npc_larm');
-      const rArm = group.getObjectByName('npc_rarm');
-      if (head) head.rotation.y = Math.sin(time * 0.5) * 0.05;
-      const breath = Math.sin(time * 1.5) * 0.03;
-      if (lArm) lArm.rotation.x = breath;
-      if (rArm) rArm.rotation.x = -breath;
-    }
+    let isWalking = false;
     // Face player
     if (cfg.facePlayer) {
       const dx = fpsPos.x - m.position.x;
@@ -5806,9 +6967,43 @@ function updateNpcBehaviors(dt, time) {
         if (!cfg.facePlayer) m.rotation.y = Math.atan2(dx, dz);
         st.walkPhase += dt * cfg.walkSpeed * 3;
         _animateNpcWalk(m, st.walkPhase);
+        isWalking = true;
       } else {
         _animateNpcWalk(m, 0);
       }
+    }
+    // Patrol behavior — follow path checkpoints in order
+    if (cfg.behavior === 'patrol') {
+      const path = _getPathForMesh(m);
+      if (path && path.length > 0) {
+        if (st.patrolIndex === undefined) st.patrolIndex = 0;
+        const target = path[st.patrolIndex % path.length];
+        const dx = target.x - m.position.x;
+        const dz = target.z - m.position.z;
+        const dist = Math.sqrt(dx * dx + dz * dz);
+        if (dist > 0.3) {
+          const speed = cfg.walkSpeed * dt;
+          m.position.x += (dx / dist) * Math.min(speed, dist);
+          m.position.z += (dz / dist) * Math.min(speed, dist);
+          if (!cfg.facePlayer) m.rotation.y = Math.atan2(dx, dz);
+          st.walkPhase += dt * cfg.walkSpeed * 3;
+          _animateNpcWalk(m, st.walkPhase);
+          isWalking = true;
+        } else {
+          st.patrolIndex = (st.patrolIndex + 1) % path.length;
+          _animateNpcWalk(m, 0);
+        }
+      }
+    }
+    // Idle animation — only when not actively walking
+    if (cfg.idleAnimation && group && !isWalking) {
+      const head = group.getObjectByName('npc_head');
+      const lArm = group.getObjectByName('npc_larm');
+      const rArm = group.getObjectByName('npc_rarm');
+      if (head) head.rotation.y = Math.sin(time * 0.5) * 0.05;
+      const breath = Math.sin(time * 1.5) * 0.03;
+      if (lArm) lArm.rotation.x = breath;
+      if (rArm) rArm.rotation.x = -breath;
     }
     // Nameplate billboard
     const plate = m.getObjectByName('npc_nameplate');
@@ -5945,6 +7140,10 @@ function bindNpcProps(mesh) {
         dialogueLines: dl ? dl.value.split('\n').filter(l => l.trim()) : [],
       });
       t.userData.npcConfig = cfg;
+      // Sync NPC displayName to the generic label field
+      t.userData.label = cfg.displayName;
+      const labelEl = document.getElementById('prop-label');
+      if (labelEl) labelEl.value = cfg.displayName;
       _applyNpcAppearance(t);
     }
   };
@@ -5953,7 +7152,7 @@ function bindNpcProps(mesh) {
     const el = document.getElementById(elId);
     if (el) el.addEventListener('change', applyAll);
   }
-  for (const elId of ['prop-npc-skin','prop-npc-shirt','prop-npc-pants']) {
+  for (const elId of ['prop-npc-skin','prop-npc-shirt','prop-npc-pants','prop-npc-name']) {
     const el = document.getElementById(elId);
     if (el) el.addEventListener('input', applyAll);
   }
@@ -6235,7 +7434,7 @@ function playLibraryPreviewAudio(entry) {
 
   if (libraryPreviewAudio && libraryPreviewAudioId === entry.id) {
     if (libraryPreviewAudio.paused) {
-      libraryPreviewAudio.play().catch(() => {});
+      libraryPreviewAudio.play().catch(err => { console.warn('[Audio] Preview resume failed:', err.message); });
     }
     return;
   }
@@ -6250,7 +7449,7 @@ function playLibraryPreviewAudio(entry) {
   });
   libraryPreviewAudio = audio;
   libraryPreviewAudioId = entry.id;
-  audio.play().catch(() => {});
+  audio.play().catch(err => { console.warn('[Audio] Preview play failed:', err.message); });
 }
 
 async function importAudioFiles(files) {
@@ -6269,7 +7468,8 @@ async function importAudioFiles(files) {
     let dataUrl = '';
     try {
       dataUrl = await readDataUrl(file);
-    } catch {
+    } catch (err) {
+      console.warn('[Audio] Failed to read file:', file.name, err);
       continue;
     }
     const baseName = String(file.name || 'audio').replace(/\.[^.]+$/, '').trim() || 'audio';
@@ -6382,7 +7582,7 @@ function clampMeshSolidness(value) {
 }
 
 function isDefaultSolidType(type) {
-  return !['light', 'spawn', 'checkpoint', 'trigger', 'target', 'pivot', 'npc'].includes(type);
+  return !['light', 'spawn', 'checkpoint', 'trigger', 'target', 'pivot', 'npc', 'teleport'].includes(type);
 }
 
 function getPlacementShapeParams(type) {
@@ -6412,8 +7612,17 @@ function createMesh(type, ghost = false, options = {}) {
   const defaultOpacity = clampMeshOpacity(
     mat.transparent ? (mat.opacity ?? 1) : (Number.isFinite(options.opacity) ? options.opacity : 1)
   );
-  if (ghost) { mat.transparent = true; mat.opacity = .42; mat.depthWrite = false; }
+  if (ghost) {
+    mat.transparent = true; mat.opacity = GHOST_OPACITY; mat.depthWrite = false;
+  }
   const mesh = new THREE.Mesh(buildTypeGeometry(type, shapeParams), mat);
+  if (ghost) {
+    // Add wireframe edge overlay for better visibility
+    const wireMat = new THREE.MeshBasicMaterial({ color: 0x58a6ff, wireframe: true, transparent: true, opacity: 0.5, depthWrite: false });
+    const wire = new THREE.Mesh(buildTypeGeometry(type, shapeParams), wireMat);
+    mesh.add(wire);
+    mesh.userData._ghostWire = wire;
+  }
   mesh.castShadow    = !ghost;
   mesh.receiveShadow = !ghost;
   mesh.userData.type = type;
@@ -7020,7 +8229,13 @@ function trsEqual(a, b) {
 }
 
 // ─── Undo / redo ─────────────────────────────────────────────────────────────
-function pushUndo(action) { undoStack.push(action); redoStack.length = 0; syncUndoUI(); markRestoreDirty(); }
+function pushUndo(action) {
+  undoStack.push(action);
+  if (undoStack.length > MAX_UNDO) undoStack.splice(0, undoStack.length - MAX_UNDO);
+  redoStack.length = 0;
+  syncUndoUI();
+  markRestoreDirty();
+}
 
 function setMeshColor(mesh, colorHex) {
   if (mesh.material?.color) mesh.material.color.setHex(colorHex);
@@ -7313,7 +8528,13 @@ function ensureGhost(type) {
   else ghost.scale.set(1, 1, 1);
 }
 function removeGhost() {
-  if (ghost) { scene.remove(ghost); ghost = null; }
+  if (ghost) {
+    if (ghost.userData._ghostWire) {
+      ghost.userData._ghostWire.geometry.dispose();
+      ghost.userData._ghostWire.material.dispose();
+    }
+    scene.remove(ghost); ghost = null;
+  }
 }
 
 // ─── Raycasting helpers ──────────────────────────────────────────────────────
@@ -7546,6 +8767,7 @@ function deleteObject(mesh) {
 
 function clearAll() {
   if (!sceneObjects.length) return;
+  if (!confirm(`Clear all ${sceneObjects.length} object(s) from the scene?`)) return;
   const meshes = [...sceneObjects];
   selectObject(null);
   meshes.forEach(removeFromScene);
@@ -7929,7 +9151,10 @@ function handleTerrainSculptEnd() {
 }
 
 // ─── Texture Paint ──────────────────────────────────────────────────────────
+const _patternCanvasCache = new Map();
 function _generatePatternCanvas(pattern, color1, color2, scale) {
+  const cacheKey = `${pattern}_${color1}_${color2}_${scale}`;
+  if (_patternCanvasCache.has(cacheKey)) return _patternCanvasCache.get(cacheKey);
   const size = Math.max(32, Math.round(64 * scale));
   const canvas = document.createElement('canvas');
   canvas.width = size;
@@ -8060,6 +9285,7 @@ function _generatePatternCanvas(pattern, color1, color2, scale) {
     }
     ctx.putImageData(imgData, 0, 0);
   }
+  _patternCanvasCache.set(cacheKey, canvas);
   return canvas;
 }
 
@@ -8482,10 +9708,21 @@ function serializeScene() {
   return [...currentObjs, ...otherWorldObjs];
 }
 
+function _isNumArray(arr, len) {
+  return Array.isArray(arr) && arr.length === len && arr.every(v => Number.isFinite(v));
+}
+
 function deserializeObject(d) {
   if (!d || !DEFS[d.type]) {
     console.warn('deserializeObject: skipping unknown or invalid type:', d?.type);
     return null;
+  }
+  // Validate core transform arrays before applying
+  if (d.position && !_isNumArray(d.position, 3)) { console.warn('deserializeObject: invalid position, skipping:', d.position); return null; }
+  if (d.quaternion && !_isNumArray(d.quaternion, 4)) { console.warn('deserializeObject: invalid quaternion, skipping:', d.quaternion); return null; }
+  if (d.scale) {
+    if (!_isNumArray(d.scale, 3)) { console.warn('deserializeObject: invalid scale, skipping:', d.scale); return null; }
+    if (d.scale.some(v => v === 0)) { console.warn('deserializeObject: zero scale component, fixing'); d.scale = d.scale.map(v => v === 0 ? 1 : v); }
   }
   const mesh = createMesh(d.type, false, {
     lightIntensity: d.lightIntensity,
@@ -8578,6 +9815,7 @@ function deserializeObject(d) {
 }
 
 function saveLevel() {
+  _stashCurrentWorld(); // ensure settings.worlds[active].objects matches exported objects
   const blob = new Blob([JSON.stringify({ version: 2, settings: serializeSettings(), objects: serializeScene() }, null, 2)],
                         { type: 'application/json' });
   const url  = URL.createObjectURL(blob);
@@ -8716,7 +9954,9 @@ function getStoredProjects() {
 
 function setStoredProjects(projects) {
   _storageCache.projects = Array.isArray(projects) ? projects : [];
-  _flushProjects();
+  _flushProjects().catch(err => {
+    alert('Failed to persist projects to storage: ' + err.message);
+  });
 }
 
 function saveEditorSettings() {
@@ -8780,7 +10020,7 @@ function loadEditorSettings() {
     if (s.customSculptSkins && typeof s.customSculptSkins === 'object') {
       setCustomSculptSkinsMap(s.customSculptSkins);
     }
-  } catch { /* corrupt data: ignore */ }
+  } catch (err) { console.warn('[Settings] Failed to apply scene settings (corrupt data?):', err); }
 }
 
 function clampSidebarWidth(value) {
@@ -8854,7 +10094,8 @@ function stopFunctionsPanelResize() {
 }
 
 function buildLevelPayload() {
-  return { version: 2, settings: serializeSettings(), objects: serializeScene() };
+  _stashCurrentWorld();
+  return JSON.stringify({ version: 2, settings: serializeSettings(), objects: serializeScene() });
 }
 
 function makeProjectId() {
@@ -9387,8 +10628,9 @@ function renderProjectLibrary() {
     return;
   }
   listEl.innerHTML = projects.map(p => {
-    const payload = p.payload || p.data;
-    const objCount = payload?.objects?.length ?? 0;
+    const raw = p.payload || p.data;
+    const parsed = typeof raw === 'string' ? (() => { try { return JSON.parse(raw); } catch { return null; } })() : raw;
+    const objCount = parsed?.objects?.length ?? 0;
     return `
       <div class="mm-project" data-project-id="${escapeHtml(p.id)}" title="Open project">
         <div class="mm-project-icon">📁</div>
@@ -10145,7 +11387,7 @@ function deleteProjectById(projectId) {
   renderProjectLibrary();
 }
 
-function saveProjectToLibrary() {
+async function saveProjectToLibrary() {
   try {
     const fallbackName = `Project ${new Date().toLocaleString()}`;
     const proposed = currentProjectName || fallbackName;
@@ -10176,7 +11418,8 @@ function saveProjectToLibrary() {
       });
     }
 
-    setStoredProjects(projects);
+    _storageCache.projects = projects;
+    await _flushProjects();
     currentProjectId = id;
     currentProjectName = name;
     clearRestoreSlot();
@@ -11027,6 +12270,57 @@ function movePlayerVertical(deltaY, ignoreMeshes = null) {
 
 const _pushHori = new THREE.Vector3();
 const _pushEscape = new THREE.Vector3();
+
+/**
+ * If the player is stuck inside static solid geometry, push them out along
+ * the shortest escape axis in a single frame.
+ */
+function resolveStaticPenetration() {
+  if (!collidesAt(fpsPos)) return;
+  const pH = _fpsCurrentHeight;
+  setPlayerAABB(_playerAABB, fpsPos, pH);
+  // Find shortest escape among all overlapping solids
+  let bestDist = Infinity;
+  let bestAxis = 'x';
+  let bestSign = 1;
+  let bestVal = 0;
+  for (const c of _solidColliders) {
+    const aabb = c.aabb;
+    if (_playerAABB.max.x <= aabb.min.x || _playerAABB.min.x >= aabb.max.x) continue;
+    if (_playerAABB.max.z <= aabb.min.z || _playerAABB.min.z >= aabb.max.z) continue;
+    if (_playerAABB.max.y <= aabb.min.y || _playerAABB.min.y >= aabb.max.y) continue;
+    // Compute overlap on each axis
+    const overlapPX = _playerAABB.max.x - aabb.min.x; // push left (-x)
+    const overlapNX = aabb.max.x - _playerAABB.min.x; // push right (+x)
+    const overlapPZ = _playerAABB.max.z - aabb.min.z; // push back (-z)
+    const overlapNZ = aabb.max.z - _playerAABB.min.z; // push forward (+z)
+    const overlapPY = _playerAABB.max.y - aabb.min.y; // push down (-y)
+    const overlapNY = aabb.max.y - _playerAABB.min.y; // push up (+y)
+    const candidates = [
+      { axis: 'x', sign: -1, d: overlapPX },
+      { axis: 'x', sign:  1, d: overlapNX },
+      { axis: 'z', sign: -1, d: overlapPZ },
+      { axis: 'z', sign:  1, d: overlapNZ },
+      { axis: 'y', sign: -1, d: overlapPY },
+      { axis: 'y', sign:  1, d: overlapNY },
+    ];
+    for (const c of candidates) {
+      if (c.d > 0 && c.d < bestDist) {
+        bestDist = c.d;
+        bestAxis = c.axis;
+        bestSign = c.sign;
+        bestVal = c.d;
+      }
+    }
+  }
+  if (bestDist === Infinity) return;
+  // Apply push with a small margin
+  const margin = 0.02;
+  const push = (bestVal + margin) * bestSign;
+  if (bestAxis === 'x') fpsPos.x += push;
+  else if (bestAxis === 'z') fpsPos.z += push;
+  else fpsPos.y += push;
+}
 
 function resolveMovingSolidPushes(tractionIgnore) {
   for (const mesh of sceneObjects) {
@@ -12118,11 +13412,17 @@ function updateSkeletonAnimations(dt) {
 
 function applySkeletonKeyframe(mesh, def, kf) {
   const boneMap = mesh.userData._skelBoneMap;
+  const restQ = mesh.userData._skelRestLocalQuats;
   if (!boneMap || !kf?.bones) return;
 
   for (const [boneId, quat] of Object.entries(kf.bones)) {
     const bone = boneMap.get(boneId);
-    if (bone && Array.isArray(quat) && quat.length >= 4) {
+    if (!bone) continue;
+    const rest = restQ?.get(boneId);
+    if (rest && Array.isArray(quat) && quat.length >= 4) {
+      const dq = new THREE.Quaternion(quat[0], quat[1], quat[2], quat[3]);
+      bone.quaternion.copy(rest).multiply(dq);
+    } else if (Array.isArray(quat) && quat.length >= 4) {
       bone.quaternion.set(quat[0], quat[1], quat[2], quat[3]);
     }
   }
@@ -12132,6 +13432,7 @@ function applySkeletonKeyframe(mesh, def, kf) {
 
 function applyInterpolatedKeyframes(mesh, def, kfA, kfB, t) {
   const boneMap = mesh.userData._skelBoneMap;
+  const restQ = mesh.userData._skelRestLocalQuats;
   if (!boneMap) return;
 
   const allBoneIds = new Set([
@@ -12160,7 +13461,14 @@ function applyInterpolatedKeyframes(mesh, def, kfA, kfB, t) {
       qb.set(0, 0, 0, 1);
     }
 
-    bone.quaternion.copy(qa).slerp(qb, t);
+    // Interpolate the delta, then apply: final = rest * slerp(deltaA, deltaB, t)
+    qa.slerp(qb, t);
+    const rest = restQ?.get(boneId);
+    if (rest) {
+      bone.quaternion.copy(rest).multiply(qa);
+    } else {
+      bone.quaternion.copy(qa);
+    }
   }
 
   mesh.userData._skelRootGroup?.updateMatrixWorld(true);
@@ -12172,8 +13480,20 @@ function updateSkeletonBoneSkinPositions(mesh, def) {
   const boneMap = mesh.userData._skelBoneMap;
   if (!visualGroup || !boneMap) return;
 
-  // Update marker and skin positions to match bone world positions
-  let childIdx = 0;
+  // Build lookup maps from tagged children for robust matching
+  const markersByBone = new Map();
+  const linesByBone = new Map();
+  const skinsByBone = new Map();
+  for (const child of visualGroup.children) {
+    const bid = child.userData._boneId;
+    if (!bid) continue;
+    switch (child.userData._childType) {
+      case 'marker': markersByBone.set(bid, child); break;
+      case 'line':   linesByBone.set(bid, child); break;
+      case 'skin':   skinsByBone.set(bid, child); break;
+    }
+  }
+
   for (const bd of def.bones) {
     const threeBone = boneMap.get(bd.id);
     if (!threeBone) continue;
@@ -12181,42 +13501,34 @@ function updateSkeletonBoneSkinPositions(mesh, def) {
     const worldPos = new THREE.Vector3();
     threeBone.getWorldPosition(worldPos);
 
-    // Update the marker sphere
-    if (childIdx < visualGroup.children.length) {
-      const marker = visualGroup.children[childIdx];
-      if (marker.isMesh) marker.position.copy(worldPos);
-    }
-    childIdx++;
+    // Update marker sphere
+    const marker = markersByBone.get(bd.id);
+    if (marker) marker.position.copy(worldPos);
 
-    // Update bone connection line (if not root)
-    if (bd.parent) {
-      if (childIdx < visualGroup.children.length) {
-        const line = visualGroup.children[childIdx];
-        if (line.isLine) {
-          const parentBone = boneMap.get(bd.parent);
-          if (parentBone) {
-            const pPos = new THREE.Vector3();
-            parentBone.getWorldPosition(pPos);
-            line.geometry.setFromPoints([pPos, worldPos]);
-            line.geometry.attributes.position.needsUpdate = true;
-          }
-        }
+    // Update bone connection line
+    const line = linesByBone.get(bd.id);
+    if (line && bd.parent) {
+      const parentBone = boneMap.get(bd.parent);
+      if (parentBone) {
+        const pPos = new THREE.Vector3();
+        parentBone.getWorldPosition(pPos);
+        line.geometry.setFromPoints([pPos, worldPos]);
+        line.geometry.attributes.position.needsUpdate = true;
       }
-      childIdx++;
     }
 
     // Update bone skin group
-    if (def.boneSkins[bd.id]?.voxels?.length) {
-      if (childIdx < visualGroup.children.length) {
-        const skinG = visualGroup.children[childIdx];
-        if (skinG.isGroup) {
-          skinG.position.copy(worldPos);
-          const boneQuat = new THREE.Quaternion();
-          threeBone.getWorldQuaternion(boneQuat);
-          skinG.quaternion.copy(boneQuat);
-        }
+    const skinG = skinsByBone.get(bd.id);
+    if (skinG) {
+      skinG.position.copy(worldPos);
+      const boneQuat = new THREE.Quaternion();
+      threeBone.getWorldQuaternion(boneQuat);
+      const bindWorldQuat = skinG.userData._boneBindWorldQuat;
+      if (bindWorldQuat) {
+        skinG.quaternion.copy(boneQuat).multiply(bindWorldQuat);
+      } else {
+        skinG.quaternion.copy(boneQuat);
       }
-      childIdx++;
     }
   }
 }
@@ -12702,7 +14014,7 @@ function updateRuntimeAudioInstances() {
 
     if (instance.resumeRequested && instance.audio.paused) {
       instance.resumeRequested = false;
-      instance.audio.play().catch(() => {});
+      instance.audio.play().catch(err => { console.warn('[Audio] Runtime resume failed:', err.message); });
     }
 
     updateAudioProximityVolume(instance);
@@ -14082,6 +15394,10 @@ function _cleanupPlaytest() {
       m.userData._portalDisc.material.dispose();
       delete m.userData._portalDisc;
     }
+    if (m.userData._portalRT) {
+      m.userData._portalRT.dispose();
+      delete m.userData._portalRT;
+    }
     // Stop any playing screen videos
     if (m.userData._screenVideo) {
       m.userData._screenVideo.pause();
@@ -14467,6 +15783,50 @@ function isEditingFormField() {
   return false;
 }
 
+// ─── Keyboard Shortcuts Help ─────────────────────────────────────────────────
+function toggleShortcutsHelp() {
+  let overlay = document.getElementById('shortcuts-help-overlay');
+  if (overlay) { overlay.remove(); return; }
+  overlay = document.createElement('div');
+  overlay.id = 'shortcuts-help-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:99999;display:flex;align-items:center;justify-content:center';
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:10px;padding:24px 32px;max-width:520px;width:90%;max-height:80vh;overflow-y:auto;font-family:monospace;font-size:13px';
+  box.innerHTML = `
+    <h2 style="margin:0 0 16px;color:#f97316;font-size:16px">⌨ Keyboard Shortcuts</h2>
+    <table style="width:100%;border-collapse:collapse">
+      <tr><th style="text-align:left;padding:4px 8px;color:#8b949e;border-bottom:1px solid #30363d" colspan=2>Editor</th></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">Ctrl+Z</td><td style="padding:3px 8px">Undo</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">Ctrl+Y</td><td style="padding:3px 8px">Redo</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">Ctrl+C</td><td style="padding:3px 8px">Copy</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">Ctrl+V</td><td style="padding:3px 8px">Paste</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">Ctrl+D</td><td style="padding:3px 8px">Duplicate</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">Ctrl+G</td><td style="padding:3px 8px">Group</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">Ctrl+Shift+G</td><td style="padding:3px 8px">Ungroup</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">Ctrl+A</td><td style="padding:3px 8px">Select all</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">Delete / Backspace</td><td style="padding:3px 8px">Delete selected</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">1 / 2 / 3</td><td style="padding:3px 8px">Translate / Rotate / Scale</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">X / Y / Z</td><td style="padding:3px 8px">Toggle scale side (in scale mode)</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">Tab</td><td style="padding:3px 8px">Clone object under cursor</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">F</td><td style="padding:3px 8px">Toggle freelook</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">P</td><td style="padding:3px 8px">Start playtest</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">Escape</td><td style="padding:3px 8px">Stop playtest / exit freelook</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">?</td><td style="padding:3px 8px">Toggle this help</td></tr>
+      <tr><th style="text-align:left;padding:8px 8px 4px;color:#8b949e;border-top:1px solid #30363d" colspan=2>Playtest (FPS)</th></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">WASD</td><td style="padding:3px 8px">Move</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">Space</td><td style="padding:3px 8px">Jump</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">R</td><td style="padding:3px 8px">Sprint</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">Shift</td><td style="padding:3px 8px">Crouch</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">E</td><td style="padding:3px 8px">Interact with NPC</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">T</td><td style="padding:3px 8px">Toggle mouse cursor</td></tr>
+      <tr><td style="padding:3px 8px;color:#58a6ff">V</td><td style="padding:3px 8px">Dev view (editor playtest)</td></tr>
+    </table>
+    <div style="text-align:center;margin-top:14px;color:#8b949e;font-size:11px">Press <b>?</b> or click outside to close</div>`;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+}
+
 // ─── Keyboard ────────────────────────────────────────────────────────────────
 window.addEventListener('keydown', e => {
   if (state.isPlaytest) {
@@ -14588,6 +15948,8 @@ window.addEventListener('keydown', e => {
     }
     return;
   }
+
+  if (e.key === '?' && !e.ctrlKey && !e.metaKey) { toggleShortcutsHelp(); return; }
 });
 
 window.addEventListener('keyup', e => {
@@ -15123,7 +16485,7 @@ if (btnExportGame) {
       await exportStandaloneGameHtml();
     } catch (err) {
       console.error(err);
-      alert('Failed to export standalone game HTML. Make sure the app is served from a web server.');
+      alert('Failed to export standalone game HTML.\n\nError: ' + (err.message || err) + '\n\nMake sure the app is served from a web server.');
     } finally {
       btnExportGame.textContent = oldText;
       btnExportGame.disabled = false;
@@ -15139,7 +16501,7 @@ if (btnExportLoader) {
       await exportRuntimeLoaderHtml();
     } catch (err) {
       console.error(err);
-      alert('Failed to export runtime loader HTML. Make sure the app is served from a web server.');
+      alert('Failed to export runtime loader HTML.\n\nError: ' + (err.message || err) + '\n\nMake sure the app is served from a web server.');
     } finally {
       btnExportLoader.textContent = oldText;
       btnExportLoader.disabled = false;
@@ -15185,13 +16547,13 @@ if (sbLoadJson) sbLoadJson.addEventListener('click', () => loadInput.click());
 if (sbExportGame) sbExportGame.addEventListener('click', async () => {
   sbExportGame.disabled = true; sbExportGame.textContent = '⏳ Building...';
   try { await exportStandaloneGameHtml(); }
-  catch (err) { console.error(err); alert('Failed to export game HTML.'); }
+  catch (err) { console.error(err); alert('Failed to export game HTML.\n\nError: ' + (err.message || err)); }
   finally { sbExportGame.textContent = '🎮 Export Game HTML'; sbExportGame.disabled = false; }
 });
 if (sbExportLoader) sbExportLoader.addEventListener('click', async () => {
   sbExportLoader.disabled = true; sbExportLoader.textContent = '⏳ Building...';
   try { await exportRuntimeLoaderHtml(); }
-  catch (err) { console.error(err); alert('Failed to export loader HTML.'); }
+  catch (err) { console.error(err); alert('Failed to export loader HTML.\n\nError: ' + (err.message || err)); }
   finally { sbExportLoader.textContent = '🧩 Export Loader HTML'; sbExportLoader.disabled = false; }
 });
 if (sbClearAll) sbClearAll.addEventListener('click', clearAll);
@@ -15274,9 +16636,14 @@ if (mmImportInput) {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = e => {
+      resetSceneForNewProject();
       loadLevelJSON(e.target.result, { pushHistory: false });
       currentProjectId = null;
       currentProjectName = '';
+      // Prevent stale autosave banner from appearing over the imported project
+      _pendingRestore = null;
+      clearRestoreSlot();
+      markRestoreDirty();
       showStudio();
     };
     reader.readAsText(file);
@@ -16290,16 +17657,19 @@ function bindScreenProps(mesh) {
       const file = fileInput.files[0];
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = () => {
-        for (const t of targets) {
-          const sc = normalizeScreenConfig(t.userData.screenConfig);
-          sc.mediaType = 'image';
-          sc.imageData = reader.result;
-          t.userData.screenConfig = sc;
-          _applyScreenTexture(t);
+      reader.onload = e => {
+        loadLevelJSON(e.target.result, { pushHistory: !runtimeMode });
+        if (runtimeMode) {
+          hideRuntimeLoaderOverlay();
+          startRuntimeGame();
+        } else {
+          // Detach from any previously-open project so autosave does not overwrite it,
+          // and start tracking the newly-loaded content immediately.
+          currentProjectId = null;
+          currentProjectName = '';
+          clearRestoreSlot();
+          markRestoreDirty();
         }
-        markRestoreDirty();
-        refreshProps();
       };
       reader.readAsDataURL(file);
     });
@@ -17314,6 +18684,13 @@ function refreshProps() {
         labelInput.style.borderColor = '';
         labelInput.title = '';
         m.userData.label = name;
+        // Sync label to NPC displayName / nameplate
+        if (m.userData.type === 'npc' && m.userData.npcConfig) {
+          m.userData.npcConfig.displayName = name || 'NPC';
+          _updateNpcNameplate(m);
+          const npcNameEl = document.getElementById('prop-npc-name');
+          if (npcNameEl) npcNameEl.value = m.userData.npcConfig.displayName;
+        }
         if (typeof refreshObjLib === 'function') refreshObjLib();
       };
       labelInput.addEventListener('change', applyLabel);
@@ -18635,15 +20012,18 @@ function updateRuntimeOptimizer(nowMs, dt) {
 // ─── Portal view rendering ────────────────────────────────────────────────────
 const _portalDiscGeo = new THREE.CircleGeometry(0.58, 32);
 const _portalTmpPos = new THREE.Vector3();
-const _portalRTs = [
-  new THREE.WebGLRenderTarget(256, 256),
-  new THREE.WebGLRenderTarget(256, 256)
-];
 const _portalCam = new THREE.PerspectiveCamera(75, 1, 0.1, 200);
 
-function _ensurePortalDisc(mesh, rtIndex) {
+function _createPortalRenderTarget() {
+  const rt = new THREE.WebGLRenderTarget(256, 256);
+  rt.texture.colorSpace = THREE.SRGBColorSpace;
+  return rt;
+}
+
+function _ensurePortalDisc(mesh) {
   if (mesh.userData._portalDisc) return mesh.userData._portalDisc;
-  const mat = new THREE.MeshBasicMaterial({ map: _portalRTs[rtIndex].texture, side: THREE.DoubleSide, transparent: true });
+  if (!mesh.userData._portalRT) mesh.userData._portalRT = _createPortalRenderTarget();
+  const mat = new THREE.MeshBasicMaterial({ map: mesh.userData._portalRT.texture, side: THREE.DoubleSide, transparent: true });
   const disc = new THREE.Mesh(_portalDiscGeo, mat);
   disc.userData._isPortalDisc = true;
   disc.renderOrder = 1;
@@ -18654,7 +20034,6 @@ function _ensurePortalDisc(mesh, rtIndex) {
 
 function _renderPortalViews() {
   if (!state.isPlaytest) return;
-  let rendered = 0;
   for (const m of sceneObjects) {
     if (m.userData.type !== 'teleport') continue;
     // Hide portal disc if not in playtest or no pair
@@ -18663,22 +20042,27 @@ function _renderPortalViews() {
     _portalTmpPos.setFromMatrixPosition(m.matrixWorld);
     const dist = _portalTmpPos.distanceTo(fpsPos);
     if (dist > PORTAL_MAX_DIST) continue;
-    if (rendered >= 2) continue; // max 2 active portal renders per frame
 
     const config = getMeshTeleportConfig(m);
     if (!config.pairLabel) continue;
     // Only same-world portals for live rendering
     if (config.crossWorld) continue;
 
+    const pairLower = config.pairLabel.toLowerCase();
+    const srcLabelLower = (m.userData.label || '').toLowerCase();
     const dest = sceneObjects.find(o =>
       o !== m && o.userData.type === 'teleport' &&
-      (o.userData.label || '').toLowerCase() === config.pairLabel.toLowerCase() &&
-      (o.userData.world || 'world_1') === _playtestWorldId
+      (o.userData.world || 'world_1') === _playtestWorldId &&
+      (
+        (o.userData.label || '').toLowerCase() === pairLower ||
+        (getMeshTeleportConfig(o).pairLabel || '').toLowerCase() === srcLabelLower
+      )
     );
     if (!dest) continue;
 
-    const disc = _ensurePortalDisc(m, rendered);
+    const disc = _ensurePortalDisc(m);
     disc.visible = true;
+    if (!m.userData._portalRT) m.userData._portalRT = _createPortalRenderTarget();
 
     // Position portal camera at destination, facing the same direction as the player
     _portalCam.position.copy(dest.position);
@@ -18690,17 +20074,33 @@ function _renderPortalViews() {
     // Render scene from destination perspective
     disc.visible = false;
     const destDisc = dest.userData._portalDisc;
+    const destDiscWasVisible = destDisc ? destDisc.visible : false;
     if (destDisc) destDisc.visible = false;
 
-    renderer.setRenderTarget(_portalRTs[rendered]);
+    // Temporarily show objects visible from portal camera (frustum culling
+    // hid them because they're off the player's screen).
+    const _savedVis = [];
+    _portalCam.updateMatrixWorld();
+    _projScreenMatrix.multiplyMatrices(_portalCam.projectionMatrix, _portalCam.matrixWorldInverse);
+    _frustum.setFromProjectionMatrix(_projScreenMatrix);
+    for (const o of sceneObjects) {
+      if (!o.visible && !o.userData._dead && _frustum.intersectsObject(o)) {
+        _savedVis.push(o);
+        o.visible = true;
+      }
+    }
+
+    renderer.setRenderTarget(m.userData._portalRT);
     renderer.render(scene, _portalCam);
     renderer.setRenderTarget(null);
 
-    disc.material.map = _portalRTs[rendered].texture;
+    // Restore visibility
+    for (const o of _savedVis) o.visible = false;
+
+    disc.material.map = m.userData._portalRT.texture;
     disc.material.needsUpdate = true;
     disc.visible = true;
-    if (destDisc) destDisc.visible = false;
-    rendered++;
+    if (destDisc) destDisc.visible = destDiscWasVisible;
   }
 }
 
@@ -18843,6 +20243,7 @@ function animate(t) {
     refreshSolids();
     const _tractionIgnore = applyTractionCarry();
     resolveMovingSolidPushes(_tractionIgnore);
+    resolveStaticPenetration();
 
     // Horizontal movement with ground-following for slopes/ramps
     if (_move.x !== 0 || _move.z !== 0) {
@@ -18930,12 +20331,13 @@ function animate(t) {
     // Track first ground touch after spawn
     if (!fpsSpawnLanded && fpsGrounded) fpsSpawnLanded = true;
 
-    // Ground touch function trigger
+    // Ground touch function trigger — only when touching the grid floor (y ≈ 0), not objects
     if (gameRules.groundTouchFunction) {
-      if (fpsGrounded && !_groundTouchFnActive) {
+      const onGrid = fpsGrounded && fpsPos.y < 0.01;
+      if (onGrid && !_groundTouchFnActive) {
         _groundTouchFnActive = true;
         executeControlFunction(gameRules.groundTouchFunction, null, true);
-      } else if (!fpsGrounded && _groundTouchFnActive) {
+      } else if (!onGrid && _groundTouchFnActive) {
         _groundTouchFnActive = false;
         executeControlFunction(gameRules.groundTouchFunction, null, false);
       }
@@ -19309,7 +20711,10 @@ _bootStorage().then(async () => {
     try {
       _pendingRestore = await _idbGet(_RESTORE_IDB_KEY);
       if (_pendingRestore && !_pendingRestore.payload) _pendingRestore = null;
-    } catch { _pendingRestore = null; }
+    } catch (err) {
+      console.warn('[Boot] Failed to read auto-restore data:', err);
+      _pendingRestore = null;
+    }
     showMainMenu();
   }
 }).catch(err => {

@@ -1,6 +1,6 @@
 # Flame3D
 
-Flame3D is a browser-based 3D level editor and game engine built with Three.js. It combines block placement, object sculpting, terrain modeling, texture painting, skeleton animation, copy/paste/duplicate workflows, teleport blocks, multi-world editing, a full atmosphere system, and in-editor playtesting into a single-file application.
+Flame3D is a browser-based 3D level editor and game engine built with Three.js. It combines block placement, object sculpting, terrain modeling, texture painting, skeleton animation, copy/paste/duplicate workflows, teleport blocks, media objects (text, screens, cameras), multi-world editing, a full atmosphere system, and in-editor playtesting into a single-file application.
 
 ## Table Of Contents
 
@@ -12,22 +12,26 @@ Flame3D is a browser-based 3D level editor and game engine built with Three.js. 
 6. Sidebar Menus
 7. Block Types
 8. Object Properties
-9. Editing Controls
-10. Terrain System
-11. Texture Paint
-12. Custom Objects
-13. Sculpt Editor
-14. Skeleton Animation Editor
-15. Playtest Controls
-16. Player Systems
-17. Control Systems
-18. Variables And Booleans
-19. Functions Panel
-20. Multi-World System
-21. Atmosphere And Sky
-22. Saving And Loading
-23. Runtime Mode
-24. Building The Editor
+9. Movement Paths
+10. Editing Controls
+11. Terrain System
+12. Texture Paint
+13. Custom Objects
+14. Sculpt Editor
+15. Skeleton Animation Editor
+16. Playtest Controls
+17. Player Systems
+18. Control Systems
+19. Variables And Booleans
+20. Functions Panel
+21. Multi-World System
+22. Atmosphere And Sky
+23. Saving And Loading
+24. Runtime Mode
+25. Building The Editor
+26. Tips And Workflow
+27. Troubleshooting
+28. Current Scope
 25. Tips And Workflow
 26. Troubleshooting
 27. Current Scope
@@ -45,7 +49,9 @@ Flame3D lets you:
 - Save selections as reusable custom objects and place them from the sidebar.
 - Select, move, rotate, scale, group, and ungroup objects with transform gizmos.
 - Edit per-object properties such as color, solidity, groups, label, visibility, light emission, target health, switch behavior, traction, and control rules/functions.
-- Add teleport blocks that transport the player between paired locations.
+- Add teleport blocks that transport the player between paired locations, including across different worlds.
+- Place media objects: flat text panels, extruded 3D text, screen displays (color, image, video, URL, or HTML content), and in-world cameras.
+- Adjust per-object metalness and roughness for shiny or matte surfaces.
 - Create and edit skeleton animations with a dedicated skeleton editor.
 - Create custom sculpted objects with a dedicated sculpt editor and CSG operations.
 - Configure sun, moon, stars, clouds, fog, sky color, day cycle, grid visuals, render quality, and player movement rules.
@@ -223,6 +229,7 @@ The Block menu is a categorized library of placeable objects.
 - `Lighting`: `Light`
 - `Gameplay`: `Target`, `Checkpoint`, `Spawn`, `Joint`, `Skeleton`, `Pivot`, `Teleport`
 - `Control`: `Control`, `Keypad`
+- `Media`: `Text`, `Text 3D`, `Screen`, `Camera`
 
 The selected block type is used by Place mode.
 
@@ -291,6 +298,7 @@ The Grid menu now controls grid visuals and world visibility distance.
 ### Floor Fill
 
 - `Color`: Fill color under the grid.
+- `Texture`: Procedural ground texture overlay. Options: `None`, `Grass`, `Dirt`, `Stone`, `Sand`, `Snow`.
 - `Enabled`: Show or hide the fill plane.
 
 ### Quality
@@ -315,9 +323,17 @@ The Grid menu now controls grid visuals and world visibility distance.
 - `Min X` / `Max X`: Horizontal boundary limits.
 - `Min Z` / `Max Z`: Depth boundary limits.
 
-## Player Menu
+## Player Menu (Sidebar)
 
 The Player menu contains playtest rules and conditional player logic.
+
+### Keybinds
+
+All playtest controls are fully rebindable.
+
+- Click any keybind button and press a new key or mouse button to remap it.
+- Default bindings: `W/A/S/D` (move), `Space` (jump), `R` (sprint), `Shift` (crouch), `LMB` (shoot), `T` (free cursor), `Esc` (pause/exit).
+- Keybind configuration is saved with the project.
 
 ### Movement
 
@@ -325,6 +341,7 @@ The Player menu contains playtest rules and conditional player logic.
 - `Gravity`: Downward acceleration.
 - `Gravity Enabled`: Toggle gravity on or off.
 - `Height`: Player height.
+- `Crouch Height`: Player height while crouching (default `Shift` to hold).
 - `Sprint`: Sprint speed.
 - `Sprint Duration`: How long the player can sprint before needing to recharge (seconds).
 - `Sprint Recharge`: Time to fully recharge sprint (seconds).
@@ -382,11 +399,15 @@ Supported condition sources:
 
 - `Health`
 - `Touching`
-- `Pos Y`
-- `Pos X`
-- `Pos Z`
+- `Pos Y` / `Pos X` / `Pos Z`
 - `Grounded`
 - `Landed`
+- `Distance`: Distance between the player (or a named object) and a target object by name.
+- `Timer`: Time elapsed since the trigger became active.
+- `Key`: Whether a specific key is currently held.
+- `VarCmp`: Compare a named project variable against a value or another variable.
+- `Bool`: Check whether a named project boolean is true or false.
+- `FnDone`: Whether a named control function has completed.
 
 ### Touching Condition
 
@@ -400,6 +421,14 @@ The condition represents the player touching the matched object(s), and appears 
 Objects can belong to multiple groups. A group match passes if any assigned group matches the condition value.
 
 When `group` is selected, the input shows existing group suggestions while still allowing a new group value to be typed manually.
+
+### Distance Condition
+
+The `Distance` condition checks how far the player is from a named object.
+
+- Target object is specified by label.
+- Supports all comparison operators (`<`, `>`, `=`, `!=`, `<=`, `>=`).
+- Value can be a literal number or a named project variable.
 
 ## Block Types
 
@@ -480,6 +509,31 @@ When `group` is selected, the input shows existing group suggestions while still
 - Two teleport blocks with the same pair name form a link.
 - Player overlap triggers teleportation to the paired block.
 - Includes a cooldown to prevent ping-pong teleportation.
+- Supports `Cross-World` teleportation: enable the toggle and select the target world to teleport to a paired block in a different world.
+- `View Destination` button snaps the editor camera to the paired block to preview the landing position.
+- Teleport blocks are hidden during playtest.
+
+### Text
+
+- A flat 2D panel that renders text as a texture.
+- Properties: `Content` (multi-line), `Font` family (upload custom .ttf/.otf/.woff), `Size`, `Color`, background color, `Align` (left/center/right), bold, italic.
+
+### Text 3D
+
+- A depth-extruded 3D text object.
+- Same text properties as the flat Text block.
+
+### Screen
+
+- A flat display panel that can show various content during playtest.
+- `Media` type options: `Color` (solid color fill), `Image` (upload), `Video` (upload), `URL` (embed external page via iframe), `HTML` (inline HTML content or uploaded file).
+- `Interact`: When enabled, the player can click the screen during playtest to open a fullscreen interactive overlay.
+
+### Camera
+
+- A placeable in-world camera object.
+- Properties: `FOV`, `Near` clip, `Far` clip.
+- Listed under the Media category in the object library.
 
 ### Control
 
@@ -509,6 +563,13 @@ The Properties panel appears when an object is selected.
 - `Group` info for editor groups when grouped.
 - `Groups`: Comma-separated membership list for gameplay grouping.
 - `Visible`: In-game visibility toggle. When off, the object is hidden during playtest but still functional.
+
+### Material Properties
+
+Available on most placeable objects.
+
+- `Metal`: Metalness (0–1). Higher values give a mirror-like reflective surface.
+- `Rough`: Roughness (0–1). Lower values produce a shinier, more specular surface.
 
 ### Surface Properties
 
@@ -540,6 +601,8 @@ Available on solid-capable objects.
 Available on teleport blocks.
 
 - `Pair`: A text label that links two teleport blocks together. Two teleports with the same pair name form a bidirectional link.
+- `Cross-World`: Enable cross-world teleportation and select the target world.
+- `View Destination`: Snap the editor camera to the paired teleport's position.
 
 ### Target Property
 
@@ -597,6 +660,32 @@ Supported control rule targets:
 - `fallDamageMinHeight`
 - `fallDamageMultiplier`
 
+### Movement Path
+
+Available on most object types (not spawn, checkpoint, or trigger).
+
+- `Ready`: Enable the path so it can be started by a control function.
+- `Draw`: While checked, moving the object in the viewport places a new checkpoint at each position instead of shifting existing ones. Auto-unchecks on deselect.
+- `Speed`: Default movement speed in units per second.
+- `Loop`: Restart the path when the last checkpoint is reached.
+- `Front Axis`: Which local axis (`+Z`, `-Z`, `+X`, `-X`) is treated as the object's forward face for rotation-based facing.
+- `+ Sel Pos`: Add a checkpoint at the selected object's current position.
+- `+ Cam Pos`: Add a checkpoint at the current editor camera position.
+- `Clear`: Remove all checkpoints.
+
+Each checkpoint row supports:
+
+- `X / Y / Z`: Position in world space.
+- `Face`: Rotate the object toward this checkpoint during movement.
+- `Style`: Movement style — `glide` (smooth interpolation), `strict` (linear constant speed), `snap` (instant).
+- `Spd`: Per-checkpoint speed override (blank uses the path default).
+- `Wait`: Seconds to pause at this checkpoint before continuing.
+- `Pause`: Hold at this checkpoint until a function tells the path to resume.
+- `on-arrive fn`: A control function to run when this checkpoint is reached.
+- `Sel` / `Pick`: Set the checkpoint position from the current selection or by clicking in the viewport.
+
+Movement paths are started with a `path → start` function action on a control block.
+
 ## Editing Controls
 
 ## Mouse
@@ -636,11 +725,15 @@ Supported control rule targets:
 - `W A S D` or arrow keys: Move.
 - `R`: Sprint.
 - `Space`: Jump.
+- `Shift`: Crouch.
 - `V`: Toggle Dev View for normally hidden playtest blocks.
 - With Dev View `OFF`, hidden playtest objects only hide their mesh display; lights and other gameplay systems still run.
 - Left click: Lock pointer or shoot.
+- `T`: Free cursor without pausing (toggle mouse capture).
 - `Escape`: Exit playtest (editor) or pause game (runtime).
 - `P`: Pause or resume game in runtime mode.
+
+All keybinds above reflect default bindings and are fully remappable in the Player menu under Keybinds.
 
 ## Terrain System
 
@@ -687,6 +780,10 @@ Texture Paint lets you apply procedural patterns to object surfaces in addition 
 - `Grid`: Grid line pattern.
 - `Noise`: Procedural noise texture.
 - `Gradient`: Smooth gradient between two colors.
+- `Wood`: Wavy wood grain pattern.
+- `Cobblestone`: Irregular rounded stones with mortar.
+- `Marble`: Veined marble pattern.
+- `Custom Image`: Upload any image file to use as a paint texture.
 
 ## Custom Objects
 
@@ -1043,7 +1140,7 @@ This reads `index.html` and `main.js`, inlines all code, and outputs `flame3d-ed
 Flame3D currently focuses on:
 
 - In-browser 3D level editing with multi-world support
-- Immediate FPS playtesting with sprint, air dash, and world borders
+- Immediate FPS playtesting with sprint, crouch, air dash, and world borders
 - Block/object property editing including visibility, traction, and switches
 - 3D primitive and 2D shape placement with configurable polygon sides and depth
 - Terrain placement and vertex-based sculpting with multiple brush types
@@ -1059,6 +1156,13 @@ Flame3D currently focuses on:
 - Functions panel with search, groups, and dependency chains
 - Trigger and conditional logic authoring
 - Audio library for importing and managing sound clips
+- Media objects: flat text panels, extruded 3D text, screen displays (color/image/video/URL/HTML), and in-world cameras
+- Per-object metalness and roughness material controls
+- Procedural ground textures for the grid floor (grass, dirt, stone, sand, snow)
+- Fully rebindable player control keybinds
+- Cross-world teleportation between paired teleport blocks in different worlds
+- Movement path draw mode for placing checkpoints by moving the object in the viewport
+- Extended conditional trigger conditions: distance, timer, key press, variable comparison, boolean, and function-done checks
 - Project save/load workflows backed by IndexedDB with auto-restore
 - Standalone game export with full runtime mode
 - Standalone editor export via build script

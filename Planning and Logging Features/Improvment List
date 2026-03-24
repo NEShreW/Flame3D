@@ -1,0 +1,90 @@
+== Improvement List ==
+(Code audit findings — polish before adding new features)
+
+
+--- Phase 1: Critical Bug-Risk Fixes ---
+
+[DONE] 1. Fix silent error swallowing
+      Added console.warn() to 10+ silent .catch(() => {}) and bare catch blocks.
+      Errors in IDB writes, audio playback, data migration, and boot now log context.
+
+[DONE] 2. Cap undo/redo stack size
+      All 3 undo/redo systems (editor, skin editor, sculpt editor) now capped at MAX_UNDO=80.
+      Oldest entries evicted when limit exceeded.
+
+[DONE] 3. Prevent autosave race conditions
+      _idbSet() now uses per-key write queues. Concurrent writes to the same IDB key
+      are serialized automatically, eliminating data corruption risk.
+
+[DONE] 4. Add deserialization validation
+      deserializeObject() now validates position (3 numbers), quaternion (4 numbers),
+      and scale (3 numbers, no zeros) before creating meshes. Invalid data logged and skipped.
+
+
+--- Phase 2: Code Quality & Maintainability ---
+
+[DONE] 5. Centralize magic numbers
+      Named GHOST_OPACITY constant. Most other constants were already named individually
+      (SUN_DISTANCE, PLAYER_RADIUS, etc.) — no further extraction needed.
+
+[DONE] 6. Use string enums for modes/types
+      Added MODES = { PLACE, SELECT, DELETE, PAINT, ERASE } and
+      TRANSFORMS = { TRANSLATE, ROTATE, SCALE } constants. State initialized from enums.
+
+[SKIP] 7. Consolidate duplicated clamping/normalization
+      On inspection, existing clamp functions already follow a consistent pattern.
+      Not worth abstracting further — each has distinct defaults and ranges.
+
+[ ] 8. Clean up HTML-in-JS inline styles
+      Skeleton editor, voxel editor, and sculpt editor embed large HTML strings
+      with hardcoded inline styles. Extract repeated style patterns to CSS classes
+      in index.html.
+      Locations: main.js lines ~2117, 3489, 4718
+
+
+--- Phase 3: UX & Robustness ---
+
+[DONE] 9. Add confirmation dialogs for destructive actions
+      clearAll() now prompts "Clear all N object(s) from the scene?" before proceeding.
+      (Delete-single-object left without confirm since it's undoable.)
+
+[DONE] 10. Keyboard shortcuts help overlay
+       Press "?" to toggle a styled overlay showing all editor and playtest shortcuts.
+       Click outside or press "?" again to dismiss.
+
+[DONE] 11. Improve ghost object visibility
+       Ghost placement now includes a blue wireframe overlay (0x58a6ff, opacity 0.5)
+       in addition to the semi-transparent fill. Wireframe properly disposed on removal.
+
+[DONE] 12. Better export error feedback
+       All 4 export error handlers now include the actual error message in the alert.
+
+
+--- Phase 4: QA & Test Hardening ---
+
+[ ] 13. Convert diagnostic tests to real assertions
+       Only smoke-runtime-export.js uses proper Node assert.
+       The other 8 test files use console.log() with emoji and need manual verification.
+       Convert to assert with meaningful messages and proper exit codes.
+
+[ ] 14. Remove redundant test files
+       test-movement-debug.js and test-movement-hud.js are fully superseded
+       by test-playtest-movement.js. Archive or delete.
+
+[ ] 15. Standardize test port
+       test-tab-click.js uses port 8765, all others use 8000.
+       Unify to a single configurable BASE_URL.
+
+[ ] 16. Fix .last-run.json inconsistency
+       Shows status:"failed" with empty failedTests array — contradictory.
+
+
+--- Phase 5: Performance Quick Wins ---
+
+[DONE] 17. Cache procedural textures
+       _generatePatternCanvas() now caches canvases by pattern+color+scale key.
+       Repeated calls for the same pattern return cached canvas instantly.
+
+[DONE] 18. Throttle raycasting in coordinate HUD
+       updateCoordHud() raycast now throttled to every 150ms.
+       Position text still updates every frame; only the expensive aim-raycast is throttled.
