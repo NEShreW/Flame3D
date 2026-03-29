@@ -1,8 +1,30 @@
 import * as THREE from 'three';
 import { OrbitControls }    from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
-import { Sky }              from 'three/addons/objects/Sky.js';
+import { Sky } from 'three/addons/objects/Sky.js';
 import { CSG }              from 'https://esm.sh/three-csg-ts@3.2.0?external=three';
+import { GLTFLoader }       from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader }      from 'three/addons/loaders/DRACOLoader.js';
+
+// Load webm-muxer at startup (top-level await) so it's cached before render time.
+// Tries multiple CDNs so a single CDN outage doesn't break video rendering.
+let _WebmMuxer = null, _ArrayBufferTarget = null;
+for (const _cdn of [
+  'https://esm.sh/webm-muxer@5',
+  'https://cdn.jsdelivr.net/npm/webm-muxer@5/+esm',
+  'https://unpkg.com/webm-muxer@5/dist/webm-muxer.mjs',
+]) {
+  try {
+    const _muxMod = await import(_cdn);
+    _WebmMuxer = _muxMod.Muxer;
+    _ArrayBufferTarget = _muxMod.ArrayBufferTarget;
+    console.log('[Flame3D] webm-muxer loaded from', _cdn);
+    break;
+  } catch (_e) {
+    console.warn('[Flame3D] webm-muxer failed from', _cdn, _e);
+  }
+}
+if (!_WebmMuxer) console.warn('[Flame3D] webm-muxer unavailable — video render disabled');
 
 // ─── IndexedDB-backed storage (replaces localStorage for large project data) ─
 const _IDB_NAME = 'flame3d_store';
@@ -245,29 +267,41 @@ propsContent.addEventListener('input', e => {
   if (e.target.matches('input[type="color"]')) markRestoreDirty();
 });
 
-const topMenuSelect   = document.getElementById('top-menu-select');
+const topMenuSelect   = document.getElementById('top-menu-select');   // removed from HTML – may be null
 const topPanels       = Array.from(document.querySelectorAll('.top-panel'));
 const snapSelect      = document.getElementById('snap-select');
 const lightIntensityInput = document.getElementById('light-intensity');
-const sunIntensityInput   = document.getElementById('sun-intensity');
-const sunTimeInput        = document.getElementById('sun-time');
-const sunNorthInput       = document.getElementById('sun-north');
-const sunTurbidityInput   = document.getElementById('sun-turbidity');
+// ─── Sky / atmosphere input refs ─────────────────────────────────────────────
+const sunTimeInput       = document.getElementById('sun-time');
+const sunTimeValSpan     = document.getElementById('sun-time-val');
+const sunNorthInput      = document.getElementById('sun-north');
+const sunNorthValSpan    = document.getElementById('sun-north-val');
+const sunIntensityInput  = document.getElementById('sun-intensity');
+const sunTurbidityInput  = document.getElementById('sun-turbidity');
+const sunTurbidityValSpan = document.getElementById('sun-turbidity-val');
 const sunShadowRangeInput = document.getElementById('sun-shadow-range');
+const sunSizeInput       = document.getElementById('sun-size');
+const sunDayCycleInput   = document.getElementById('sun-day-cycle');
 const sunDayDurationInput = document.getElementById('sun-day-duration');
-const sunDayCycleEnabledInput = document.getElementById('sun-day-cycle-enabled');
-const sunSizeInput     = document.getElementById('sun-size');
-const skyColorInput    = document.getElementById('sky-color');
+const skyColorInput      = document.getElementById('sky-color');
 const cloudsEnabledInput = document.getElementById('clouds-enabled');
 const cloudWindSpeedInput = document.getElementById('cloud-wind-speed');
-const cloudWindDirInput = document.getElementById('cloud-wind-dir');
-const cloudOpacityInput = document.getElementById('cloud-opacity');
-const starsEnabledInput = document.getElementById('stars-enabled');
-const starsCountInput   = document.getElementById('stars-count');
+const cloudWindDirInput  = document.getElementById('cloud-wind-dir');
+const cloudOpacityInput  = document.getElementById('cloud-opacity');
+const cloudOpacityValSpan = document.getElementById('cloud-opacity-val');
+const starsEnabledInput  = document.getElementById('stars-enabled');
+const starsCountInput    = document.getElementById('stars-count');
 const starsBrightnessInput = document.getElementById('stars-brightness');
-const moonEnabledInput  = document.getElementById('moon-enabled');
+const moonEnabledInput   = document.getElementById('moon-enabled');
 const moonBrightnessInput = document.getElementById('moon-brightness');
-const moonAuraInput     = document.getElementById('moon-aura');
+const moonAuraInput      = document.getElementById('moon-aura');
+const fogEnabledInput    = document.getElementById('fog-enabled');
+const fogModeInput       = document.getElementById('fog-mode');
+const fogColorInput      = document.getElementById('fog-color');
+const fogDensityInput    = document.getElementById('fog-density');
+const fogNearInput       = document.getElementById('fog-near');
+const fogFarInput        = document.getElementById('fog-far');
+const fogBrightnessInput = document.getElementById('fog-brightness');
 const chunkRangeSelect = document.getElementById('chunk-range-select');
 const undoBtn         = document.getElementById('btn-undo');
 const redoBtn         = document.getElementById('btn-redo');
@@ -343,12 +377,6 @@ const qualityRenderDistInput = document.getElementById('quality-render-dist');
 const qualityShadowsSelect   = document.getElementById('quality-shadows');
 const qualityLightDistInput  = document.getElementById('quality-light-dist');
 
-// Fog settings
-const fogEnabledInput    = document.getElementById('fog-enabled');
-const fogColorInput      = document.getElementById('fog-color');
-const fogDensityInput    = document.getElementById('fog-density');
-const fogBrightnessInput = document.getElementById('fog-brightness');
-
 // FOV settings
 const fovEditorInput   = document.getElementById('fov-editor');
 const fovPlaytestInput = document.getElementById('fov-playtest');
@@ -376,18 +404,31 @@ const btnAddVar             = document.getElementById('btn-add-var');
 const btnAddBool            = document.getElementById('btn-add-bool');
 
 const functionsPanelEl      = document.getElementById('functions-panel');
+const bottomPanelEl         = document.getElementById('bottom-panel');
+const bottomResizerEl       = document.getElementById('bottom-resizer');
+const bottomToggleBtn       = document.getElementById('bottom-toggle');
 const controlFunctionsListEl = document.getElementById('control-functions-list');
 const btnAddControlFn       = document.getElementById('btn-add-control-fn');
 const controlFnSearchInput  = document.getElementById('control-fn-search');
 const controlFnNewGroupInput = document.getElementById('control-fn-new-group');
 const btnAddControlGroup    = document.getElementById('btn-add-control-group');
 
-const modeSelect = document.getElementById('mode-select');
-const gizmoSelect = document.getElementById('gizmo-select');
+// Blueprint overlay controls
+const _bpOverlayEl          = document.getElementById('bp-graph-overlay');
+const _bpOverlaySearchInput = document.getElementById('bp-overlay-search');
+const _bpOverlayNewGroupInput = document.getElementById('bp-overlay-new-group');
+const _bpOverlayAddGroupBtn = document.getElementById('bp-overlay-add-group');
+const _bpToggleBtn          = document.getElementById('btn-toggle-blueprint');
+const _bpFnSelectEl         = document.getElementById('bp-fn-select');
+const _bpAddFnGroupBtn      = document.getElementById('bp-add-fn-group');
+const _bpAddTargetBtn       = document.getElementById('bp-add-target');
+const _bpAddConditionBtn    = document.getElementById('bp-add-condition');
+const _bpAddActionBtn       = document.getElementById('bp-add-action');
+
+const modeSelect = document.getElementById('mode-select');     // removed – may be null
+const gizmoSelect = document.getElementById('gizmo-select');   // removed – may be null
 const transformGroup = document.getElementById('transform-group');
-const scaleSideXSelect = document.getElementById('scale-side-x');
-const scaleSideYSelect = document.getElementById('scale-side-y');
-const scaleSideZSelect = document.getElementById('scale-side-z');
+
 
 // ─── Editor state ────────────────────────────────────────────────────────────
 const MODES = { PLACE: 'place', SELECT: 'select', DELETE: 'delete', PAINT: 'paint', ERASE: 'erase' };
@@ -412,11 +453,8 @@ const state = {
   colorPickArmed: false,
   eraserShape: 'box',
   eraserSize: 1,
-  scaleSides: {
-    x: 'pos',
-    y: 'pos',
-    z: 'pos',
-  },
+  placeRotationY: 0,         // Y-axis rotation for ghost/placement (radians)
+
 };
 
 const sceneObjects = [];   // all placed meshes
@@ -434,8 +472,17 @@ let _clipboard = [];  // array of serialized objects for paste
 let _clipboardCenter = new THREE.Vector3();
 
 // ─── Custom Object Templates ─────────────────────────────────────────────────
-const customObjectTemplates = [];  // { id, name, objects: [serialized], thumbnail? }
+const customObjectTemplates = [];  // { id, name, objects: [serialized], thumbnail?, type?, triangleCount?, dateAdded?, tags? }
 let _nextCustomTemplateId = 1;
+let _customObjectSort = 'newest';   // name-asc | name-desc | newest | oldest | objects | triangles
+let _customObjectSearch = '';
+const _gltfLoader = new GLTFLoader();
+// Enable Draco compression support for GLTF
+try {
+  const _dracoLoader = new DRACOLoader();
+  _dracoLoader.setDecoderPath('https://unpkg.com/three@0.161.0/examples/jsm/libs/draco/');
+  _gltfLoader.setDRACOLoader(_dracoLoader);
+} catch (_e) { console.warn('[Flame3D] Draco loader unavailable:', _e); }
 
 // ─── Terrain Sculpt State ────────────────────────────────────────────────────
 const terrainSculptState = {
@@ -520,13 +567,9 @@ function _distributeObjectsToWorlds() {
 
 // ─── Fog settings ────────────────────────────────────────────────────────────
 const fogSettings = {
-  enabled: true,
-  mode: 'exp2',        // 'linear' | 'exp2'
-  color: 0x87ceeb,
-  density: 0.0008,     // for exp2
-  near: 10,            // for linear
-  far: 500,            // for linear
-  brightness: 1,       // fog brightness multiplier
+  enabled: true, mode: 'exp2',
+  color: 0x87ceeb, density: 0.0008,
+  near: 10, far: 500, brightness: 1,
 };
 
 // ─── FOV settings ────────────────────────────────────────────────────────────
@@ -558,6 +601,8 @@ const RUNTIME_QUALITY_PROFILES = [
   { label: 'Balanced', shadows: 'low', renderDist: 130, lightDist: 55 },
   { label: 'Quality', shadows: 'medium', renderDist: 185, lightDist: 85 },
   { label: 'Ultra', shadows: 'high', renderDist: 250, lightDist: 120 },
+  { label: 'Extreme', shadows: 'high', renderDist: 500, lightDist: 200 },
+  { label: 'Cinematic', shadows: 'high', renderDist: 1000, lightDist: 400 },
 ];
 let runtimeLoaderOverlayEl = null;
 let runtimeHudEl = null;
@@ -585,6 +630,12 @@ const sidebarState = {
 const functionsPanelState = {
   width: 340,
   collapsed: false,
+  resizing: false,
+};
+
+const bottomPanelState = {
+  height: 200,
+  collapsed: true,
   resizing: false,
 };
 
@@ -638,14 +689,28 @@ let runtimeScreenOverlayEl = null;
 // ─── Portal view (render-through teleport) ────────────────────────────────────
 const PORTAL_MAX_DIST = 40;
 
+// ─── Performance warning & LOD thresholds ─────────────────────────────────────
+const PERF_WARN_TRIANGLE_THRESHOLD = 50000;      // warn when a single object exceeds this
+const PERF_CRITICAL_TRIANGLE_THRESHOLD = 150000;  // strong warning
+const PERF_SCENE_WARN_THRESHOLD = 500000;          // warn if total scene exceeds this
+const LOD_AUTO_DISTANCE = 80;                      // distance beyond which LOD proxy is used
+const IMPORTED_MODEL_MAX_SCALE = 10;               // max auto-scale for imported models
+
 // ─── Quality settings ────────────────────────────────────────────────────────
 const quality = {
   renderDist:  150,   // block visibility distance
   shadows:     'medium', // off | low | medium | high
   lightDist:   60,    // point-light render distance
+  shadowMapRes: 4096,  // shadow map resolution
+  lodEnabled:  true,   // enable LOD proxy system
+  resolutionScale: Math.min(devicePixelRatio, 2), // pixel ratio scale
+  showStats:   false,  // performance stats overlay
 };
 const _frustum = new THREE.Frustum();
 const _projScreenMatrix = new THREE.Matrix4();
+
+// ─── Performance stats ──────────────────────────────────────────────────────
+const _perfStats = { fps: 0, emaFps: 60, calls: 0, triangles: 0, objectCount: 0, lastUpdate: 0 };
 
 // ─── Renderer ────────────────────────────────────────────────────────────────
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -653,7 +718,7 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type         = THREE.PCFSoftShadowMap;
 renderer.toneMapping            = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure    = 0.5;
+renderer.toneMappingExposure    = 0.22;
 renderer.outputColorSpace       = THREE.SRGBColorSpace;
 canvasContainer.appendChild(renderer.domElement);
 renderer.domElement.tabIndex = 0;
@@ -669,15 +734,14 @@ function onResize() {
 }
 
 // ─── Cameras ─────────────────────────────────────────────────────────────────
-const editorCam = new THREE.PerspectiveCamera(60, 1, 0.1, 2000);
+const editorCam = new THREE.PerspectiveCamera(60, 1, 0.1, 12000);
 editorCam.position.set(8, 10, 16);
 editorCam.lookAt(0, 0, 0);
 
-const fpsCam = new THREE.PerspectiveCamera(75, 1, 0.05, 500);
+const fpsCam = new THREE.PerspectiveCamera(75, 1, 0.05, 6000);
 
 // ─── Scene ───────────────────────────────────────────────────────────────────
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x87ceeb, 0.0008);
 
 const ambientLight = new THREE.HemisphereLight(0x87ceeb, 0x362e1e, 0.4);
 scene.add(ambientLight);
@@ -687,30 +751,32 @@ const LIGHT_BLOCK_DECAY = 1.4;
 const LIGHT_BLOCK_SHADOW_MAP = 1024;
 const LIGHT_BLOCK_SHADOW_BIAS = -0.0005;
 
-// ─── Sun / Sky defaults ──────────────────────────────────────────────────────
-const SUN_INTENSITY_DEFAULT  = 22;
-const SUN_TIME_DEFAULT       = 14;     // 2 PM — nice afternoon
-const SUN_NORTH_DEFAULT      = 0;      // north offset degrees
-const SUN_TURBIDITY_DEFAULT  = 2.5;    // haze (2=clear, 10=hazy)
-const SUN_SHADOW_RANGE_DEFAULT = 100;
-const SUN_DAY_DURATION_DEFAULT = 120;  // seconds for a full 24h cycle
-const SUN_DAY_CYCLE_ENABLED_DEFAULT = false;
+// ─── Sky system — UE5-style physically-based atmosphere ──────────────────────
 const SUN_DISTANCE = 400;
-const SUN_SIZE_DEFAULT = 800;
-const SKY_COLOR_DEFAULT = '#5588cc';
-const CLOUDS_ENABLED_DEFAULT = true;
-const CLOUD_WIND_SPEED_DEFAULT = 3;
-const CLOUD_WIND_DIR_DEFAULT = 45;
-const CLOUD_OPACITY_DEFAULT = 0.6;
-const STARS_ENABLED_DEFAULT = true;
-const STARS_COUNT_DEFAULT = 1500;
-const STARS_BRIGHTNESS_DEFAULT = 1;
-const MOON_ENABLED_DEFAULT = true;
-const MOON_BRIGHTNESS_DEFAULT = 1.5;
-const MOON_AURA_DEFAULT = 0.8;
-const NIGHT_SKY_COLOR = new THREE.Color(0x0a0e24); // deep navy blue night
 
-// ─── Sky dome ────────────────────────────────────────────────────────────────
+// Defaults
+const SUN_INTENSITY_DEFAULT      = 22;
+const SUN_TIME_DEFAULT           = 14;
+const SUN_NORTH_DEFAULT          = 0;
+const SUN_TURBIDITY_DEFAULT      = 2.5;
+const SUN_SHADOW_RANGE_DEFAULT   = 100;
+const SUN_DAY_DURATION_DEFAULT   = 120;
+const SUN_DAY_CYCLE_DEFAULT      = false;
+const SUN_SIZE_DEFAULT           = 800;
+const SKY_COLOR_DEFAULT          = '#5588cc';
+const CLOUDS_ENABLED_DEFAULT     = true;
+const CLOUD_WIND_SPEED_DEFAULT   = 3;
+const CLOUD_WIND_DIR_DEFAULT     = 45;
+const CLOUD_OPACITY_DEFAULT      = 0.6;
+const STARS_ENABLED_DEFAULT      = true;
+const STARS_COUNT_DEFAULT        = 1500;
+const STARS_BRIGHTNESS_DEFAULT   = 1;
+const MOON_ENABLED_DEFAULT       = true;
+const MOON_BRIGHTNESS_DEFAULT    = 1.5;
+const MOON_AURA_DEFAULT          = 0.8;
+const NIGHT_SKY_COLOR            = new THREE.Color(0x0a0e24);
+
+// ── Sky dome (Preetham/Hosek scattering) ────────────────────────────────────
 const sky = new Sky();
 sky.scale.setScalar(450000);
 sky.material.fog = false;
@@ -722,11 +788,24 @@ scene.add(sky);
 
 const skyUniforms = sky.material.uniforms;
 skyUniforms['turbidity'].value        = SUN_TURBIDITY_DEFAULT;
-skyUniforms['rayleigh'].value         = 3;       // vivid blue sky — physically accurate Rayleigh
-skyUniforms['mieCoefficient'].value   = 0.003;   // subtle atmospheric haze
-skyUniforms['mieDirectionalG'].value  = 0.75;    // bright sun-halo forward scattering
+skyUniforms['rayleigh'].value         = 3;
+skyUniforms['mieCoefficient'].value   = 0.003;
+skyUniforms['mieDirectionalG'].value  = 0.75;
 
-// ─── Cloud layer ─────────────────────────────────────────────────────────────
+// ── Sun (directional light) ─────────────────────────────────────────────────
+const sunTarget = new THREE.Object3D();
+scene.add(sunTarget);
+const sunLight = new THREE.DirectionalLight(0xffffff, SUN_INTENSITY_DEFAULT);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(4096, 4096);
+sunLight.shadow.bias = -0.00015;
+sunLight.shadow.normalBias = 0.015;
+sunLight.shadow.camera.near = 0.5;
+sunLight.shadow.camera.far = SUN_DISTANCE * 2;
+sunLight.target = sunTarget;
+scene.add(sunLight);
+
+// ── Cloud layer ─────────────────────────────────────────────────────────────
 const _cloudGroup = new THREE.Group();
 _cloudGroup.renderOrder = 1;
 _cloudGroup.frustumCulled = false;
@@ -736,21 +815,22 @@ let _cloudMaterial = null;
 let _cloudWindOffset = new THREE.Vector2(0, 0);
 
 function _buildClouds() {
-  // Remove old
-  while (_cloudGroup.children.length) _cloudGroup.remove(_cloudGroup.children[0]);
+  while (_cloudGroup.children.length) {
+    const c = _cloudGroup.children[0];
+    c.geometry?.dispose();
+    c.material?.dispose();
+    _cloudGroup.remove(c);
+  }
   const count = 200;
   const spread = 800;
   const height = 180;
   const heightVariance = 30;
   const geo = new THREE.PlaneGeometry(40, 40);
   _cloudMaterial = new THREE.MeshBasicMaterial({
-    color: 0xffffff,
-    transparent: true,
-    opacity: CLOUD_OPACITY_DEFAULT,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    fog: false,
+    color: 0xffffff, transparent: true, opacity: CLOUD_OPACITY_DEFAULT,
+    depthWrite: false, side: THREE.DoubleSide, fog: false,
   });
+  const particles = [];
   for (let i = 0; i < count; i++) {
     const mesh = new THREE.Mesh(geo, _cloudMaterial.clone());
     mesh.position.set(
@@ -758,30 +838,31 @@ function _buildClouds() {
       height + (Math.random() - 0.5) * heightVariance,
       (Math.random() - 0.5) * spread,
     );
-    mesh.rotation.x = -Math.PI / 2; // face down
+    mesh.rotation.x = -Math.PI / 2;
     mesh.scale.set(1 + Math.random() * 2, 1 + Math.random() * 1.5, 1);
     mesh.userData._cloudBaseX = mesh.position.x;
     mesh.userData._cloudBaseZ = mesh.position.z;
     mesh.frustumCulled = false;
     _cloudGroup.add(mesh);
+    particles.push(mesh);
   }
+  _cloudParticles = particles;
   _cloudGroup.visible = CLOUDS_ENABLED_DEFAULT;
 }
 _buildClouds();
 
 function _updateCloudWind(dt) {
-  if (!_cloudGroup.visible || _cloudGroup.children.length === 0) return;
+  if (!_cloudGroup.visible || !_cloudParticles || _cloudParticles.length === 0) return;
   const speed = THREE.MathUtils.clamp(parseFloat(cloudWindSpeedInput?.value) || 0, 0, 50);
   const dirDeg = parseFloat(cloudWindDirInput?.value) || CLOUD_WIND_DIR_DEFAULT;
   const dirRad = THREE.MathUtils.degToRad(dirDeg);
   _cloudWindOffset.x += Math.cos(dirRad) * speed * dt;
   _cloudWindOffset.y += Math.sin(dirRad) * speed * dt;
   const spread = 800;
-  for (const c of _cloudGroup.children) {
+  const half = spread / 2;
+  for (const c of _cloudParticles) {
     let nx = c.userData._cloudBaseX + _cloudWindOffset.x;
     let nz = c.userData._cloudBaseZ + _cloudWindOffset.y;
-    // Wrap around
-    const half = spread / 2;
     nx = ((nx + half) % spread + spread) % spread - half;
     nz = ((nz + half) % spread + spread) % spread - half;
     c.position.x = nx;
@@ -789,47 +870,46 @@ function _updateCloudWind(dt) {
   }
 }
 
-// ─── Star field ──────────────────────────────────────────────────────────────
+// ── Star field ──────────────────────────────────────────────────────────────
 let _starsMesh = null;
 let _starsMaterial = null;
+let _starsPhases = null;
+let _starsBaseOpacity = 0;
 
 function _buildStars(count) {
   if (_starsMesh) { scene.remove(_starsMesh); _starsMesh.geometry.dispose(); _starsMaterial.dispose(); }
   const positions = new Float32Array(count * 3);
+  const phases = new Float32Array(count);
   const radius = 420;
   for (let i = 0; i < count; i++) {
-    // Distribute on upper hemisphere (y > -0.1)
     let x, y, z;
     do {
       x = (Math.random() - 0.5) * 2;
-      y = Math.random(); // upper half
+      y = Math.random();
       z = (Math.random() - 0.5) * 2;
-      const len = Math.sqrt(x * x + y * y + z * z);
-      x /= len; y /= len; z /= len;
-    } while (y < -0.1);
-    positions[i * 3] = x * radius;
+    } while (y < 0.02);
+    const len = Math.sqrt(x * x + y * y + z * z);
+    x /= len; y /= len; z /= len;
+    positions[i * 3]     = x * radius;
     positions[i * 3 + 1] = y * radius;
     positions[i * 3 + 2] = z * radius;
+    phases[i] = Math.random() * Math.PI * 2;
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   _starsMaterial = new THREE.PointsMaterial({
-    color: 0xffffff,
-    size: 0.8,
-    sizeAttenuation: true,
-    transparent: true,
-    opacity: 0,
-    depthWrite: false,
-    fog: false,
+    color: 0xffffff, size: 0.8, sizeAttenuation: true,
+    transparent: true, opacity: 0, depthWrite: false, fog: false,
   });
   _starsMesh = new THREE.Points(geo, _starsMaterial);
   _starsMesh.renderOrder = 0;
   _starsMesh.frustumCulled = false;
+  _starsPhases = phases;
   scene.add(_starsMesh);
 }
 _buildStars(STARS_COUNT_DEFAULT);
 
-// ─── Moon ────────────────────────────────────────────────────────────────────
+// ── Moon ────────────────────────────────────────────────────────────────────
 const _moonGroup = new THREE.Group();
 _moonGroup.frustumCulled = false;
 scene.add(_moonGroup);
@@ -845,309 +925,336 @@ const _moonAuraCanvas = document.createElement('canvas');
 _moonAuraCanvas.width = 128;
 _moonAuraCanvas.height = 128;
 const _moonAuraCtx = _moonAuraCanvas.getContext('2d');
-const gradient = _moonAuraCtx.createRadialGradient(64, 64, 8, 64, 64, 64);
-gradient.addColorStop(0, 'rgba(200,210,255,0.5)');
-gradient.addColorStop(0.4, 'rgba(200,210,255,0.15)');
-gradient.addColorStop(1, 'rgba(200,210,255,0)');
-_moonAuraCtx.fillStyle = gradient;
+const _moonGradient = _moonAuraCtx.createRadialGradient(64, 64, 8, 64, 64, 64);
+_moonGradient.addColorStop(0, 'rgba(200,210,255,0.5)');
+_moonGradient.addColorStop(0.4, 'rgba(200,210,255,0.15)');
+_moonGradient.addColorStop(1, 'rgba(200,210,255,0)');
+_moonAuraCtx.fillStyle = _moonGradient;
 _moonAuraCtx.fillRect(0, 0, 128, 128);
 const _moonAuraTexture = new THREE.CanvasTexture(_moonAuraCanvas);
 const _moonAuraMat = new THREE.SpriteMaterial({
-  map: _moonAuraTexture,
-  transparent: true,
-  opacity: 0,
-  depthWrite: false,
-  fog: false,
-  blending: THREE.AdditiveBlending,
+  map: _moonAuraTexture, transparent: true, opacity: 0,
+  depthWrite: false, fog: false, blending: THREE.AdditiveBlending,
 });
 const _moonAuraSprite = new THREE.Sprite(_moonAuraMat);
 _moonAuraSprite.scale.set(30, 30, 1);
 _moonAuraSprite.frustumCulled = false;
 _moonGroup.add(_moonAuraSprite);
 
-// ─── Sun light ───────────────────────────────────────────────────────────────
-const sunTarget = new THREE.Object3D();
-scene.add(sunTarget);
-
-const sunLight = new THREE.DirectionalLight(0xffffff, SUN_INTENSITY_DEFAULT);
-sunLight.castShadow = true;
-sunLight.shadow.mapSize.set(4096, 4096);
-sunLight.shadow.bias       = -0.00015;
-sunLight.shadow.normalBias = 0.015;
-sunLight.shadow.camera.near = 0.5;
-sunLight.shadow.camera.far  = SUN_DISTANCE * 2;
-sunLight.target = sunTarget;
-scene.add(sunLight);
-
-// ─── Sun helpers ─────────────────────────────────────────────────────────────
-function clampSunIntensity(v)    { return THREE.MathUtils.clamp(Number.isFinite(v) ? v : SUN_INTENSITY_DEFAULT, 0, 100); }
-function clampSunTime(v)         { return THREE.MathUtils.clamp(Number.isFinite(v) ? v : SUN_TIME_DEFAULT, 0.000, 24.000); }
-function clampSunNorth(v)        { return Number.isFinite(v) ? ((v % 360) + 360) % 360 : SUN_NORTH_DEFAULT; }
-function clampSunTurbidity(v)    { return THREE.MathUtils.clamp(Number.isFinite(v) ? v : SUN_TURBIDITY_DEFAULT, 1, 20); }
-function clampSunShadowRange(v)  { return THREE.MathUtils.clamp(Number.isFinite(v) ? v : SUN_SHADOW_RANGE_DEFAULT, 20, 500); }
-function clampSunDayDuration(v)  { return THREE.MathUtils.clamp(Number.isFinite(v) ? v : SUN_DAY_DURATION_DEFAULT, 1, 3600); }
-
-/** Convert time-of-day (0-24) + north offset → sun direction vector (unit).
- *  Uses a physically-motivated solar arc with smooth civil/nautical twilight. */
+// ── Sun position from time (physically-based solar arc) ─────────────────────
 function sunPositionFromTime(time, northDeg) {
-  // Hour angle: 0 at solar noon (12h), ±π at midnight
-  const hourAngle = ((time - 12) / 24) * Math.PI * 2;
-
-  // Declination ~0 for equinox-like default; latitude 40° for temperate look
-  const latitude = THREE.MathUtils.degToRad(40);
-  const declination = 0; // equinox
-
-  // Solar elevation via spherical astronomy formula
-  const sinElev = Math.sin(latitude) * Math.sin(declination)
-    + Math.cos(latitude) * Math.cos(declination) * Math.cos(hourAngle);
-  const elevation = Math.asin(THREE.MathUtils.clamp(sinElev, -1, 1));
-
-  // Solar azimuth (measured from south, positive westward)
-  const cosAz = (Math.sin(declination) - Math.sin(latitude) * sinElev)
-    / (Math.cos(latitude) * Math.cos(elevation) + 1e-10);
+  const lat = THREE.MathUtils.degToRad(40);
+  const hourAngle = THREE.MathUtils.degToRad((time - 12) * 15);
+  const decl = 0; // equinox
+  const sinEl = Math.sin(lat) * Math.sin(decl) + Math.cos(lat) * Math.cos(decl) * Math.cos(hourAngle);
+  const elevation = Math.asin(THREE.MathUtils.clamp(sinEl, -1, 1));
+  const cosAz = (Math.sin(decl) - Math.sin(lat) * sinEl) / (Math.cos(lat) * Math.cos(elevation) + 1e-10);
   let azimuth = Math.acos(THREE.MathUtils.clamp(cosAz, -1, 1));
-  if (hourAngle > 0) azimuth = -azimuth; // afternoon = west
+  if (hourAngle > 0) azimuth = Math.PI * 2 - azimuth;
   azimuth += THREE.MathUtils.degToRad(northDeg);
-
-  const cosEl = Math.cos(elevation);
-  return new THREE.Vector3(
-    -Math.sin(azimuth) * cosEl,
+  const dir = new THREE.Vector3(
+    -Math.sin(azimuth) * Math.cos(elevation),
     Math.sin(elevation),
-    -Math.cos(azimuth) * cosEl,
-  ).normalize();
+    -Math.cos(azimuth) * Math.cos(elevation)
+  );
+  dir.normalize();
+  return dir;
 }
 
-/** Compute atmospheric light color tint based on sun elevation.
- *  Models real-world color-temperature shift from ~2000 K at horizon
- *  through ~6500 K at zenith, with smooth blue-hour and twilight. */
+// ── Sun color from elevation (UE5-style color temperature model) ────────────
 function sunColorFromElevation(elevDeg) {
-  const color = new THREE.Color();
-  if (elevDeg > 25) {
-    // High sun — near-white daylight (CIE D65 ≈ 6500 K)
-    color.setRGB(1.0, 0.98, 0.94);
-  } else if (elevDeg > 6) {
-    // Mid-morning / late-afternoon — gentle warm bias
-    const f = THREE.MathUtils.mapLinear(elevDeg, 6, 25, 0, 1);
-    color.setRGB(
-      1.0,
-      THREE.MathUtils.lerp(0.85, 0.98, f),
-      THREE.MathUtils.lerp(0.65, 0.94, f),
+  const c = new THREE.Color();
+  if (elevDeg < -18) {
+    // Deep night — tiny warm glow on horizon
+    c.setRGB(0.02, 0.02, 0.04);
+  } else if (elevDeg < -6) {
+    // Nautical/astronomical twilight — deep blue
+    const t = (elevDeg + 18) / 12; // 0 at -18, 1 at -6
+    c.setRGB(
+      THREE.MathUtils.lerp(0.02, 0.15, t),
+      THREE.MathUtils.lerp(0.02, 0.1, t),
+      THREE.MathUtils.lerp(0.04, 0.25, t)
     );
-  } else if (elevDeg > 0.5) {
-    // Golden hour — warm orange (≈ 3000 K)
-    const f = THREE.MathUtils.mapLinear(elevDeg, 0.5, 6, 0, 1);
-    color.setRGB(
-      1.0,
-      THREE.MathUtils.lerp(0.45, 0.85, f),
-      THREE.MathUtils.lerp(0.15, 0.65, f),
+  } else if (elevDeg < 0) {
+    // Civil twilight — golden/orange horizon
+    const t = (elevDeg + 6) / 6; // 0 at -6, 1 at 0
+    c.setRGB(
+      THREE.MathUtils.lerp(0.15, 1.0, t),
+      THREE.MathUtils.lerp(0.1, 0.55, t),
+      THREE.MathUtils.lerp(0.25, 0.2, t)
     );
-  } else if (elevDeg > -4) {
-    // Civil twilight — deep orange to salmon-pink horizon
-    const f = THREE.MathUtils.mapLinear(elevDeg, -4, 0.5, 0, 1);
-    color.setRGB(
-      THREE.MathUtils.lerp(0.6, 1.0, f),
-      THREE.MathUtils.lerp(0.2, 0.45, f),
-      THREE.MathUtils.lerp(0.15, 0.15, f),
-    );
-  } else if (elevDeg > -12) {
-    // Nautical twilight — blue hour
-    const f = THREE.MathUtils.mapLinear(elevDeg, -12, -4, 0, 1);
-    color.setRGB(
-      THREE.MathUtils.lerp(0.04, 0.6, f),
-      THREE.MathUtils.lerp(0.04, 0.2, f),
-      THREE.MathUtils.lerp(0.12, 0.15, f),
+  } else if (elevDeg < 15) {
+    // Golden hour — warm white
+    const t = elevDeg / 15;
+    c.setRGB(
+      THREE.MathUtils.lerp(1.0, 1.0, t),
+      THREE.MathUtils.lerp(0.55, 0.9, t),
+      THREE.MathUtils.lerp(0.2, 0.8, t)
     );
   } else {
-    // Night
-    color.setRGB(0.04, 0.04, 0.12);
+    // Full daylight — neutral white ~6500K
+    c.setRGB(1.0, 0.95, 0.88);
   }
-  return color;
+  return c;
 }
 
+// ── Main sky orchestrator ───────────────────────────────────────────────────
 function updateSunSky() {
-  const time        = clampSunTime(parseFloat(sunTimeInput.value));
-  const northOffset = clampSunNorth(parseFloat(sunNorthInput.value));
-  const turbidity   = clampSunTurbidity(parseFloat(sunTurbidityInput.value));
-  const shadowRange = clampSunShadowRange(parseFloat(sunShadowRangeInput.value));
-  const intensity   = clampSunIntensity(parseFloat(sunIntensityInput.value));
-  const dayDuration = clampSunDayDuration(parseFloat(sunDayDurationInput.value));
+  const time       = parseFloat(sunTimeInput?.value)  ?? SUN_TIME_DEFAULT;
+  const northDeg   = parseFloat(sunNorthInput?.value)  ?? SUN_NORTH_DEFAULT;
+  const intensity  = parseFloat(sunIntensityInput?.value) ?? SUN_INTENSITY_DEFAULT;
+  const turbidity  = parseFloat(sunTurbidityInput?.value) ?? SUN_TURBIDITY_DEFAULT;
+  const shadowRange = parseFloat(sunShadowRangeInput?.value) ?? SUN_SHADOW_RANGE_DEFAULT;
+  const sunSize    = parseFloat(sunSizeInput?.value)   ?? SUN_SIZE_DEFAULT;
+  const userSkyColor = skyColorInput?.value || SKY_COLOR_DEFAULT;
+  const cloudsOn   = cloudsEnabledInput?.checked ?? CLOUDS_ENABLED_DEFAULT;
+  const cloudOp    = parseFloat(cloudOpacityInput?.value) ?? CLOUD_OPACITY_DEFAULT;
+  const starsOn    = starsEnabledInput?.checked ?? STARS_ENABLED_DEFAULT;
+  const starsBrt   = parseFloat(starsBrightnessInput?.value) ?? STARS_BRIGHTNESS_DEFAULT;
+  const moonOn     = moonEnabledInput?.checked ?? MOON_ENABLED_DEFAULT;
+  const moonBrt    = parseFloat(moonBrightnessInput?.value) ?? MOON_BRIGHTNESS_DEFAULT;
+  const moonAura   = parseFloat(moonAuraInput?.value) ?? MOON_AURA_DEFAULT;
 
-  // New settings
-  const sunSize = THREE.MathUtils.clamp(parseFloat(sunSizeInput?.value) || SUN_SIZE_DEFAULT, 100, 10000);
-  const userSkyColor = new THREE.Color(skyColorInput?.value || SKY_COLOR_DEFAULT);
-  const cloudsEnabled = cloudsEnabledInput ? cloudsEnabledInput.checked : CLOUDS_ENABLED_DEFAULT;
-  const cloudWindSpeed = THREE.MathUtils.clamp(parseFloat(cloudWindSpeedInput?.value) || 0, 0, 50);
-  const cloudWindDir = parseFloat(cloudWindDirInput?.value) || CLOUD_WIND_DIR_DEFAULT;
-  const cloudOpacity = THREE.MathUtils.clamp(parseFloat(cloudOpacityInput?.value) || CLOUD_OPACITY_DEFAULT, 0, 1);
-  const starsEnabled = starsEnabledInput ? starsEnabledInput.checked : STARS_ENABLED_DEFAULT;
-  const starsBrightness = THREE.MathUtils.clamp(parseFloat(starsBrightnessInput?.value) || STARS_BRIGHTNESS_DEFAULT, 0.1, 3);
-  const moonEnabled = moonEnabledInput ? moonEnabledInput.checked : MOON_ENABLED_DEFAULT;
-  const moonBrightness = THREE.MathUtils.clamp(parseFloat(moonBrightnessInput?.value) || MOON_BRIGHTNESS_DEFAULT, 0.1, 5);
-  const moonAura = THREE.MathUtils.clamp(parseFloat(moonAuraInput?.value) || MOON_AURA_DEFAULT, 0, 3);
+  // ─ Sun direction ─
+  const sunDir = sunPositionFromTime(time, northDeg);
+  const elevRad = Math.asin(THREE.MathUtils.clamp(sunDir.y, -1, 1));
+  const elevDeg = THREE.MathUtils.radToDeg(elevRad);
 
-  // Sync inputs
-  sunTimeInput.value        = time.toFixed(3);
-  sunNorthInput.value       = Math.round(northOffset);
-  sunTurbidityInput.value   = turbidity.toFixed(1);
-  sunShadowRangeInput.value = Math.round(shadowRange);
-  sunIntensityInput.value   = intensity.toFixed(1);
-  sunDayDurationInput.value = Math.round(dayDuration);
-
-  // Compute sun direction
-  const sunDir = sunPositionFromTime(time, northOffset);
-  const elevDeg = THREE.MathUtils.radToDeg(Math.asin(sunDir.y));
-
-  // ── Physically-based sky dome update ──
-  const baseRayleigh = 3.0;
-  const horizonBoost = THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(elevDeg, 0, 20, 1.5, 0), 0, 1.5);
-  skyUniforms['rayleigh'].value = baseRayleigh + horizonBoost;
+  // ─ Sky dome uniforms ─
   skyUniforms['turbidity'].value = turbidity;
-  const baseMie = 0.003;
-  const horizonMie = THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(elevDeg, -2, 15, 0.012, 0), 0, 0.012);
-  skyUniforms['mieCoefficient'].value = baseMie + horizonMie;
-  skyUniforms['mieDirectionalG'].value = THREE.MathUtils.lerp(0.85, 0.75, THREE.MathUtils.clamp(elevDeg / 60, 0, 1));
-  skyUniforms['sunPosition'].value.copy(sunDir);
+  skyUniforms['rayleigh'].value = THREE.MathUtils.lerp(3, 0.5, THREE.MathUtils.clamp((turbidity - 2) / 18, 0, 1));
+  skyUniforms['mieCoefficient'].value = 0.003 + sunSize / 500000;
+  skyUniforms['mieDirectionalG'].value = 0.75;
+  skyUniforms['sunPosition'].value.copy(sunDir).multiplyScalar(SUN_DISTANCE);
 
-  // Sun disk size — scale the sun position to control apparent size
-  if (skyUniforms['sunPosition']) {
-    // The Sky shader sun disk size is controlled by sunPosition magnitude implicitly;
-    // we override by scaling mieDirectionalG for a fatter sun glow
-    const sizeScale = sunSize / 800; // 800 = default
-    skyUniforms['mieDirectionalG'].value = THREE.MathUtils.clamp(
-      THREE.MathUtils.lerp(0.85, 0.75, THREE.MathUtils.clamp(elevDeg / 60, 0, 1)) * sizeScale,
-      0.5, 0.999,
-    );
+  // ─ Dynamic exposure (brighter day, darker night) ─
+  let exposure;
+  if (elevDeg > 10) {
+    exposure = 0.22;
+  } else if (elevDeg > 0) {
+    exposure = THREE.MathUtils.lerp(0.35, 0.22, elevDeg / 10);
+  } else if (elevDeg > -6) {
+    exposure = THREE.MathUtils.lerp(0.5, 0.35, (elevDeg + 6) / 6);
+  } else if (elevDeg > -18) {
+    exposure = THREE.MathUtils.lerp(0.08, 0.5, (elevDeg + 18) / 12);
+  } else {
+    exposure = 0.08;
   }
+  renderer.toneMappingExposure = exposure;
 
-  // ── Dynamic exposure ──
-  const dayFactor = THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(elevDeg, -6, 25, 0, 1), 0, 1);
-  const targetExposure = THREE.MathUtils.lerp(0.35, 0.6, dayFactor);
-  renderer.toneMappingExposure += (targetExposure - renderer.toneMappingExposure) * 0.08;
+  // ─ Sun light ─
+  const sunColor = sunColorFromElevation(elevDeg);
+  sunLight.color.copy(sunColor);
 
-  // ── Sun directional light ──
-  const sunFade = THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(elevDeg, -2, 8, 0, 1), 0, 1);
-  sunLight.intensity = intensity * sunFade;
-  sunLight.color.copy(sunColorFromElevation(elevDeg));
-  sunLight.position.copy(sunDir.clone().multiplyScalar(SUN_DISTANCE));
-  sunTarget.position.set(0, 0, 0);
+  // Intensity curve: peaks at zenith, fades to zero below -6°
+  let sunIntMult;
+  if (elevDeg > 15) sunIntMult = 1;
+  else if (elevDeg > 0) sunIntMult = THREE.MathUtils.lerp(0.3, 1, elevDeg / 15);
+  else if (elevDeg > -6) sunIntMult = THREE.MathUtils.lerp(0, 0.3, (elevDeg + 6) / 6);
+  else sunIntMult = 0;
+  sunLight.intensity = intensity * sunIntMult;
+
+  // Position sun
+  sunLight.position.copy(sunTarget.position).addScaledVector(sunDir, SUN_DISTANCE);
 
   // Shadow frustum
-  sunLight.shadow.camera.left   = -shadowRange;
-  sunLight.shadow.camera.right  =  shadowRange;
-  sunLight.shadow.camera.top    =  shadowRange;
-  sunLight.shadow.camera.bottom = -shadowRange;
-  sunLight.shadow.camera.far    =  shadowRange * 4;
-  const biasScale = Math.sqrt(shadowRange / 100);
-  sunLight.shadow.bias       = -0.00015 * biasScale;
-  sunLight.shadow.normalBias =  0.012   * biasScale;
+  const halfShadow = shadowRange / 2;
+  sunLight.shadow.camera.left   = -halfShadow;
+  sunLight.shadow.camera.right  = halfShadow;
+  sunLight.shadow.camera.top    = halfShadow;
+  sunLight.shadow.camera.bottom = -halfShadow;
   sunLight.shadow.camera.updateProjectionMatrix();
 
-  // ── Hemisphere ambient light (sky + ground bounce) ──
-  const ambientDayFactor = THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(elevDeg, -8, 20, 0, 1), 0, 1);
-  ambientLight.intensity = THREE.MathUtils.lerp(0.12, 0.55, ambientDayFactor);
-  const sunCol = sunColorFromElevation(elevDeg);
-
-  // Blend user sky color with sun-derived color
-  const zenithBlue = new THREE.Color().copy(userSkyColor);
-  const skyTint = new THREE.Color().copy(sunCol).lerp(zenithBlue, THREE.MathUtils.lerp(0, 0.5, ambientDayFactor));
-
-  // Night: deep navy blue
-  if (ambientDayFactor < 0.25) {
-    const nightMix = THREE.MathUtils.mapLinear(ambientDayFactor, 0, 0.25, 1, 0);
-    ambientLight.color.setRGB(
-      THREE.MathUtils.lerp(skyTint.r, NIGHT_SKY_COLOR.r, nightMix),
-      THREE.MathUtils.lerp(skyTint.g, NIGHT_SKY_COLOR.g, nightMix),
-      THREE.MathUtils.lerp(skyTint.b, NIGHT_SKY_COLOR.b, nightMix),
-    );
+  // ─ Hemisphere ambient light ─
+  const userCol = new THREE.Color(userSkyColor);
+  if (elevDeg > 5) {
+    ambientLight.color.copy(userCol).multiplyScalar(0.6);
+    ambientLight.groundColor.setHex(0x362e1e);
+    ambientLight.intensity = 0.4;
+  } else if (elevDeg > -6) {
+    const t = (elevDeg + 6) / 11; // 0 at -6, 1 at 5
+    const nightTop = NIGHT_SKY_COLOR.clone();
+    ambientLight.color.copy(nightTop).lerp(userCol.clone().multiplyScalar(0.6), t);
+    ambientLight.groundColor.setHex(0x0a0a14).lerp(new THREE.Color(0x362e1e), t);
+    ambientLight.intensity = THREE.MathUtils.lerp(0.08, 0.4, t);
   } else {
-    ambientLight.color.copy(skyTint);
+    ambientLight.color.copy(NIGHT_SKY_COLOR);
+    ambientLight.groundColor.setHex(0x0a0a14);
+    ambientLight.intensity = 0.08;
   }
-  // Ground color
-  ambientLight.groundColor.setRGB(
-    THREE.MathUtils.lerp(0.02, 0.18, ambientDayFactor),
-    THREE.MathUtils.lerp(0.02, 0.14, ambientDayFactor),
-    THREE.MathUtils.lerp(0.04, 0.08, ambientDayFactor),
-  );
 
-  // Make light-emitting blocks less affected by darkness
-  for (const m of sceneObjects) {
-    if (m.userData.pointLight && m.material) {
-      const nightBoost = THREE.MathUtils.lerp(1.8, 1.0, ambientDayFactor);
-      m.material.emissiveIntensity = nightBoost;
+  // ─ Clear color (background behind sky dome) ─
+  if (elevDeg > 5) {
+    renderer.setClearColor(userCol);
+  } else if (elevDeg > -12) {
+    const t = (elevDeg + 12) / 17;
+    const blended = NIGHT_SKY_COLOR.clone().lerp(userCol, t);
+    renderer.setClearColor(blended);
+  } else {
+    renderer.setClearColor(NIGHT_SKY_COLOR);
+  }
+
+  // ─ Fog atmospheric tinting ─
+  if (fogSettings.enabled) {
+    const baseFogCol = new THREE.Color(fogSettings.color);
+    if (elevDeg > 0 && elevDeg < 10) {
+      // Near horizon — tint fog toward sun color for inscattering effect
+      const inscatter = THREE.MathUtils.clamp(1 - elevDeg / 10, 0, 1) * 0.4;
+      baseFogCol.lerp(sunColor, inscatter);
+    } else if (elevDeg <= 0 && elevDeg > -12) {
+      const nightT = THREE.MathUtils.clamp(-elevDeg / 12, 0, 1);
+      baseFogCol.lerp(NIGHT_SKY_COLOR, nightT * 0.6);
+    }
+    const brightness = THREE.MathUtils.clamp(fogSettings.brightness ?? 1, 0, 5);
+    baseFogCol.multiplyScalar(brightness);
+    if (fogSettings.mode === 'linear') {
+      scene.fog = new THREE.Fog(baseFogCol, fogSettings.near, fogSettings.far);
+    } else {
+      scene.fog = new THREE.FogExp2(baseFogCol, fogSettings.density);
     }
   }
 
-  // ── Apply sky color to renderer clear color ──
-  renderer.setClearColor(userSkyColor);
-
-  // ── Atmospheric perspective fog ──
-  // Tint fog with a blend of the sun color and the user sky color so the
-  // horizon / distant haze actually reflects the sky colour the user chose.
-  if (scene.fog) {
-    const horizonColor = new THREE.Color().copy(sunCol).lerp(userSkyColor, 0.5);
-    const fogBright = THREE.MathUtils.lerp(0.005, 0.55, ambientDayFactor);
-    scene.fog.color.copy(horizonColor).multiplyScalar(fogBright);
-    if (ambientDayFactor > 0.5) {
-      const aerialBlend = THREE.MathUtils.mapLinear(ambientDayFactor, 0.5, 1, 0, 0.3);
-      scene.fog.color.lerp(new THREE.Color().copy(userSkyColor).multiplyScalar(0.7), aerialBlend);
+  // ─ Clouds ─
+  _cloudGroup.visible = cloudsOn;
+  if (cloudsOn && _cloudParticles) {
+    let cloudAlpha = cloudOp;
+    if (elevDeg < -6) cloudAlpha *= 0.15;
+    else if (elevDeg < 0) cloudAlpha *= THREE.MathUtils.lerp(0.15, 0.7, (elevDeg + 6) / 6);
+    else if (elevDeg < 5) cloudAlpha *= THREE.MathUtils.lerp(0.7, 1, elevDeg / 5);
+    for (const c of _cloudParticles) {
+      c.material.opacity = cloudAlpha;
     }
   }
 
-  // ── Clouds ──
-  _cloudGroup.visible = cloudsEnabled;
-  if (cloudsEnabled) {
-    for (const c of _cloudGroup.children) {
-      if (c.material) c.material.opacity = cloudOpacity * THREE.MathUtils.clamp(ambientDayFactor * 2.5, 0.15, 1);
+  // ─ Stars ─
+  if (_starsMesh) {
+    _starsMesh.visible = starsOn;
+    if (starsOn) {
+      let starAlpha = 0;
+      if (elevDeg < -12) starAlpha = 1;
+      else if (elevDeg < -3) starAlpha = THREE.MathUtils.clamp((-3 - elevDeg) / 9, 0, 1);
+      else starAlpha = 0;
+      _starsMaterial.opacity = starAlpha * starsBrt;
+      _starsBaseOpacity = _starsMaterial.opacity;
     }
   }
 
-  // ── Stars ──
-  if (_starsMaterial) {
-    const starAlpha = starsEnabled
-      ? THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(elevDeg, -2, 6, 1, 0), 0, 1) * starsBrightness
-      : 0;
-    _starsMaterial.opacity = starAlpha;
-    if (_starsMesh) _starsMesh.visible = starAlpha > 0.01;
-  }
-
-  // ── Moon ──
-  if (moonEnabled) {
-    // Place moon opposite the sun
+  // ─ Moon ─
+  if (moonOn) {
+    _moonGroup.visible = true;
     const moonDir = sunDir.clone().negate();
-    // Keep it above horizon even if sun is high
+    // Keep moon above horizon
     if (moonDir.y < 0.05) moonDir.y = 0.05;
     moonDir.normalize();
-    _moonMesh.position.copy(moonDir.clone().multiplyScalar(SUN_DISTANCE * 0.95));
+    _moonMesh.position.copy(moonDir).multiplyScalar(350);
     _moonAuraSprite.position.copy(_moonMesh.position);
-    // Moon visibility: fade in as sun sets
-    const moonAlpha = THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(elevDeg, -4, 8, 1, 0), 0, 1);
-    _moonMat.opacity = moonAlpha * moonBrightness;
-    _moonAuraMat.opacity = moonAlpha * moonAura * 0.5;
-    _moonGroup.visible = moonAlpha > 0.01;
+
+    let moonAlpha = 0;
+    if (elevDeg < -6) moonAlpha = 1;
+    else if (elevDeg < 3) moonAlpha = THREE.MathUtils.clamp((3 - elevDeg) / 9, 0, 1);
+    else moonAlpha = 0;
+
+    _moonMat.opacity = moonAlpha * THREE.MathUtils.clamp(moonBrt, 0, 5);
+    _moonAuraMat.opacity = moonAlpha * THREE.MathUtils.clamp(moonAura, 0, 3);
   } else {
     _moonGroup.visible = false;
   }
+
+  // ─ Update time display ─
+  if (sunTimeValSpan) {
+    const h = Math.floor(time) % 24;
+    const m = Math.floor((time % 1) * 60);
+    sunTimeValSpan.textContent = String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+  }
+  if (sunTurbidityValSpan) sunTurbidityValSpan.textContent = turbidity.toFixed(1);
+  if (sunNorthValSpan) sunNorthValSpan.textContent = Math.round(northDeg) + '°';
+  if (cloudOpacityValSpan) cloudOpacityValSpan.textContent = cloudOp.toFixed(2);
 }
 
-/** Keep shadow camera centered on active camera so shadows work everywhere. */
 function updateSunShadowCenter(pos) {
-  const time = clampSunTime(parseFloat(sunTimeInput.value));
-  const north = clampSunNorth(parseFloat(sunNorthInput.value));
-  const sunDir = sunPositionFromTime(time, north);
   sunTarget.position.set(pos.x, 0, pos.z);
+  const sunDir = sunPositionFromTime(
+    parseFloat(sunTimeInput?.value) ?? SUN_TIME_DEFAULT,
+    parseFloat(sunNorthInput?.value) ?? SUN_NORTH_DEFAULT
+  );
   sunLight.position.copy(sunTarget.position).addScaledVector(sunDir, SUN_DISTANCE);
   sunLight.shadow.camera.updateProjectionMatrix();
 }
 
-/** Keep sky dome, clouds, stars, and moon centered on the active camera so
- *  the player can never walk to the edge of the sky. */
 function syncSkyToCamera(cam) {
+  if (!cam) return;
   const p = cam.position;
   sky.position.set(p.x, p.y, p.z);
   _cloudGroup.position.set(p.x, 0, p.z);
   if (_starsMesh) _starsMesh.position.set(p.x, p.y, p.z);
   _moonGroup.position.set(p.x, p.y, p.z);
 }
+
+function syncSunInputs() {
+  if (sunTimeInput)       sunTimeInput.value       = SUN_TIME_DEFAULT;
+  if (sunNorthInput)      sunNorthInput.value      = SUN_NORTH_DEFAULT;
+  if (sunIntensityInput)  sunIntensityInput.value   = SUN_INTENSITY_DEFAULT;
+  if (sunTurbidityInput)  sunTurbidityInput.value   = SUN_TURBIDITY_DEFAULT;
+  if (sunShadowRangeInput) sunShadowRangeInput.value = SUN_SHADOW_RANGE_DEFAULT;
+  if (sunSizeInput)       sunSizeInput.value        = SUN_SIZE_DEFAULT;
+  if (sunDayCycleInput)   sunDayCycleInput.checked  = SUN_DAY_CYCLE_DEFAULT;
+  if (sunDayDurationInput) sunDayDurationInput.value = SUN_DAY_DURATION_DEFAULT;
+  if (skyColorInput)      skyColorInput.value       = SKY_COLOR_DEFAULT;
+  if (cloudsEnabledInput) cloudsEnabledInput.checked = CLOUDS_ENABLED_DEFAULT;
+  if (cloudWindSpeedInput) cloudWindSpeedInput.value = CLOUD_WIND_SPEED_DEFAULT;
+  if (cloudWindDirInput)  cloudWindDirInput.value    = CLOUD_WIND_DIR_DEFAULT;
+  if (cloudOpacityInput)  cloudOpacityInput.value    = CLOUD_OPACITY_DEFAULT;
+  if (starsEnabledInput)  starsEnabledInput.checked  = STARS_ENABLED_DEFAULT;
+  if (starsCountInput)    starsCountInput.value      = STARS_COUNT_DEFAULT;
+  if (starsBrightnessInput) starsBrightnessInput.value = STARS_BRIGHTNESS_DEFAULT;
+  if (moonEnabledInput)   moonEnabledInput.checked   = MOON_ENABLED_DEFAULT;
+  if (moonBrightnessInput) moonBrightnessInput.value  = MOON_BRIGHTNESS_DEFAULT;
+  if (moonAuraInput)      moonAuraInput.value        = MOON_AURA_DEFAULT;
+}
+
+function applySunUI() {
+  updateSunSky();
+  markRestoreDirty();
+}
+
+function applyFogSettings() {
+  if (!fogSettings.enabled) { scene.fog = null; return; }
+  const b = THREE.MathUtils.clamp(fogSettings.brightness ?? 1, 0, 5);
+  const base = new THREE.Color(fogSettings.color);
+  const col = base.multiplyScalar(b);
+  if (fogSettings.mode === 'linear') {
+    scene.fog = new THREE.Fog(col, fogSettings.near, fogSettings.far);
+  } else {
+    scene.fog = new THREE.FogExp2(col, fogSettings.density);
+  }
+}
+
+function syncFogUI() {
+  if (fogEnabledInput) fogEnabledInput.checked = fogSettings.enabled;
+  if (fogModeInput)    fogModeInput.value      = fogSettings.mode;
+  if (fogColorInput)   fogColorInput.value     = '#' + (fogSettings.color >>> 0).toString(16).padStart(6, '0');
+  if (fogDensityInput) fogDensityInput.value   = fogSettings.density;
+  if (fogNearInput)    fogNearInput.value      = fogSettings.near;
+  if (fogFarInput)     fogFarInput.value       = fogSettings.far;
+  if (fogBrightnessInput) fogBrightnessInput.value = fogSettings.brightness;
+}
+
+function readFogUI() {
+  fogSettings.enabled    = fogEnabledInput?.checked ?? true;
+  fogSettings.mode       = fogModeInput?.value || 'exp2';
+  fogSettings.color      = parseInt((fogColorInput?.value || '#87ceeb').replace('#', ''), 16);
+  fogSettings.density    = parseFloat(fogDensityInput?.value) || 0.0008;
+  fogSettings.near       = parseFloat(fogNearInput?.value) || 10;
+  fogSettings.far        = parseFloat(fogFarInput?.value) || 500;
+  fogSettings.brightness = parseFloat(fogBrightnessInput?.value) || 1;
+  applyFogSettings();
+  updateSunSky(); // re-tint fog by sun position
+  markRestoreDirty();
+}
+
+// Initialize sky on load
+updateSunSky();
+applyFogSettings();
 
 const EDIT_SPEED = 12;
 const EDIT_VERTICAL_SPEED = 9;
@@ -1697,7 +1804,27 @@ const DEFS = {
   },
   camera: {
     label: 'Camera',
-    makeGeo: () => new THREE.ConeGeometry(0.25, 0.5, 8),
+    makeGeo: () => {
+      // Blender-style camera body: box + lens cone merged via BufferGeometry merge
+      const body = new THREE.BoxGeometry(0.4, 0.3, 0.3);
+      const lens = new THREE.CylinderGeometry(0.08, 0.12, 0.2, 8);
+      lens.rotateX(Math.PI / 2);
+      lens.translate(0, 0, -0.25);
+      const merged = new THREE.BufferGeometry();
+      // Merge body and lens into one geometry
+      const bodyNI = body.toNonIndexed();
+      const lensNI = lens.toNonIndexed();
+      const positions = new Float32Array(bodyNI.attributes.position.count * 3 + lensNI.attributes.position.count * 3);
+      positions.set(bodyNI.attributes.position.array, 0);
+      positions.set(lensNI.attributes.position.array, bodyNI.attributes.position.count * 3);
+      const normals = new Float32Array(bodyNI.attributes.normal.count * 3 + lensNI.attributes.normal.count * 3);
+      normals.set(bodyNI.attributes.normal.array, 0);
+      normals.set(lensNI.attributes.normal.array, bodyNI.attributes.normal.count * 3);
+      merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      merged.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+      body.dispose(); lens.dispose(); bodyNI.dispose(); lensNI.dispose();
+      return merged;
+    },
     makeMat: () => new THREE.MeshStandardMaterial({ color: 0x3498db, emissive: 0x3498db, emissiveIntensity: 0.4 }),
     placedY: 2,
   },
@@ -5429,7 +5556,7 @@ function buildTypeGeometry(type, shapeParams = {}) {
   return def.makeGeo(normalizeShapeParams(type, shapeParams));
 }
 
-const CONTROL_ACTION_TYPES = ['move', 'rotate', 'light', 'audio', 'path', 'functionControl', 'playerGroup', 'setVar', 'setBool', 'playerStats', 'teleport', 'skeleton'];
+const CONTROL_ACTION_TYPES = ['move', 'rotate', 'scale', 'light', 'audio', 'path', 'functionControl', 'playerGroup', 'setVar', 'setBool', 'playerStats', 'teleport', 'skeleton'];
 const SKELETON_ANIM_COMMANDS = ['play', 'stop', 'pause', 'resume'];
 const TELEPORT_MODES = ['coords', 'spawn', 'object'];
 const CONTROL_LIGHT_OPS = ['toggle', 'enable', 'disable', 'intensity', 'distance'];
@@ -6771,12 +6898,1290 @@ function _applyScreenTexture(mesh) {
 }
 
 // ─── Camera Object Config ────────────────────────────────────────────────────
+const CAMERA_EASING_TYPES = ['linear', 'ease-in', 'ease-out', 'ease-in-out'];
+const CAMERA_PATH_TYPES = ['centripetal', 'chordal', 'catmullrom'];
+
+function normalizeCameraKeyframe(kf = {}) {
+  const pos = Array.isArray(kf.position) ? kf.position.map(v => parseFloat(v) || 0) : [0, 2, 0];
+  const rot = Array.isArray(kf.rotation) && kf.rotation.length >= 4
+    ? kf.rotation.map(v => parseFloat(v) || 0) : null;
+  const la = Array.isArray(kf.lookAt) ? kf.lookAt.map(v => parseFloat(v) || 0) : null;
+  return {
+    time: Math.max(0, parseFloat(kf.time) || 0),
+    position: [pos[0] || 0, pos[1] || 0, pos[2] || 0],
+    rotation: rot,
+    lookAt: la,
+    easing: CAMERA_EASING_TYPES.includes(kf.easing) ? kf.easing : 'linear',
+    tension: Math.max(0, Math.min(1, parseFloat(kf.tension) || 0.5)),
+  };
+}
+
+function normalizeCameraClip(clip = {}) {
+  const keyframes = Array.isArray(clip.keyframes)
+    ? clip.keyframes.map(normalizeCameraKeyframe)
+    : [];
+  keyframes.sort((a, b) => a.time - b.time);
+  return {
+    keyframes,
+    speed: Math.max(0.1, parseFloat(clip.speed) || 2),
+    loop: clip.loop === true,
+    pathTension: Math.max(0, Math.min(1, parseFloat(clip.pathTension) || 0.5)),
+    pathType: CAMERA_PATH_TYPES.includes(clip.pathType) ? clip.pathType : 'centripetal',
+  };
+}
+
+function _computeCameraClipDuration(clip) {
+  if (!clip.keyframes || clip.keyframes.length < 2) return 0;
+  const positions = clip.keyframes.map(kf => new THREE.Vector3().fromArray(kf.position));
+  const curve = new THREE.CatmullRomCurve3(positions, clip.loop, clip.pathType || 'centripetal', clip.pathTension || 0.5);
+  const pathLength = curve.getLength();
+  return pathLength / (clip.speed || 2);
+}
+
 function normalizeCameraConfig(config = {}) {
+  const lookAtRaw = Array.isArray(config.lookAtTarget) ? config.lookAtTarget : null;
+
+  // Build clips object
+  let clips = {};
+  if (config.clips && typeof config.clips === 'object' && !Array.isArray(config.clips)) {
+    for (const [name, clipData] of Object.entries(config.clips)) {
+      clips[name] = normalizeCameraClip(clipData);
+    }
+  }
+
+  // Migration: if old-style animationKeyframes exist but no clips, create a "Default" clip
+  if (Object.keys(clips).length === 0) {
+    const legacyKfs = Array.isArray(config.animationKeyframes)
+      ? config.animationKeyframes.map(normalizeCameraKeyframe)
+      : [];
+    legacyKfs.sort((a, b) => a.time - b.time);
+    if (legacyKfs.length > 0) {
+      clips['Default'] = normalizeCameraClip({
+        keyframes: legacyKfs,
+        speed: parseFloat(config.cameraSpeed) || 2,
+        loop: config.animationLoop === true,
+        pathTension: 0.5,
+        pathType: 'centripetal',
+      });
+    }
+  }
+
+  const currentClip = (config.currentClip && clips[config.currentClip]) ? config.currentClip
+    : (Object.keys(clips).length > 0 ? Object.keys(clips)[0] : '');
+
   return {
     fov: Math.max(10, Math.min(150, parseFloat(config.fov) || 60)),
     near: Math.max(0.01, parseFloat(config.near) || 0.1),
     far: Math.max(1, parseFloat(config.far) || 1000),
+    aspectRatio: Math.max(0.1, Math.min(10, parseFloat(config.aspectRatio) || (16 / 9))),
+    lookAtEnabled: config.lookAtEnabled === true,
+    lookAtTarget: lookAtRaw ? [parseFloat(lookAtRaw[0]) || 0, parseFloat(lookAtRaw[1]) || 0, parseFloat(lookAtRaw[2]) || 0] : [0, 0, 0],
+    clips,
+    currentClip,
   };
+}
+
+// Helper to get the active clip from a config
+function _getActiveClip(cfg) {
+  return (cfg.currentClip && cfg.clips[cfg.currentClip]) ? cfg.clips[cfg.currentClip] : null;
+}
+
+// Helper to get active clip's keyframes, speed, duration, etc.
+function _getActiveClipInfo(cfg) {
+  const clip = _getActiveClip(cfg);
+  if (!clip) return { keyframes: [], speed: 2, loop: false, duration: 0, pathTension: 0.5, pathType: 'centripetal' };
+  const duration = _computeCameraClipDuration(clip);
+  return { keyframes: clip.keyframes, speed: clip.speed, loop: clip.loop, duration, pathTension: clip.pathTension, pathType: clip.pathType };
+}
+
+// ─── Camera Easing Utilities ─────────────────────────────────────────────────
+function _cameraEase(t, easing) {
+  switch (easing) {
+    case 'ease-in': return t * t;
+    case 'ease-out': return t * (2 - t);
+    case 'ease-in-out': return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+    default: return t; // linear
+  }
+}
+
+// ─── Camera Frustum Helper ───────────────────────────────────────────────────
+let _activeCameraHelper = null;
+let _activeCameraHelperCam = null;
+let _activeCameraHelperMesh = null;
+
+function _createCameraFrustumHelper(mesh) {
+  _removeCameraFrustumHelper();
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+  const helperCam = new THREE.PerspectiveCamera(cfg.fov, cfg.aspectRatio, cfg.near, Math.min(cfg.far, 20));
+  // Position camera at mesh location, orient it along mesh forward (-Z)
+  helperCam.position.set(0, 0, 0);
+  helperCam.rotation.set(0, 0, 0);
+  helperCam.updateProjectionMatrix();
+  const helper = new THREE.CameraHelper(helperCam);
+  helper.name = '__camera_frustum_helper__';
+  mesh.add(helperCam);
+  scene.add(helper);
+  _activeCameraHelper = helper;
+  _activeCameraHelperCam = helperCam;
+  _activeCameraHelperMesh = mesh;
+}
+
+function _removeCameraFrustumHelper() {
+  if (_activeCameraHelper) {
+    scene.remove(_activeCameraHelper);
+    _activeCameraHelper.dispose?.();
+    _activeCameraHelper = null;
+  }
+  if (_activeCameraHelperCam && _activeCameraHelperMesh) {
+    _activeCameraHelperMesh.remove(_activeCameraHelperCam);
+  }
+  _activeCameraHelperCam = null;
+  _activeCameraHelperMesh = null;
+}
+
+function _updateCameraFrustumHelper() {
+  if (!_activeCameraHelper || !_activeCameraHelperCam || !_activeCameraHelperMesh) return;
+  const mesh = _activeCameraHelperMesh;
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+  _activeCameraHelperCam.fov = cfg.fov;
+  _activeCameraHelperCam.aspect = cfg.aspectRatio;
+  _activeCameraHelperCam.near = cfg.near;
+  _activeCameraHelperCam.far = Math.min(cfg.far, 20);
+  _activeCameraHelperCam.updateProjectionMatrix();
+  _activeCameraHelper.update();
+}
+
+// ─── Camera Look-At Target Gizmo ────────────────────────────────────────────
+let _cameraLookAtHelper = null;
+let _cameraLookAtLine = null;
+let _cameraLookAtMesh = null;
+
+function _createCameraLookAtHelper(mesh) {
+  _removeCameraLookAtHelper();
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+  if (!cfg.lookAtEnabled) return;
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.15, 12, 8),
+    new THREE.MeshBasicMaterial({ color: 0xff6600, transparent: true, opacity: 0.7, depthTest: false })
+  );
+  sphere.position.set(cfg.lookAtTarget[0], cfg.lookAtTarget[1], cfg.lookAtTarget[2]);
+  sphere.renderOrder = 9998;
+  sphere.name = '__camera_lookat_helper__';
+  sphere.userData._isCameraLookAtHelper = true;
+  scene.add(sphere);
+  _cameraLookAtHelper = sphere;
+  _cameraLookAtMesh = mesh;
+
+  // Dashed line from camera to target
+  const lineGeo = new THREE.BufferGeometry().setFromPoints([
+    mesh.position.clone(), sphere.position.clone()
+  ]);
+  const lineMat = new THREE.LineDashedMaterial({ color: 0xff6600, dashSize: 0.3, gapSize: 0.15, transparent: true, opacity: 0.6, depthTest: false });
+  const line = new THREE.Line(lineGeo, lineMat);
+  line.computeLineDistances();
+  line.renderOrder = 9997;
+  line.name = '__camera_lookat_line__';
+  scene.add(line);
+  _cameraLookAtLine = line;
+}
+
+function _removeCameraLookAtHelper() {
+  if (_cameraLookAtHelper) {
+    scene.remove(_cameraLookAtHelper);
+    _cameraLookAtHelper.geometry?.dispose();
+    _cameraLookAtHelper.material?.dispose();
+    _cameraLookAtHelper = null;
+  }
+  if (_cameraLookAtLine) {
+    scene.remove(_cameraLookAtLine);
+    _cameraLookAtLine.geometry?.dispose();
+    _cameraLookAtLine.material?.dispose();
+    _cameraLookAtLine = null;
+  }
+  _cameraLookAtMesh = null;
+}
+
+function _updateCameraLookAtHelper() {
+  if (!_cameraLookAtHelper || !_cameraLookAtMesh) return;
+  const cfg = normalizeCameraConfig(_cameraLookAtMesh.userData.cameraConfig);
+  _cameraLookAtHelper.position.set(cfg.lookAtTarget[0], cfg.lookAtTarget[1], cfg.lookAtTarget[2]);
+  if (_cameraLookAtLine) {
+    const pts = [_cameraLookAtMesh.position.clone(), _cameraLookAtHelper.position.clone()];
+    _cameraLookAtLine.geometry.dispose();
+    _cameraLookAtLine.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+    _cameraLookAtLine.computeLineDistances();
+  }
+}
+
+// ─── Camera Animation Path Visualization ─────────────────────────────────────
+let _cameraPathLine = null;
+let _cameraPathDiamonds = [];
+
+function _refreshCameraPathPreview(mesh) {
+  _clearCameraPathPreview();
+  if (!mesh || mesh.userData.type !== 'camera') return;
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+  const clipInfo = _getActiveClipInfo(cfg);
+  if (clipInfo.keyframes.length < 2) return;
+
+  // Build spline from keyframe positions
+  const kfPositions = clipInfo.keyframes.map(kf => new THREE.Vector3(kf.position[0], kf.position[1], kf.position[2]));
+  const curve = new THREE.CatmullRomCurve3(kfPositions, clipInfo.loop, clipInfo.pathType, clipInfo.pathTension);
+  const curvePoints = curve.getPoints(Math.max(50, clipInfo.keyframes.length * 20));
+
+  const geo = new THREE.BufferGeometry().setFromPoints(curvePoints);
+  const mat = new THREE.LineDashedMaterial({ color: 0x00ccff, dashSize: 0.4, gapSize: 0.2, transparent: true, opacity: 0.8, depthTest: false });
+  const line = new THREE.Line(geo, mat);
+  line.computeLineDistances();
+  line.renderOrder = 9996;
+  line.name = '__camera_path_line__';
+  scene.add(line);
+  _cameraPathLine = line;
+
+  // Diamond markers at each keyframe position (interactive — tagged for raycast)
+  const diamondGeo = new THREE.OctahedronGeometry(0.12, 0);
+  const diamondMat = new THREE.MeshBasicMaterial({ color: 0x00ccff, transparent: true, opacity: 0.9, depthTest: false });
+  const diamondHoverMat = new THREE.MeshBasicMaterial({ color: 0xffcc00, transparent: true, opacity: 1.0, depthTest: false });
+  clipInfo.keyframes.forEach((kf, i) => {
+    const diamond = new THREE.Mesh(diamondGeo, diamondMat.clone());
+    diamond.position.set(kf.position[0], kf.position[1], kf.position[2]);
+    diamond.renderOrder = 9995;
+    diamond.name = '__camera_path_diamond__';
+    diamond.userData._cameraKfIndex = i;
+    diamond.userData._cameraKfMesh = mesh;
+    diamond.userData._diamondBaseMat = diamond.material;
+    diamond.userData._diamondHoverMat = diamondHoverMat;
+    scene.add(diamond);
+    _cameraPathDiamonds.push(diamond);
+  });
+}
+
+function _clearCameraPathPreview() {
+  if (_cameraPathLine) {
+    scene.remove(_cameraPathLine);
+    _cameraPathLine.geometry?.dispose();
+    _cameraPathLine.material?.dispose();
+    _cameraPathLine = null;
+  }
+  for (const d of _cameraPathDiamonds) {
+    scene.remove(d);
+  }
+  _cameraPathDiamonds = [];
+}
+
+// ─── Camera Keyframe Diamond Dragging (Visual Track Editor) ──────────────────
+let _draggedDiamond = null;
+let _diamondDragPlane = new THREE.Plane();
+let _diamondDragOffset = new THREE.Vector3();
+let _diamondRaycaster = new THREE.Raycaster();
+let _diamondDragStartPos = new THREE.Vector3();   // origin position at drag start
+let _diamondDragAxisLock = null;                   // null | 'x' | 'y' | 'z' | 'xz'
+let _diamondDragTooltip = null;                    // floating tooltip element
+let _diamondSelectedSet = new Set();               // multi-selected diamond indices
+let _diamondDragGroupOffsets = new Map();           // kfIndex → offset from primary
+let _kfContextMenu = null;                         // right-click context menu element
+
+function _removeKfContextMenu() {
+  if (_kfContextMenu) { _kfContextMenu.remove(); _kfContextMenu = null; }
+}
+
+function _removeDiamondTooltip() {
+  if (_diamondDragTooltip) { _diamondDragTooltip.remove(); _diamondDragTooltip = null; }
+}
+
+function _showDiamondTooltip(x, y, pos) {
+  if (!_diamondDragTooltip) {
+    _diamondDragTooltip = document.createElement('div');
+    _diamondDragTooltip.style.cssText = 'position:fixed;z-index:100000;pointer-events:none;background:rgba(0,0,0,0.8);color:#00ccff;font:10px monospace;padding:3px 6px;border-radius:3px;white-space:nowrap;';
+    document.body.appendChild(_diamondDragTooltip);
+  }
+  _diamondDragTooltip.textContent = `X:${pos.x.toFixed(2)} Y:${pos.y.toFixed(2)} Z:${pos.z.toFixed(2)}`;
+  _diamondDragTooltip.style.left = (x + 14) + 'px';
+  _diamondDragTooltip.style.top = (y - 20) + 'px';
+}
+
+function _snapToGrid(val) {
+  const s = state.snapSize;
+  return s > 0 ? Math.round(val / s) * s : val;
+}
+
+function _hitDiamond(event) {
+  if (!_cameraPathDiamonds.length) return null;
+  const canvasEl = renderer.domElement;
+  const rect = canvasEl.getBoundingClientRect();
+  const mouse = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  _diamondRaycaster.setFromCamera(mouse, editorCam);
+  const hits = _diamondRaycaster.intersectObjects(_cameraPathDiamonds, false);
+  if (!hits.length) return null;
+  const diamond = hits[0].object;
+  return (diamond.userData._cameraKfIndex !== undefined) ? diamond : null;
+}
+
+function _onCameraPathPointerDown(event) {
+  if (!_cameraPathDiamonds.length || state.isPlaytest) return;
+  // Right-click is handled by contextmenu event
+  if (event.button === 2) return;
+  _removeKfContextMenu();
+
+  const diamond = _hitDiamond(event);
+  if (!diamond) {
+    // Clicking empty space clears multi-selection
+    if (_diamondSelectedSet.size) {
+      _diamondSelectedSet.clear();
+      _cameraPathDiamonds.forEach(d => { d.material = d.userData._diamondBaseMat; });
+    }
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  const kfIdx = diamond.userData._cameraKfIndex;
+
+  // Shift+click toggles multi-selection
+  if (event.shiftKey) {
+    if (_diamondSelectedSet.has(kfIdx)) {
+      _diamondSelectedSet.delete(kfIdx);
+      diamond.material = diamond.userData._diamondBaseMat;
+    } else {
+      _diamondSelectedSet.add(kfIdx);
+      diamond.material = diamond.userData._diamondHoverMat;
+    }
+    return;
+  }
+
+  // If this diamond is not in the selection, start fresh selection
+  if (!_diamondSelectedSet.has(kfIdx)) {
+    _diamondSelectedSet.clear();
+    _cameraPathDiamonds.forEach(d => { d.material = d.userData._diamondBaseMat; });
+    _diamondSelectedSet.add(kfIdx);
+  }
+
+  // Highlight all selected
+  _cameraPathDiamonds.forEach(d => {
+    if (_diamondSelectedSet.has(d.userData._cameraKfIndex)) d.material = d.userData._diamondHoverMat;
+  });
+
+  _draggedDiamond = diamond;
+  _diamondDragStartPos.copy(diamond.position);
+  _diamondDragAxisLock = event.ctrlKey ? 'xz' : null; // Ctrl = ground plane lock
+
+  // Store offsets for all selected diamonds relative to the dragged one
+  _diamondDragGroupOffsets.clear();
+  if (_diamondSelectedSet.size > 1) {
+    for (const d of _cameraPathDiamonds) {
+      if (_diamondSelectedSet.has(d.userData._cameraKfIndex) && d !== diamond) {
+        _diamondDragGroupOffsets.set(d.userData._cameraKfIndex, d.position.clone().sub(diamond.position));
+      }
+    }
+  }
+
+  // Create drag plane
+  if (_diamondDragAxisLock === 'xz') {
+    // Ground plane (Y = diamond Y)
+    _diamondDragPlane.setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 1, 0), diamond.position);
+  } else {
+    const camDir = new THREE.Vector3();
+    editorCam.getWorldDirection(camDir);
+    _diamondDragPlane.setFromNormalAndCoplanarPoint(camDir, diamond.position);
+  }
+
+  const canvasEl = renderer.domElement;
+  const rect = canvasEl.getBoundingClientRect();
+  const mouse = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  _diamondRaycaster.setFromCamera(mouse, editorCam);
+  const intersect = new THREE.Vector3();
+  _diamondRaycaster.ray.intersectPlane(_diamondDragPlane, intersect);
+  _diamondDragOffset.copy(diamond.position).sub(intersect);
+
+  orbitControls.enabled = false;
+  transformControls.enabled = false;
+
+  canvasEl.addEventListener('pointermove', _onCameraPathPointerMove);
+  canvasEl.addEventListener('pointerup', _onCameraPathPointerUp);
+}
+
+function _onCameraPathPointerMove(event) {
+  if (!_draggedDiamond) return;
+  const canvasEl = renderer.domElement;
+  const rect = canvasEl.getBoundingClientRect();
+  const mouse = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  _diamondRaycaster.setFromCamera(mouse, editorCam);
+  const intersect = new THREE.Vector3();
+  if (!_diamondRaycaster.ray.intersectPlane(_diamondDragPlane, intersect)) return;
+
+  let newPos = intersect.add(_diamondDragOffset);
+
+  // Shift = axis lock (detect dominant axis from displacement)
+  if (event.shiftKey && !_diamondDragAxisLock) {
+    const delta = newPos.clone().sub(_diamondDragStartPos);
+    const ax = Math.abs(delta.x), ay = Math.abs(delta.y), az = Math.abs(delta.z);
+    if (Math.max(ax, ay, az) > 0.05) {
+      _diamondDragAxisLock = (ax >= ay && ax >= az) ? 'x' : (ay >= ax && ay >= az) ? 'y' : 'z';
+    }
+  }
+
+  // Apply axis constraint
+  const lock = event.shiftKey ? _diamondDragAxisLock : (event.ctrlKey ? 'xz' : null);
+  if (lock === 'x') { newPos.y = _diamondDragStartPos.y; newPos.z = _diamondDragStartPos.z; }
+  else if (lock === 'y') { newPos.x = _diamondDragStartPos.x; newPos.z = _diamondDragStartPos.z; }
+  else if (lock === 'z') { newPos.x = _diamondDragStartPos.x; newPos.y = _diamondDragStartPos.y; }
+  else if (lock === 'xz') { newPos.y = _diamondDragStartPos.y; }
+
+  // Grid snap
+  if (state.snapSize > 0) {
+    newPos.x = _snapToGrid(newPos.x);
+    newPos.y = _snapToGrid(newPos.y);
+    newPos.z = _snapToGrid(newPos.z);
+  }
+
+  _draggedDiamond.position.copy(newPos);
+
+  // Move other selected diamonds by the same delta
+  if (_diamondDragGroupOffsets.size > 0) {
+    for (const d of _cameraPathDiamonds) {
+      const off = _diamondDragGroupOffsets.get(d.userData._cameraKfIndex);
+      if (off) d.position.copy(newPos.clone().add(off));
+    }
+  }
+
+  // Show floating tooltip with XYZ
+  _showDiamondTooltip(event.clientX, event.clientY, newPos);
+}
+
+function _onCameraPathPointerUp() {
+  if (!_draggedDiamond) return;
+  _removeDiamondTooltip();
+
+  // Commit all selected diamonds to their keyframe data
+  const mesh = _draggedDiamond.userData._cameraKfMesh;
+  if (mesh) {
+    const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+    const clip = _getActiveClip(cfg);
+    if (clip) {
+      for (const d of _cameraPathDiamonds) {
+        if (!_diamondSelectedSet.has(d.userData._cameraKfIndex)) continue;
+        const idx = d.userData._cameraKfIndex;
+        if (clip.keyframes[idx]) {
+          clip.keyframes[idx].position = [d.position.x, d.position.y, d.position.z];
+        }
+      }
+      mesh.userData.cameraConfig = cfg;
+      _refreshCameraPathPreview(mesh);
+      markRestoreDirty();
+      refreshProps();
+    }
+  }
+
+  // Restore materials for non-selected diamonds
+  _cameraPathDiamonds.forEach(d => {
+    d.material = _diamondSelectedSet.has(d.userData._cameraKfIndex) ? d.userData._diamondHoverMat : d.userData._diamondBaseMat;
+  });
+
+  orbitControls.enabled = true;
+  transformControls.enabled = true;
+  _draggedDiamond = null;
+  _diamondDragAxisLock = null;
+  _diamondDragGroupOffsets.clear();
+
+  const canvasEl = renderer.domElement;
+  canvasEl.removeEventListener('pointermove', _onCameraPathPointerMove);
+  canvasEl.removeEventListener('pointerup', _onCameraPathPointerUp);
+}
+
+// ─── Keyframe Right-Click Context Menu ───────────────────────────────────────
+function _onCameraPathContextMenu(event) {
+  if (!_cameraPathDiamonds.length || state.isPlaytest) return;
+  const diamond = _hitDiamond(event);
+  if (!diamond) return;
+  event.preventDefault();
+  event.stopPropagation();
+  _removeKfContextMenu();
+
+  const kfIdx = diamond.userData._cameraKfIndex;
+  const mesh = diamond.userData._cameraKfMesh;
+  if (!mesh) return;
+
+  const menu = document.createElement('div');
+  menu.style.cssText = 'position:fixed;z-index:100001;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:4px 0;min-width:160px;box-shadow:0 4px 16px rgba(0,0,0,0.5);font-size:11px;color:#e6edf3;';
+  menu.innerHTML = `
+    <div class="kf-ctx-item" data-action="delete" style="padding:5px 12px;cursor:pointer;">🗑️ Delete Keyframe</div>
+    <div class="kf-ctx-item" data-action="duplicate" style="padding:5px 12px;cursor:pointer;">📋 Duplicate Keyframe</div>
+    <div style="border-top:1px solid #30363d;margin:2px 0"></div>
+    <div class="kf-ctx-item" data-action="lookat" style="padding:5px 12px;cursor:pointer;">🎯 Set as Look-At Target</div>
+    <div class="kf-ctx-item" data-action="goto" style="padding:5px 12px;cursor:pointer;">⏱️ Go to Time</div>
+    <div style="border-top:1px solid #30363d;margin:2px 0"></div>
+    <div class="kf-ctx-item" data-action="copypos" style="padding:5px 12px;cursor:pointer;">📍 Copy Position</div>
+  `;
+  menu.style.left = event.clientX + 'px';
+  menu.style.top = event.clientY + 'px';
+  document.body.appendChild(menu);
+  _kfContextMenu = menu;
+
+  // Hover effect
+  menu.querySelectorAll('.kf-ctx-item').forEach(item => {
+    item.addEventListener('mouseenter', () => { item.style.background = '#1f6feb33'; });
+    item.addEventListener('mouseleave', () => { item.style.background = 'none'; });
+  });
+
+  menu.addEventListener('click', (e) => {
+    const action = e.target.closest('.kf-ctx-item')?.dataset.action;
+    if (!action) return;
+    const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+    const clip = _getActiveClip(cfg);
+    if (!clip) { _removeKfContextMenu(); return; }
+
+    if (action === 'delete') {
+      if (clip.keyframes.length <= 1) { _removeKfContextMenu(); return; }
+      clip.keyframes.splice(kfIdx, 1);
+      mesh.userData.cameraConfig = cfg;
+      _diamondSelectedSet.delete(kfIdx);
+      _refreshCameraPathPreview(mesh);
+      markRestoreDirty();
+      refreshProps();
+    } else if (action === 'duplicate') {
+      const orig = clip.keyframes[kfIdx];
+      const copy = JSON.parse(JSON.stringify(orig));
+      // Offset duplicated keyframe slightly
+      copy.position[0] += 0.5;
+      copy.position[1] += 0.5;
+      clip.keyframes.splice(kfIdx + 1, 0, copy);
+      mesh.userData.cameraConfig = cfg;
+      _refreshCameraPathPreview(mesh);
+      markRestoreDirty();
+      refreshProps();
+    } else if (action === 'lookat') {
+      const kf = clip.keyframes[kfIdx];
+      cfg.lookAtEnabled = true;
+      cfg.lookAtTarget = [...kf.position];
+      mesh.userData.cameraConfig = cfg;
+      refreshProps();
+      markRestoreDirty();
+    } else if (action === 'goto') {
+      // Scrub timeline to this keyframe's normalized time
+      const clipInfo = _getActiveClipInfo(cfg);
+      const numKfs = clipInfo.keyframes.length;
+      const normT = numKfs > 1 ? kfIdx / (numKfs - 1) : 0;
+      const scrubber = document.getElementById('prop-camera-scrubber');
+      if (scrubber) { scrubber.value = normT; scrubber.dispatchEvent(new Event('input')); }
+    } else if (action === 'copypos') {
+      const kf = clip.keyframes[kfIdx];
+      const text = `${kf.position[0].toFixed(3)}, ${kf.position[1].toFixed(3)}, ${kf.position[2].toFixed(3)}`;
+      navigator.clipboard?.writeText(text).catch(() => {});
+    }
+
+    _removeKfContextMenu();
+  });
+
+  // Close on click outside
+  const closeHandler = (e) => {
+    if (!menu.contains(e.target)) { _removeKfContextMenu(); document.removeEventListener('pointerdown', closeHandler, true); }
+  };
+  setTimeout(() => document.addEventListener('pointerdown', closeHandler, true), 0);
+}
+
+// Attach diamond drag and context menu listeners to the canvas
+renderer.domElement.addEventListener('pointerdown', _onCameraPathPointerDown);
+renderer.domElement.addEventListener('contextmenu', _onCameraPathContextMenu);
+
+// ─── Camera Animation Interpolation Engine ───────────────────────────────────
+function _interpolateCameraAnimation(cfg, time) {
+  const clipInfo = _getActiveClipInfo(cfg);
+  const kfs = clipInfo.keyframes;
+  if (!kfs.length) return null;
+  if (kfs.length === 1) {
+    return { position: new THREE.Vector3().fromArray(kfs[0].position), rotation: null, lookAt: kfs[0].lookAt ? new THREE.Vector3().fromArray(kfs[0].lookAt) : null };
+  }
+
+  const duration = clipInfo.duration;
+  if (duration <= 0) return null;
+  let t = time;
+  if (clipInfo.loop) {
+    t = t % duration;
+    if (t < 0) t += duration;
+  } else {
+    t = Math.max(0, Math.min(duration, t));
+  }
+
+  // Position: use CatmullRomCurve3 for smooth path through all keyframe positions
+  const allPositions = kfs.map(kf => new THREE.Vector3().fromArray(kf.position));
+  const curve = new THREE.CatmullRomCurve3(allPositions, clipInfo.loop, clipInfo.pathType, clipInfo.pathTension);
+  // Map time to curve parameter (0..1) based on duration
+  const curveT = Math.max(0, Math.min(1, t / duration));
+  const position = curve.getPoint(curveT);
+
+  // Find surrounding keyframes for rotation/lookAt/easing interpolation
+  // Distribute keyframe influence evenly along the curve parameter
+  const numKfs = kfs.length;
+  const segIndex = Math.min(Math.floor(curveT * (numKfs - 1)), numKfs - 2);
+  const segT = (curveT * (numKfs - 1)) - segIndex;
+  const prevKf = kfs[segIndex];
+  const nextKf = kfs[segIndex + 1];
+
+  // Apply easing to segment progress
+  const easedT = _cameraEase(segT, nextKf.easing || 'linear');
+
+  // Rotation via slerp if both keyframes have rotation data
+  let rotation = null;
+  if (prevKf.rotation && nextKf.rotation) {
+    const q1 = new THREE.Quaternion().fromArray(prevKf.rotation);
+    const q2 = new THREE.Quaternion().fromArray(nextKf.rotation);
+    rotation = new THREE.Quaternion().slerpQuaternions(q1, q2, easedT);
+  }
+
+  // LookAt interpolation
+  let lookAt = null;
+  if (cfg.lookAtEnabled && cfg.lookAtTarget) {
+    lookAt = new THREE.Vector3().fromArray(cfg.lookAtTarget);
+  } else if (prevKf.lookAt && nextKf.lookAt) {
+    lookAt = new THREE.Vector3().fromArray(prevKf.lookAt).lerp(new THREE.Vector3().fromArray(nextKf.lookAt), easedT);
+  }
+
+  return { position, rotation, lookAt };
+}
+
+// ─── Camera Animation Preview (editor) ──────────────────────────────────────
+let _cameraPreviewActive = false;
+let _cameraPreviewStartTime = 0;
+let _cameraPreviewMesh = null;
+let _cameraPreviewSavedPos = null;
+let _cameraPreviewSavedQuat = null;
+
+function startCameraAnimationPreview(mesh) {
+  if (!mesh || mesh.userData.type !== 'camera') return;
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+  const clipInfo = _getActiveClipInfo(cfg);
+  if (clipInfo.keyframes.length < 2) return;
+  // Save mesh's original transform to restore on stop
+  _cameraPreviewSavedPos = mesh.position.clone();
+  _cameraPreviewSavedQuat = mesh.quaternion.clone();
+  _cameraPreviewActive = true;
+  _cameraPreviewStartTime = performance.now() / 1000;
+  _cameraPreviewMesh = mesh;
+  // Keep orbit controls enabled — user can orbit while watching preview
+}
+
+function stopCameraAnimationPreview() {
+  if (!_cameraPreviewActive) return;
+  // Restore mesh original transform
+  if (_cameraPreviewMesh && _cameraPreviewSavedPos) {
+    _cameraPreviewMesh.position.copy(_cameraPreviewSavedPos);
+    _cameraPreviewMesh.quaternion.copy(_cameraPreviewSavedQuat);
+  }
+  _cameraPreviewActive = false;
+  _cameraPreviewMesh = null;
+  _cameraPreviewSavedPos = null;
+  _cameraPreviewSavedQuat = null;
+}
+
+function _updateCameraAnimationPreview() {
+  if (!_cameraPreviewActive || !_cameraPreviewMesh) return;
+  const cfg = normalizeCameraConfig(_cameraPreviewMesh.userData.cameraConfig);
+  const clipInfo = _getActiveClipInfo(cfg);
+  const elapsed = performance.now() / 1000 - _cameraPreviewStartTime;
+
+  if (!clipInfo.loop && elapsed > clipInfo.duration) {
+    stopCameraAnimationPreview();
+    return;
+  }
+
+  const result = _interpolateCameraAnimation(cfg, elapsed);
+  if (!result) return;
+
+  // Move the camera mesh along the path instead of hijacking the editor camera
+  _cameraPreviewMesh.position.copy(result.position);
+  if (result.lookAt) {
+    _cameraPreviewMesh.lookAt(result.lookAt);
+  } else if (result.rotation) {
+    _cameraPreviewMesh.quaternion.copy(result.rotation);
+  }
+}
+
+// ─── Camera PiP Preview Window ───────────────────────────────────────────────
+let _cameraPipCanvas = null;
+let _cameraPipCam = null;
+let _cameraPipTarget = null;
+let _cameraPipMesh = null;
+
+function _createCameraPip(mesh) {
+  _removeCameraPip();
+  if (!mesh || mesh.userData.type !== 'camera') return;
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+
+  // Create overlay canvas
+  const canvas = document.createElement('canvas');
+  canvas.width = 320;
+  canvas.height = Math.round(320 / cfg.aspectRatio);
+  canvas.style.cssText = 'position:absolute;bottom:10px;right:10px;z-index:100;border:2px solid #00ccff;border-radius:6px;pointer-events:none;box-shadow:0 2px 12px rgba(0,204,255,0.3);';
+  document.getElementById('canvas-container')?.appendChild(canvas) || document.body.appendChild(canvas);
+  _cameraPipCanvas = canvas;
+
+  // PiP camera
+  const pipCam = new THREE.PerspectiveCamera(cfg.fov, cfg.aspectRatio, cfg.near, cfg.far);
+  _cameraPipCam = pipCam;
+
+  // Render target
+  const rt = new THREE.WebGLRenderTarget(canvas.width, canvas.height, { format: THREE.RGBAFormat });
+  _cameraPipTarget = rt;
+  _cameraPipMesh = mesh;
+}
+
+function _removeCameraPip() {
+  if (_cameraPipCanvas) {
+    _cameraPipCanvas.remove();
+    _cameraPipCanvas = null;
+  }
+  if (_cameraPipTarget) {
+    _cameraPipTarget.dispose();
+    _cameraPipTarget = null;
+  }
+  _cameraPipCam = null;
+  _cameraPipMesh = null;
+}
+
+function _renderCameraPip() {
+  if (!_cameraPipCanvas || !_cameraPipCam || !_cameraPipTarget || !_cameraPipMesh) return;
+  const mesh = _cameraPipMesh;
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+
+  // Update PiP camera from mesh transform
+  _cameraPipCam.fov = cfg.fov;
+  _cameraPipCam.aspect = cfg.aspectRatio;
+  _cameraPipCam.near = cfg.near;
+  _cameraPipCam.far = cfg.far;
+  _cameraPipCam.updateProjectionMatrix();
+
+  // Position PiP cam at mesh world position
+  mesh.updateMatrixWorld(true);
+  const worldPos = new THREE.Vector3();
+  mesh.getWorldPosition(worldPos);
+  _cameraPipCam.position.copy(worldPos);
+
+  if (cfg.lookAtEnabled) {
+    _cameraPipCam.lookAt(cfg.lookAtTarget[0], cfg.lookAtTarget[1], cfg.lookAtTarget[2]);
+  } else {
+    const worldQuat = new THREE.Quaternion();
+    mesh.getWorldQuaternion(worldQuat);
+    _cameraPipCam.quaternion.copy(worldQuat);
+  }
+
+  // Render to PiP target
+  const currentTarget = renderer.getRenderTarget();
+  // Hide camera mesh and helpers during PiP render
+  const wasVisible = mesh.visible;
+  mesh.visible = false;
+  if (_activeCameraHelper) _activeCameraHelper.visible = false;
+  if (_cameraLookAtHelper) _cameraLookAtHelper.visible = false;
+  if (_cameraLookAtLine) _cameraLookAtLine.visible = false;
+
+  // Hide objects that should be invisible in-game (same as playtest)
+  const hiddenForRender = [];
+  for (const m of sceneObjects) {
+    if (m.userData.hiddenInGame || ['light', 'spawn', 'trigger', 'pivot'].includes(m.userData.type)) {
+      if (m.visible || (m.material && m.material.visible)) {
+        hiddenForRender.push({ mesh: m, wasVisible: m.visible, matWasVisible: m.material?.visible });
+        m.visible = false;
+        if (m.material) m.material.visible = false;
+        if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = false;
+      }
+    }
+  }
+
+  renderer.setRenderTarget(_cameraPipTarget);
+  renderer.render(scene, _cameraPipCam);
+  renderer.setRenderTarget(currentTarget);
+
+  mesh.visible = wasVisible;
+  if (_activeCameraHelper) _activeCameraHelper.visible = true;
+  if (_cameraLookAtHelper) _cameraLookAtHelper.visible = true;
+  if (_cameraLookAtLine) _cameraLookAtLine.visible = true;
+
+  // Restore hidden objects
+  for (const h of hiddenForRender) {
+    h.mesh.visible = h.wasVisible;
+    if (h.mesh.material) h.mesh.material.visible = h.matWasVisible;
+    if (h.mesh.userData.customSkinGroup) h.mesh.userData.customSkinGroup.visible = true;
+  }
+
+  // Copy pixels to canvas
+  const w = _cameraPipCanvas.width, h = _cameraPipCanvas.height;
+  const buf = new Uint8Array(w * h * 4);
+  renderer.readRenderTargetPixels(_cameraPipTarget, 0, 0, w, h, buf);
+  const ctx = _cameraPipCanvas.getContext('2d');
+  const imgData = ctx.createImageData(w, h);
+  // Flip vertically (WebGL is bottom-up)
+  for (let y = 0; y < h; y++) {
+    const srcRow = (h - 1 - y) * w * 4;
+    const dstRow = y * w * 4;
+    imgData.data.set(buf.subarray(srcRow, srcRow + w * 4), dstRow);
+  }
+  ctx.putImageData(imgData, 0, 0);
+  // Label overlay
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, w, 18);
+  ctx.fillStyle = '#00ccff';
+  ctx.font = '11px sans-serif';
+  const clipName = cfg.currentClip || 'Camera';
+  ctx.fillText(`📷 ${clipName}`, 6, 13);
+}
+
+// ─── Render to Video (WebM) ──────────────────────────────────────────────────
+let _renderToVideoActive = false;
+
+async function renderCameraToVideo(mesh, options = {}) {
+  if (_renderToVideoActive) return;
+  if (!mesh || mesh.userData.type !== 'camera') return;
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+  const clipInfo = _getActiveClipInfo(cfg);
+  if (clipInfo.keyframes.length < 2) { alert('Need at least 2 keyframes to render video.'); return; }
+
+  const width = (options.width || 1280) & ~1;
+  const height = (options.height || Math.round(((options.width || 1280)) / cfg.aspectRatio)) & ~1;
+  const fps = options.fps || 30;
+  const duration = clipInfo.duration;
+  const totalFrames = Math.ceil(duration * fps);
+
+  // Create camera for rendering
+  const renderCam = new THREE.PerspectiveCamera(cfg.fov, cfg.aspectRatio, cfg.near, cfg.far);
+
+  // Progress modal (covers screen so canvas resize isn't visible)
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);';
+  modal.innerHTML = `<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px 32px;min-width:340px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.5)">
+    <div style="color:#e6edf3;font-size:16px;font-weight:600;margin-bottom:12px">🎬 Rendering Video…</div>
+    <div id="render-progress-text" style="color:#8b949e;font-size:12px;margin-bottom:8px">Frame 0 / ${totalFrames}</div>
+    <div id="render-method-text" style="color:#58a6ff;font-size:11px;margin-bottom:8px"></div>
+    <div style="background:#21262d;border-radius:4px;height:8px;overflow:hidden;margin-bottom:16px"><div id="render-progress-bar" style="background:linear-gradient(90deg,#1f6feb,#388bfd);height:100%;width:0%;transition:width 0.1s"></div></div>
+    <button id="render-cancel-btn" style="background:#f85149;color:#fff;border:none;padding:6px 18px;border-radius:5px;cursor:pointer;font-size:12px">Cancel</button>
+  </div>`;
+  document.body.appendChild(modal);
+
+  const progressText = modal.querySelector('#render-progress-text');
+  const progressBar = modal.querySelector('#render-progress-bar');
+  const methodText = modal.querySelector('#render-method-text');
+
+  let cancelled = false;
+  modal.querySelector('#render-cancel-btn').addEventListener('click', () => { cancelled = true; });
+
+  _renderToVideoActive = true;
+
+  // Hide camera mesh and helpers during render
+  const wasVisible = mesh.visible;
+  mesh.visible = false;
+  if (_activeCameraHelper) _activeCameraHelper.visible = false;
+  if (_cameraLookAtHelper) _cameraLookAtHelper.visible = false;
+  if (_cameraLookAtLine) _cameraLookAtLine.visible = false;
+  if (_cameraPathLine) _cameraPathLine.visible = false;
+  for (const d of _cameraPathDiamonds) d.visible = false;
+
+  // Hide editor-only visuals: grid lines (keep fill planes), labels, transform gizmo
+  for (const [, g] of gridChunks) g.visible = false;
+  for (const [, s] of gridLabelSprites) s.visible = false;
+  const tcWasVisible = transformControls.visible;
+  transformControls.visible = false;
+
+  // Hide objects that should be invisible in-game (same as playtest)
+  const hiddenForRender = [];
+  for (const m of sceneObjects) {
+    if (m.userData.hiddenInGame || ['light', 'spawn', 'trigger', 'pivot'].includes(m.userData.type)) {
+      if (m.visible || (m.material && m.material.visible)) {
+        hiddenForRender.push({ mesh: m, wasVisible: m.visible, matWasVisible: m.material?.visible, skinWasVisible: m.userData.customSkinGroup?.visible });
+        m.visible = false;
+        if (m.material) m.material.visible = false;
+        if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = false;
+      }
+    }
+  }
+
+  // Save renderer state, resize to output dimensions (modal hides visual change)
+  const savedSize = renderer.getSize(new THREE.Vector2());
+  const savedPixelRatio = renderer.getPixelRatio();
+  renderer.setPixelRatio(1);
+  renderer.setSize(width, height);
+
+  // Full-detail LOD bypass: swap all LOD proxies to full detail for rendering
+  const _renderFullDetail = !!options.fullDetail;
+  const _lodSwappedMeshes = [];
+  if (_renderFullDetail) {
+    for (const m of sceneObjects) {
+      if (m.userData._isImportedModel && m.userData._lodActive) {
+        _lodSwappedMeshes.push(m);
+        setImportedMeshLOD(m, false);
+      }
+    }
+  }
+
+  // Enable preserveDrawingBuffer so frame capture works reliably
+  const gl = renderer.getContext();
+  const glAttribs = gl.getContextAttributes();
+  const hadPreserve = glAttribs && glAttribs.preserveDrawingBuffer;
+
+  let videoBlob = null;
+
+  // ── Scene animation state: snapshot positions before render, restore after ──
+  const _renderAnimateObjects = !!options.animateObjects;
+  const _renderAnimateDaylight = !!options.animateDaylight;
+  const _renderAnimateSkeletons = !!options.animateSkeletons;
+
+  // Snapshot all object transforms so we can restore after render
+  const _renderPosSnapshots = new Map();
+  if (_renderAnimateObjects) {
+    for (const m of sceneObjects) {
+      _renderPosSnapshots.set(m.uuid, {
+        pos: m.position.clone(),
+        quat: m.quaternion.clone(),
+        scale: m.scale.clone(),
+      });
+    }
+    // Start movement paths for objects that have them
+    for (const m of sceneObjects) {
+      const pathCfg = getMeshMovementPathConfig(m);
+      if (pathCfg.enabled && pathCfg.checkpoints.length > 0) {
+        startMovementPath(m, { reset: true });
+      }
+    }
+    // Activate always-active control functions
+    for (const fn of controlFunctions) {
+      if (fn.alwaysActive) {
+        executeControlFunction(fn.name, null, true);
+      }
+    }
+  }
+
+  // Snapshot sun time for daylight restore
+  const _renderSavedSunTime = sunTimeInput ? parseFloat(sunTimeInput.value) : 14;
+  const _renderDayCycleDur = parseFloat(sunDayDurationInput?.value) || SUN_DAY_DURATION_DEFAULT;
+
+  // ── Helper: position camera and render frame to a separate canvas ──
+  // Uses a dedicated WebGL renderer for capture to avoid preserveDrawingBuffer issues.
+  const captureCanvas = document.createElement('canvas');
+  captureCanvas.width = width;
+  captureCanvas.height = height;
+  const captureRenderer = new THREE.WebGLRenderer({
+    canvas: captureCanvas,
+    antialias: width <= 1920,
+    preserveDrawingBuffer: true,
+  });
+  captureRenderer.setPixelRatio(1);
+  captureRenderer.setSize(width, height);
+  captureRenderer.shadowMap.enabled = renderer.shadowMap.enabled;
+  captureRenderer.shadowMap.type = renderer.shadowMap.type;
+  captureRenderer.toneMapping = renderer.toneMapping;
+  captureRenderer.toneMappingExposure = renderer.toneMappingExposure;
+  captureRenderer.outputColorSpace = renderer.outputColorSpace;
+
+  function _renderFrameToCanvas(frame) {
+    const t = frame / fps;
+    const renderDt = 1 / fps;
+
+    // Tick scene animations for this frame
+    if (_renderAnimateObjects) {
+      _simActive = true;
+      updateMovementPathAnimations(renderDt);
+      updateJointAnimations(renderDt);
+      _simActive = false;
+    }
+    if (_renderAnimateSkeletons) {
+      _simActive = true;
+      updateSkeletonAnimations(renderDt);
+      _simActive = false;
+    }
+    if (_renderAnimateDaylight) {
+      let curTime = parseFloat(sunTimeInput?.value) ?? 14;
+      curTime += renderDt * (24 / _renderDayCycleDur);
+      if (curTime >= 24) curTime -= 24;
+      if (sunTimeInput) sunTimeInput.value = curTime;
+      updateSunSky();
+    }
+
+    const result = _interpolateCameraAnimation(cfg, t);
+    if (result) {
+      renderCam.position.copy(result.position);
+      if (result.lookAt) {
+        renderCam.lookAt(result.lookAt);
+      } else if (result.rotation) {
+        renderCam.quaternion.copy(result.rotation);
+      } else {
+        const worldQuat = new THREE.Quaternion();
+        mesh.getWorldQuaternion(worldQuat);
+        renderCam.quaternion.copy(worldQuat);
+      }
+    }
+    renderCam.updateProjectionMatrix();
+    captureRenderer.render(scene, renderCam);
+  }
+
+  // ── Check muxer availability ──
+  if (!_WebmMuxer || !_ArrayBufferTarget) {
+    methodText.textContent = '⚠ Encoder library failed to load — check internet connection';
+    methodText.style.color = '#f85149';
+    // Wait a moment so user can read the message, then clean up
+    await new Promise(r => setTimeout(r, 2500));
+    captureRenderer.dispose();
+    renderer.setPixelRatio(savedPixelRatio);
+    renderer.setSize(savedSize.x, savedSize.y);
+    mesh.visible = wasVisible;
+    if (_activeCameraHelper) _activeCameraHelper.visible = true;
+    if (_cameraLookAtHelper) _cameraLookAtHelper.visible = true;
+    if (_cameraLookAtLine) _cameraLookAtLine.visible = true;
+    if (_cameraPathLine) _cameraPathLine.visible = true;
+    for (const d of _cameraPathDiamonds) d.visible = true;
+    for (const [, g] of gridChunks) g.visible = true;
+    for (const [, s] of gridLabelSprites) s.visible = true;
+    transformControls.visible = tcWasVisible;
+    for (const h of hiddenForRender) {
+      h.mesh.visible = h.wasVisible;
+      if (h.mesh.material) h.mesh.material.visible = h.matWasVisible;
+      if (h.mesh.userData.customSkinGroup) h.mesh.userData.customSkinGroup.visible = h.skinWasVisible !== false;
+    }
+    _renderToVideoActive = false;
+    modal.remove();
+    alert('Video rendering requires the webm-muxer library from CDN. It failed to load when the editor started. Please refresh the page and try again.');
+    return;
+  }
+
+  // ── Determine best codec ──
+  let chosenCodec = null;
+  let muxerCodecId = null;
+  if (typeof VideoEncoder !== 'undefined') {
+    // At high resolutions VP9 compresses better; at lower res VP8 is faster
+    const codecOrder = (width * height > 1920 * 1080)
+      ? [['vp09.00.10.08', 'V_VP9'], ['vp8', 'V_VP8']]
+      : [['vp8', 'V_VP8'], ['vp09.00.10.08', 'V_VP9']];
+    for (const [codec, muxId] of codecOrder) {
+      try {
+        const support = await VideoEncoder.isConfigSupported({
+          codec,
+          width, height,
+          bitrate: 8_000_000,
+          framerate: fps,
+        });
+        if (support.supported) {
+          chosenCodec = codec;
+          muxerCodecId = muxId;
+          break;
+        }
+      } catch (e) { /* try next */ }
+    }
+  }
+
+  // ── Primary path: WebCodecs VideoEncoder with explicit timestamps ──
+  if (chosenCodec) {
+    try {
+      methodText.textContent = `Encoding: WebCodecs (${chosenCodec})`;
+      console.log('[Flame3D Render] WebCodecs:', chosenCodec, width, 'x', height, '@', fps, 'fps,', totalFrames, 'frames');
+
+      const target = new _ArrayBufferTarget();
+      const muxer = new _WebmMuxer({
+        target,
+        video: { codec: muxerCodecId, width, height },
+        type: 'webm',
+      });
+
+      let encoderError = null;
+      const encoder = new VideoEncoder({
+        output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+        error: e => { encoderError = e; console.error('[Flame3D Render] VideoEncoder error:', e); },
+      });
+      encoder.configure({
+        codec: chosenCodec,
+        width, height,
+        bitrate: options.bitrate || Math.max(8_000_000, Math.round(8_000_000 * (width * height) / (1280 * 720) * fps / 30)),
+        framerate: fps,
+        latencyMode: 'quality',
+      });
+
+      const frameDurationUs = Math.round(1_000_000 / fps);
+      const keyFrameInterval = Math.max(30, fps * 2);
+
+      for (let frame = 0; frame < totalFrames; frame++) {
+        if (cancelled) break;
+        if (encoderError) throw encoderError;
+
+        _renderFrameToCanvas(frame);
+
+        // Capture VideoFrame from the dedicated capture canvas (preserveDrawingBuffer=true)
+        const vf = new VideoFrame(captureCanvas, {
+          timestamp: frame * frameDurationUs,
+          duration: frameDurationUs,
+        });
+        encoder.encode(vf, { keyFrame: frame % keyFrameInterval === 0 });
+        vf.close();
+
+        // Let encoder queue drain naturally
+        while (encoder.encodeQueueSize > 10) {
+          await new Promise(r => setTimeout(r, 1));
+        }
+
+        if (frame % 10 === 0 || frame === totalFrames - 1) {
+          progressText.textContent = `Frame ${frame + 1} / ${totalFrames}`;
+          progressBar.style.width = ((frame + 1) / totalFrames * 100) + '%';
+          await new Promise(r => setTimeout(r, 0));
+        }
+      }
+
+      if (encoderError) throw encoderError;
+      if (!cancelled) {
+        progressText.textContent = 'Finalizing…';
+        await encoder.flush();
+        encoder.close();
+        muxer.finalize();
+        videoBlob = new Blob([target.buffer], { type: 'video/webm' });
+        console.log('[Flame3D Render] WebCodecs complete. Size:', videoBlob.size, 'bytes');
+        if (videoBlob.size < 1000) {
+          console.warn('[Flame3D Render] Blob suspiciously small, discarding');
+          videoBlob = null;
+        }
+      } else {
+        encoder.close();
+      }
+    } catch (e) {
+      console.warn('[Flame3D Render] WebCodecs failed:', e);
+      methodText.textContent = '⚠ WebCodecs failed, trying fallback…';
+      methodText.style.color = '#f0883e';
+      videoBlob = null;
+    }
+  }
+
+  // ── Error handling if encoding failed ──
+  if (!videoBlob && !cancelled) {
+    if (!chosenCodec) {
+      methodText.textContent = '⚠ Browser does not support WebCodecs video encoding';
+      methodText.style.color = '#f85149';
+      await new Promise(r => setTimeout(r, 1500));
+      alert('Video rendering requires a browser with WebCodecs support (Chrome 94+, Edge 94+, or Opera 80+).');
+    } else {
+      methodText.textContent = '⚠ Encoding failed — please try again or use a different resolution';
+      methodText.style.color = '#f85149';
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+
+  // Cleanup capture renderer
+  captureRenderer.dispose();
+
+  // Restore main renderer to original size
+  renderer.setPixelRatio(savedPixelRatio);
+  renderer.setSize(savedSize.x, savedSize.y);
+
+  // Restore camera mesh and helpers visibility
+  mesh.visible = wasVisible;
+  if (_activeCameraHelper) _activeCameraHelper.visible = true;
+  if (_cameraLookAtHelper) _cameraLookAtHelper.visible = true;
+  if (_cameraLookAtLine) _cameraLookAtLine.visible = true;
+  if (_cameraPathLine) _cameraPathLine.visible = true;
+  for (const d of _cameraPathDiamonds) d.visible = true;
+
+  // Restore editor visuals
+  for (const [, g] of gridChunks) g.visible = true;
+  for (const [, s] of gridLabelSprites) s.visible = true;
+  transformControls.visible = tcWasVisible;
+
+  // Restore hidden game objects
+  for (const h of hiddenForRender) {
+    h.mesh.visible = h.wasVisible;
+    if (h.mesh.material) h.mesh.material.visible = h.matWasVisible;
+    if (h.mesh.userData.customSkinGroup) h.mesh.userData.customSkinGroup.visible = h.skinWasVisible !== false;
+  }
+
+  // Restore LOD state for meshes that were swapped to full detail for rendering
+  for (const m of _lodSwappedMeshes) {
+    setImportedMeshLOD(m, true);
+  }
+
+  // Restore scene animation state: object transforms + sun time
+  if (_renderAnimateObjects) {
+    for (const m of sceneObjects) {
+      const snap = _renderPosSnapshots.get(m.uuid);
+      if (snap) {
+        m.position.copy(snap.pos);
+        m.quaternion.copy(snap.quat);
+        m.scale.copy(snap.scale);
+      }
+    }
+    _movementPathStates.clear();
+    _controlFunctionStates.clear();
+  }
+  if (_renderAnimateDaylight) {
+    if (sunTimeInput) sunTimeInput.value = _renderSavedSunTime;
+    updateSunSky();
+  }
+
+  _renderToVideoActive = false;
+  modal.remove();
+
+  if (cancelled || !videoBlob) return;
+
+  // Trigger download
+  const url = URL.createObjectURL(videoBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `flame3d-render-${Date.now()}.webm`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+// ─── Camera Render Dialog ────────────────────────────────────────────────────
+function showRenderToVideoDialog(mesh) {
+  if (!mesh || mesh.userData.type !== 'camera') return;
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+  const clipInfo = _getActiveClipInfo(cfg);
+
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;z-index:99998;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);';
+  modal.innerHTML = `<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px 28px;min-width:320px;box-shadow:0 8px 32px rgba(0,0,0,0.5)">
+    <div style="color:#e6edf3;font-size:15px;font-weight:600;margin-bottom:16px">🎬 Render to Video</div>
+    <div style="color:#8b949e;font-size:11px;margin-bottom:4px">Clip: ${cfg.currentClip || '—'} · ${clipInfo.keyframes.length} keyframes · Speed: ${clipInfo.speed} u/s</div>
+    <div style="color:#58a6ff;font-size:12px;font-weight:600;margin-bottom:10px">Duration: ${clipInfo.duration.toFixed(2)}s</div>
+    <div style="margin:10px 0">
+      <label style="color:#e6edf3;font-size:12px;display:block;margin-bottom:6px">Resolution</label>
+      <select id="render-res" style="background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:4px;padding:4px 8px;font-size:12px;width:100%">
+        <option value="1280" selected>720p (1280×720)</option>
+        <option value="1920">1080p (1920×1080)</option>
+        <option value="3840">4K (3840×2160)</option>
+      </select>
+    </div>
+    <div style="margin:10px 0">
+      <label style="color:#e6edf3;font-size:12px;display:block;margin-bottom:6px">FPS</label>
+      <select id="render-fps" style="background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:4px;padding:4px 8px;font-size:12px;width:100%">
+        <option value="24">24 fps</option>
+        <option value="30" selected>30 fps</option>
+        <option value="60">60 fps</option>
+      </select>
+    </div>
+    <div style="margin:10px 0;display:flex;flex-direction:column;gap:6px">
+      <label style="color:#e6edf3;font-size:12px;font-weight:600">Scene Animation</label>
+      <label style="color:#8b949e;font-size:11px;display:flex;align-items:center;gap:6px;cursor:pointer"><input id="render-animate-objects" type="checkbox" checked/> Animate objects (movement paths &amp; control functions)</label>
+      <label style="color:#8b949e;font-size:11px;display:flex;align-items:center;gap:6px;cursor:pointer"><input id="render-animate-daylight" type="checkbox" ${sunDayCycleInput?.checked ? 'checked' : ''}/> Animate daylight cycle</label>
+      <label style="color:#8b949e;font-size:11px;display:flex;align-items:center;gap:6px;cursor:pointer"><input id="render-animate-skeletons" type="checkbox" checked/> Animate skeletons</label>
+      <label style="color:#8b949e;font-size:11px;display:flex;align-items:center;gap:6px;cursor:pointer"><input id="render-full-detail" type="checkbox" checked/> Render at full detail (ignore LOD proxies)</label>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:18px;justify-content:flex-end">
+      <button id="render-cancel" style="background:#21262d;color:#e6edf3;border:1px solid #30363d;padding:6px 16px;border-radius:5px;cursor:pointer;font-size:12px">Cancel</button>
+      <button id="render-start" style="background:#1f6feb;color:#fff;border:none;padding:6px 16px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600">🎬 Render</button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+
+  modal.querySelector('#render-cancel').addEventListener('click', () => modal.remove());
+  modal.querySelector('#render-start').addEventListener('click', () => {
+    const w = parseInt(modal.querySelector('#render-res').value);
+    const fps = parseInt(modal.querySelector('#render-fps').value);
+    const animateObjects = !!modal.querySelector('#render-animate-objects')?.checked;
+    const animateDaylight = !!modal.querySelector('#render-animate-daylight')?.checked;
+    const animateSkeletons = !!modal.querySelector('#render-animate-skeletons')?.checked;
+    const fullDetail = !!modal.querySelector('#render-full-detail')?.checked;
+    modal.remove();
+    renderCameraToVideo(mesh, { width: w, fps, animateObjects, animateDaylight, animateSkeletons, fullDetail });
+  });
 }
 
 // ─── NPC Config ──────────────────────────────────────────────────────────────
@@ -7735,22 +9140,47 @@ let _primaryScaleBefore = new THREE.Vector3();
 let _primaryOffsetBefore = new THREE.Vector3();
 let _extraOffsetsBefore = [];
 
-function syncScaleSideUI() {
-  if (scaleSideXSelect) scaleSideXSelect.value = state.scaleSides.x;
-  if (scaleSideYSelect) scaleSideYSelect.value = state.scaleSides.y;
-  if (scaleSideZSelect) scaleSideZSelect.value = state.scaleSides.z;
+// Group gizmo helper — positions the gizmo at the center of all selected objects
+const _groupPivotHelper = new THREE.Object3D();
+_groupPivotHelper.visible = false;
+scene.add(_groupPivotHelper);
+let _isGroupGizmo = false;
+let _allTransformBefore = [];
+let _allOffsetsBefore = [];
+let _helperPosBefore = new THREE.Vector3();
+let _helperQuatBefore = new THREE.Quaternion();
+let _helperScaleBefore = new THREE.Vector3(1, 1, 1);
+
+function _attachGroupGizmo() {
+  const all = state.selectedObject ? [state.selectedObject, ...state.extraSelected] : [];
+  if (all.length <= 1) {
+    _isGroupGizmo = false;
+    if (state.selectedObject) transformControls.attach(state.selectedObject);
+    return;
+  }
+  _groupPivotHelper.position.set(0, 0, 0);
+  for (const m of all) _groupPivotHelper.position.add(m.position);
+  _groupPivotHelper.position.multiplyScalar(1 / all.length);
+  _groupPivotHelper.quaternion.identity();
+  _groupPivotHelper.scale.set(1, 1, 1);
+  transformControls.attach(_groupPivotHelper);
+  transformControls.visible = true;
+  _isGroupGizmo = true;
 }
 
-function toggleScaleSide(axisKey) {
-  const k = axisKey.toLowerCase();
-  if (!['x', 'y', 'z'].includes(k)) return;
-  state.scaleSides[k] = state.scaleSides[k] === 'pos' ? 'neg' : 'pos';
-  syncScaleSideUI();
-  refreshStatus();
-}
+
 
 transformControls.addEventListener('mouseDown', () => {
-  if (state.selectedObject) {
+  if (_isGroupGizmo && state.selectedObject) {
+    _helperPosBefore.copy(_groupPivotHelper.position);
+    _helperQuatBefore.copy(_groupPivotHelper.quaternion);
+    _helperScaleBefore.copy(_groupPivotHelper.scale);
+    const all = [state.selectedObject, ...state.extraSelected];
+    _allTransformBefore = all.map(m => ({ mesh: m, trs: captureTRS(m) }));
+    _allOffsetsBefore = all.map(m => m.position.clone().sub(_groupPivotHelper.position));
+    transformBefore = _allTransformBefore[0].trs;
+    extraTransformBefore = state.extraSelected.map(m => captureTRS(m));
+  } else if (state.selectedObject) {
     transformBefore = captureTRS(state.selectedObject);
     _pivotBefore.copy(state.selectedObject.position);
     _primaryQuatBefore.copy(state.selectedObject.quaternion);
@@ -7769,7 +9199,19 @@ transformControls.addEventListener('mouseDown', () => {
   }
 });
 transformControls.addEventListener('mouseUp', () => {
-  if (state.selectedObject && transformBefore) {
+  if (_isGroupGizmo && _allTransformBefore.length) {
+    for (const entry of _allTransformBefore) {
+      const after = captureTRS(entry.mesh);
+      if (!trsEqual(entry.trs, after))
+        pushUndo({ type: 'transform', mesh: entry.mesh, before: entry.trs, after });
+    }
+    _allTransformBefore = [];
+    _allOffsetsBefore = [];
+    transformBefore = null;
+    extraTransformBefore = [];
+    _attachGroupGizmo();
+    if (typeof refreshObjLib === 'function') refreshObjLib();
+  } else if (state.selectedObject && transformBefore) {
     const m = state.selectedObject;
     const after = captureTRS(m);
     const moved = !trsEqual(transformBefore, after);
@@ -7818,30 +9260,45 @@ transformControls.addEventListener('mouseUp', () => {
 transformControls.addEventListener('objectChange', () => {
   if (!state.selectedObject) return;
 
-  // Per-axis side scaling (+/- per axis)
-  if (state.transformMode === 'scale' && transformBefore && state.extraSelected.length === 0) {
-    const m = state.selectedObject;
-    if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
-    const bb = m.geometry.boundingBox;
-    const axis = transformControls.axis; // 'X','Y','Z','XY','XZ','YZ','XYZ' etc.
-    if (axis) {
-      const center = bb.getCenter(new THREE.Vector3());
-      const localAnchor = center.clone();
-      if (axis.includes('X')) localAnchor.x = state.scaleSides.x === 'pos' ? bb.min.x : bb.max.x;
-      if (axis.includes('Y')) localAnchor.y = state.scaleSides.y === 'pos' ? bb.min.y : bb.max.y;
-      if (axis.includes('Z')) localAnchor.z = state.scaleSides.z === 'pos' ? bb.min.z : bb.max.z;
-
-      const beforeM = new THREE.Matrix4().compose(transformBefore.pos, transformBefore.quat, transformBefore.sca);
-      const afterM = new THREE.Matrix4().compose(m.position, m.quaternion, m.scale);
-      const worldBefore = localAnchor.clone().applyMatrix4(beforeM);
-      const worldAfter = localAnchor.clone().applyMatrix4(afterM);
-      m.position.add(worldBefore.sub(worldAfter));
+  // Group gizmo: transform all objects from the center pivot helper
+  if (_isGroupGizmo && _allTransformBefore.length) {
+    if (state.transformMode === 'rotate') {
+      const deltaQ = _groupPivotHelper.quaternion.clone().multiply(_helperQuatBefore.clone().invert());
+      for (let i = 0; i < _allTransformBefore.length; i++) {
+        const entry = _allTransformBefore[i];
+        const off = _allOffsetsBefore[i];
+        if (!off) continue;
+        entry.mesh.position.copy(off).applyQuaternion(deltaQ).add(_helperPosBefore);
+        entry.mesh.quaternion.copy(deltaQ).multiply(entry.trs.quat);
+      }
+    } else if (state.transformMode === 'scale') {
+      const sx = _helperScaleBefore.x !== 0 ? (_groupPivotHelper.scale.x / _helperScaleBefore.x) : 1;
+      const sy = _helperScaleBefore.y !== 0 ? (_groupPivotHelper.scale.y / _helperScaleBefore.y) : 1;
+      const sz = _helperScaleBefore.z !== 0 ? (_groupPivotHelper.scale.z / _helperScaleBefore.z) : 1;
+      for (const entry of _allTransformBefore) {
+        entry.mesh.position.set(
+          _helperPosBefore.x + (entry.trs.pos.x - _helperPosBefore.x) * sx,
+          _helperPosBefore.y + (entry.trs.pos.y - _helperPosBefore.y) * sy,
+          _helperPosBefore.z + (entry.trs.pos.z - _helperPosBefore.z) * sz,
+        );
+        entry.mesh.scale.set(entry.trs.sca.x * sx, entry.trs.sca.y * sy, entry.trs.sca.z * sz);
+      }
+    } else {
+      const delta = _groupPivotHelper.position.clone().sub(_helperPosBefore);
+      for (const entry of _allTransformBefore) {
+        entry.mesh.position.copy(entry.trs.pos).add(delta);
+      }
     }
+    selBox.setFromObject(state.selectedObject);
+    rebuildExtraBoxes();
+    refreshProps();
+    refreshStatus();
+    return;
   }
 
   selBox.setFromObject(state.selectedObject);
 
-  // Apply delta to extra selected objects
+  // Apply delta to extra selected objects (non-group-gizmo fallback)
   if (state.extraSelected.length > 0 && transformBefore) {
     if (state.transformMode === 'rotate') {
       // Rotate the whole selection as one rigid block around group pivot.
@@ -7866,9 +9323,6 @@ transformControls.addEventListener('objectChange', () => {
       const sz = _primaryScaleBefore.z !== 0 ? (state.selectedObject.scale.z / _primaryScaleBefore.z) : 1;
       const axis = transformControls.axis || 'XYZ';
       const pivot = _groupBoundsBefore.getCenter(new THREE.Vector3());
-      if (axis.includes('X')) pivot.x = state.scaleSides.x === 'pos' ? _groupBoundsBefore.min.x : _groupBoundsBefore.max.x;
-      if (axis.includes('Y')) pivot.y = state.scaleSides.y === 'pos' ? _groupBoundsBefore.min.y : _groupBoundsBefore.max.y;
-      if (axis.includes('Z')) pivot.z = state.scaleSides.z === 'pos' ? _groupBoundsBefore.min.z : _groupBoundsBefore.max.z;
 
       const scaleSelectedFromPivot = (mesh, before) => {
         if (!before) return;
@@ -8053,7 +9507,14 @@ function selectObject(obj) {
   }
 
   if (state.selectedObject) unhighlight(state.selectedObject);
+  // Clean up camera helpers from previous selection
+  _removeCameraFrustumHelper();
+  _removeCameraLookAtHelper();
+  _clearCameraPathPreview();
+  _removeCameraPip();
+  stopCameraAnimationPreview();
   state.selectedObject = obj;
+  _isGroupGizmo = false;
   if (obj) {
     highlight(obj);
     selBox.setFromObject(obj); selBox.visible = true;
@@ -8068,6 +9529,7 @@ function selectObject(obj) {
   refreshSelectedPathPreview();
   refreshStatus();
   if (typeof refreshObjLib === 'function') refreshObjLib();
+  if (typeof refreshOutliner === 'function') refreshOutliner();
 }
 
 function selectObjects(meshes) {
@@ -8087,8 +9549,10 @@ function selectObjects(meshes) {
   }
 
   rebuildExtraBoxes();
+  _attachGroupGizmo();
   refreshProps();
   refreshStatus();
+  if (typeof refreshOutliner === 'function') refreshOutliner();
 }
 
 function selectAllObjects() {
@@ -8109,6 +9573,7 @@ function toggleMultiSelect(obj) {
     if (extraSelBoxes[idx]) extraSelBoxes[idx].visible = false;
     // Rebuild extra box visuals
     rebuildExtraBoxes();
+    _attachGroupGizmo();
     refreshProps();
     refreshStatus();
     return;
@@ -8119,6 +9584,7 @@ function toggleMultiSelect(obj) {
   state.extraSelected.push(obj);
   highlight(obj);
   rebuildExtraBoxes();
+  _attachGroupGizmo();
   refreshProps();
   refreshStatus();
 }
@@ -8174,6 +9640,7 @@ function selectEditorGroup(obj) {
     highlight(m);
   }
   rebuildExtraBoxes();
+  _attachGroupGizmo();
 }
 
 function groupSelected() {
@@ -8193,6 +9660,206 @@ function ungroupSelected() {
   for (const e of entries) delete e.mesh.userData.editorGroupId;
   pushUndo({ type: 'editor-group', entries });
   refreshProps();
+}
+
+// ─── Merge / Unmerge Selected ────────────────────────────────────────────────
+const _MERGE_SKIP_TYPES = new Set(['light','spawn','checkpoint','trigger','keypad','pivot','joint','skeleton','teleport','npc','camera','screen','text','text3d']);
+
+function mergeSelectedObjects() {
+  const all = getAllSelected();
+  const mergeable = all.filter(m => m.isMesh && m.geometry && !_MERGE_SKIP_TYPES.has(m.userData.type));
+  if (mergeable.length < 2) return;
+
+  // Serialize originals so we can unmerge later
+  const origSerialized = mergeable.map(m => serializeSingleObject(m));
+
+  // Collect total vertex count (work with non-indexed geometry)
+  let totalVerts = 0;
+  const converted = [];
+  for (const m of mergeable) {
+    let geo = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone();
+    // Bake world transform into vertex positions
+    m.updateMatrixWorld(true);
+    geo.applyMatrix4(m.matrixWorld);
+    if (!geo.attributes.normal) geo.computeVertexNormals();
+    converted.push({ geo, color: m.material?.color ? m.material.color.clone() : new THREE.Color(0x888888) });
+    totalVerts += geo.attributes.position.count;
+  }
+
+  // Build merged arrays
+  const positions = new Float32Array(totalVerts * 3);
+  const normals   = new Float32Array(totalVerts * 3);
+  const colors    = new Float32Array(totalVerts * 3);
+  let offset = 0;
+  for (const { geo, color } of converted) {
+    const pos = geo.attributes.position;
+    const nrm = geo.attributes.normal;
+    const count = pos.count;
+    positions.set(pos.array, offset * 3);
+    if (nrm) normals.set(nrm.array, offset * 3);
+    // Fill vertex colors from the original material color
+    for (let i = 0; i < count; i++) {
+      colors[(offset + i) * 3]     = color.r;
+      colors[(offset + i) * 3 + 1] = color.g;
+      colors[(offset + i) * 3 + 2] = color.b;
+    }
+    offset += count;
+    geo.dispose();
+  }
+
+  const mergedGeo = new THREE.BufferGeometry();
+  mergedGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  mergedGeo.setAttribute('normal',   new THREE.BufferAttribute(normals, 3));
+  mergedGeo.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+  mergedGeo.computeBoundingBox();
+  mergedGeo.computeBoundingSphere();
+
+  const mergedMat = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.7,
+    metalness: 0.1,
+  });
+  const mergedMesh = new THREE.Mesh(mergedGeo, mergedMat);
+  mergedMesh.castShadow = true;
+  mergedMesh.receiveShadow = true;
+  mergedMesh.userData.type = 'cube'; // treat as a generic mesh
+  mergedMesh.userData.solid = true;
+  mergedMesh.userData.collisionMode = 'aabb';
+  mergedMesh.userData.hitboxConfig = createDefaultHitboxConfig();
+  mergedMesh.userData.solidness = 1;
+  mergedMesh.userData._baseMaterialTransparent = false;
+  mergedMesh.userData.opacity = 1;
+  mergedMesh.userData.traction = false;
+  mergedMesh.userData.groups = ['default'];
+  mergedMesh.userData.group = 'default';
+  mergedMesh.userData.world = activeWorldId;
+  mergedMesh.userData.movementPath = createDefaultMovementPathConfig();
+  mergedMesh.userData.switchConfig = createDefaultSwitchConfig();
+  mergedMesh.userData._hasCustomGeometry = true;
+  // Store originals for unmerge
+  mergedMesh.userData._mergedOriginals = origSerialized;
+  mergedMesh.userData.label = `Merged (${mergeable.length})`;
+
+  // Build undo: remove originals + add merged
+  const ops = [];
+  selectObject(null);
+  for (const m of mergeable) {
+    removeFromScene(m);
+    ops.push({ type: 'delete', mesh: m });
+  }
+  addToScene(mergedMesh);
+  ops.push({ type: 'add', mesh: mergedMesh });
+  pushUndo({ type: 'compound', ops });
+  selectObject(mergedMesh);
+  refreshStatus();
+}
+
+function unmergeSelectedObject() {
+  const obj = state.selectedObject;
+  if (!obj || !obj.userData._mergedOriginals) return;
+
+  const origData = obj.userData._mergedOriginals;
+  const ops = [];
+  selectObject(null);
+  removeFromScene(obj);
+  ops.push({ type: 'delete', mesh: obj });
+
+  const restored = [];
+  for (const d of origData) {
+    const mesh = deserializeObject(d);
+    if (mesh) {
+      addToScene(mesh);
+      ops.push({ type: 'add', mesh });
+      restored.push(mesh);
+    }
+  }
+  pushUndo({ type: 'compound', ops });
+  if (restored.length) selectObjects(restored);
+  refreshStatus();
+}
+
+// ─── Auto-Batch (Instance Duplicates) ────────────────────────────────────────
+let _batchedInstances = [];  // track batched groups for unbatching
+
+function autoBatchScene() {
+  // Group scene objects by type + color + scale signature
+  const groups = new Map();
+  for (const m of sceneObjects) {
+    if (_MERGE_SKIP_TYPES.has(m.userData.type)) continue;
+    if (!m.isMesh || !m.geometry) continue;
+    if (m.userData._isBatchInstance) continue; // already batched
+    const colHex = m.material?.color ? m.material.color.getHexString() : '888888';
+    const sKey = m.scale.toArray().map(v => v.toFixed(3)).join(',');
+    const key = `${m.userData.type}|${colHex}|${sKey}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(m);
+  }
+
+  let batchedCount = 0;
+  for (const [key, meshes] of groups) {
+    if (meshes.length < 5) continue; // not worth batching small groups
+
+    const templateMesh = meshes[0];
+    const geo = templateMesh.geometry;
+    const mat = templateMesh.material.clone();
+    const inst = new THREE.InstancedMesh(geo, mat, meshes.length);
+    inst.castShadow = true;
+    inst.receiveShadow = true;
+
+    const _mat4 = new THREE.Matrix4();
+    for (let i = 0; i < meshes.length; i++) {
+      meshes[i].updateMatrixWorld(true);
+      _mat4.copy(meshes[i].matrixWorld);
+      inst.setMatrixAt(i, _mat4);
+    }
+    inst.instanceMatrix.needsUpdate = true;
+    inst.userData.type = templateMesh.userData.type;
+    inst.userData._isBatchInstance = true;
+    inst.userData.solid = templateMesh.userData.solid;
+    inst.userData.world = activeWorldId;
+
+    // Remove originals from scene (but keep references)
+    for (const m of meshes) {
+      const idx = sceneObjects.indexOf(m);
+      if (idx >= 0) sceneObjects.splice(idx, 1);
+      scene.remove(m);
+    }
+
+    sceneObjects.push(inst);
+    scene.add(inst);
+    _batchedInstances.push({ instancedMesh: inst, originals: meshes, key });
+    batchedCount += meshes.length;
+  }
+
+  if (typeof refreshObjLib === 'function') refreshObjLib();
+  if (typeof refreshOutliner === 'function') refreshOutliner();
+  refreshStatus();
+  return batchedCount;
+}
+
+function unbatchAll() {
+  for (const batch of _batchedInstances) {
+    const idx = sceneObjects.indexOf(batch.instancedMesh);
+    if (idx >= 0) sceneObjects.splice(idx, 1);
+    scene.remove(batch.instancedMesh);
+    batch.instancedMesh.dispose();
+    for (const m of batch.originals) {
+      sceneObjects.push(m);
+      scene.add(m);
+    }
+  }
+  _batchedInstances.length = 0;
+  if (typeof refreshObjLib === 'function') refreshObjLib();
+  if (typeof refreshOutliner === 'function') refreshOutliner();
+  refreshStatus();
+}
+
+// ─── Static Object Flag ─────────────────────────────────────────────────────
+function setObjectStatic(mesh, isStatic) {
+  if (!mesh) return;
+  mesh.userData._isStatic = isStatic;
+  mesh.matrixAutoUpdate = !isStatic;
+  if (isStatic) mesh.updateMatrix();
 }
 
 function highlight(mesh) {
@@ -8261,7 +9928,9 @@ function addToScene(mesh) {
   if (!mesh.userData._placedOrder) mesh.userData._placedOrder = _nextPlacedOrder++;
   sceneObjects.push(mesh);
   scene.add(mesh);
+  markSpatialDirty();
   if (typeof refreshObjLib === 'function') refreshObjLib();
+  if (typeof refreshOutliner === 'function') refreshOutliner();
   markRestoreDirty();
 }
 function removeFromScene(mesh) {
@@ -8269,7 +9938,9 @@ function removeFromScene(mesh) {
   if (i >= 0) sceneObjects.splice(i, 1);
   if (state.selectedObject === mesh) selectObject(null);
   scene.remove(mesh);
+  markSpatialDirty();
   if (typeof refreshObjLib === 'function') refreshObjLib();
+  if (typeof refreshOutliner === 'function') refreshOutliner();
   markRestoreDirty();
 }
 
@@ -8526,6 +10197,7 @@ function ensureGhost(type) {
   }
   if (state.cloneScale) ghost.scale.copy(state.cloneScale);
   else ghost.scale.set(1, 1, 1);
+  ghost.rotation.y = state.placeRotationY;
 }
 function removeGhost() {
   if (ghost) {
@@ -8643,6 +10315,7 @@ function placeObject(pos) {
     opacity: state.placeOpacity,
   });
   mesh.position.copy(pos);
+  if (state.placeRotationY) mesh.rotation.y = state.placeRotationY;
   if (state.cloneScale) mesh.scale.copy(state.cloneScale);
   addToScene(mesh);
   pushUndo({ type: 'add', mesh });
@@ -8889,6 +10562,9 @@ function saveSelectionAsCustomObject(name) {
     name: templateName,
     objects,
     color: all[0].material?.color ? all[0].material.color.getHex() : 0x888888,
+    type: 'native',
+    dateAdded: Date.now(),
+    tags: [],
   };
   customObjectTemplates.push(template);
   refreshCustomObjectUI();
@@ -8931,20 +10607,49 @@ function deleteCustomTemplate(templateId) {
 }
 
 function serializeCustomObjectTemplates() {
-  return customObjectTemplates.map(t => ({ ...t, objects: t.objects.map(o => ({ ...o })) }));
+  return customObjectTemplates.map(t => {
+    const base = { ...t, objects: t.objects.map(o => ({ ...o })) };
+    // For imported models, include geometry/material data but skip non-serializable fields
+    if (t.type === 'imported') {
+      base._importedGeometries = t._importedGeometries;
+      base._importedMaterials = t._importedMaterials;
+    }
+    // Remove runtime-only fields
+    delete base._originalArrayBuffer;
+    return base;
+  });
 }
 
 function loadCustomObjectTemplates(arr) {
   customObjectTemplates.length = 0;
   if (!Array.isArray(arr)) return;
   for (const t of arr) {
-    customObjectTemplates.push({
+    const entry = {
       id: t.id || 'ct_' + (_nextCustomTemplateId++),
       name: t.name || 'Custom',
       objects: Array.isArray(t.objects) ? t.objects : [],
       color: t.color ?? 0x888888,
-    });
-    const numId = parseInt(String(t.id).replace('ct_', ''), 10);
+      type: t.type || 'native',
+      dateAdded: t.dateAdded || 0,
+      tags: Array.isArray(t.tags) ? t.tags : [],
+      triangleCount: t.triangleCount || 0,
+    };
+    // For imported models, restore additional fields
+    if (t.type === 'imported') {
+      entry.isImported = true;
+      entry.importedModelId = t.importedModelId || t.id;
+      entry.meshCount = t.meshCount || 0;
+      entry._importedGeometries = t._importedGeometries || [];
+      entry._importedMaterials = t._importedMaterials || [];
+      // Attempt to reload model blob from IndexedDB
+      if (entry.importedModelId) {
+        _loadImportedModelBlob(entry.importedModelId).then(blob => {
+          if (blob) _importedModelBlobStore.set(entry.importedModelId, blob);
+        }).catch(() => {});
+      }
+    }
+    customObjectTemplates.push(entry);
+    const numId = parseInt(String(entry.id).replace('ct_', ''), 10);
     if (Number.isFinite(numId) && numId >= _nextCustomTemplateId) _nextCustomTemplateId = numId + 1;
   }
   refreshCustomObjectUI();
@@ -8954,27 +10659,79 @@ function refreshCustomObjectUI() {
   const container = document.getElementById('custom-objects-list');
   if (!container) return;
   container.innerHTML = '';
-  if (!customObjectTemplates.length) {
-    container.innerHTML = '<div style="font-size:10px;color:var(--muted);padding:4px 8px">No custom objects saved yet.<br>Select objects and click "Save as Custom".</div>';
+
+  // Filter by search
+  const search = (_customObjectSearch || '').trim().toLowerCase();
+  let filtered = customObjectTemplates.filter(t => {
+    if (!search) return true;
+    if (t.name.toLowerCase().includes(search)) return true;
+    if (t.tags?.some(tag => tag.toLowerCase().includes(search))) return true;
+    return false;
+  });
+
+  // Sort
+  const sort = _customObjectSort;
+  filtered.sort((a, b) => {
+    switch (sort) {
+      case 'name-asc': return (a.name || '').localeCompare(b.name || '');
+      case 'name-desc': return (b.name || '').localeCompare(a.name || '');
+      case 'oldest': return (a.dateAdded || 0) - (b.dateAdded || 0);
+      case 'objects': return (b.objects?.length || b.meshCount || 0) - (a.objects?.length || a.meshCount || 0);
+      case 'triangles': return (_countTemplateTriangles(b)) - (_countTemplateTriangles(a));
+      case 'newest': default: return (b.dateAdded || 0) - (a.dateAdded || 0);
+    }
+  });
+
+  if (!filtered.length) {
+    container.innerHTML = customObjectTemplates.length
+      ? '<div style="font-size:10px;color:var(--muted);padding:4px 8px">No matching custom objects.</div>'
+      : '<div style="font-size:10px;color:var(--muted);padding:4px 8px">No custom objects saved yet.<br>Select objects and click "Save as Custom", or import a 3D model.</div>';
     return;
   }
-  for (const t of customObjectTemplates) {
+
+  for (const t of filtered) {
     const div = document.createElement('div');
     div.className = 'custom-tpl-item';
-    div.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 8px;cursor:pointer;border-radius:4px;font-size:11px;background:#111821;border:1px solid #1d2430;margin-bottom:3px;';
+    div.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 8px;cursor:pointer;border-radius:4px;font-size:11px;background:#111821;border:1px solid #1d2430;margin-bottom:3px;flex-wrap:wrap;';
     const colorHex = '#' + (t.color ?? 0x888888).toString(16).padStart(6, '0');
+    const isImported = t.type === 'imported';
+    const triCount = _countTemplateTriangles(t);
+    const countLabel = isImported
+      ? `${t.meshCount || 0} mesh${(t.meshCount || 0) !== 1 ? 'es' : ''}`
+      : `${t.objects.length} obj${t.objects.length !== 1 ? 's' : ''}`;
+    const triLabel = triCount > 0 ? ` \u00b7 ${triCount >= 1000 ? (triCount / 1000).toFixed(1) + 'k' : triCount} tris` : '';
+    const typeIcon = isImported ? '\ud83d\udce6' : '\ud83d\udd27';
+    const warnIcon = triCount >= PERF_CRITICAL_TRIANGLE_THRESHOLD ? ' \u26a0\ufe0f' : (triCount >= PERF_WARN_TRIANGLE_THRESHOLD ? ' \u26a1' : '');
+    const tagHtml = t.tags?.length ? `<div style="width:100%;display:flex;gap:3px;flex-wrap:wrap;margin-top:2px">${t.tags.map(tag => `<span style="font-size:8px;padding:1px 4px;background:#1d2a3a;border-radius:2px;color:#58a6ff">${escapeHtml(tag)}</span>`).join('')}</div>` : '';
+
     div.innerHTML = `
       <span style="display:inline-block;width:18px;height:18px;border-radius:3px;background:${colorHex};flex-shrink:0"></span>
-      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(t.name)} <span style="color:#8b949e">(${t.objects.length})</span></span>
-      <button class="ct-place-btn" title="Place this custom object" style="font-size:10px;padding:1px 5px;cursor:pointer">⊕</button>
-      <button class="ct-del-btn" title="Delete template" style="font-size:10px;padding:1px 5px;cursor:pointer;color:#f85149">✕</button>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${typeIcon} ${escapeHtml(t.name)} <span style="color:#8b949e">(${countLabel}${triLabel})${warnIcon}</span></span>
+      <button class="ct-place-btn" title="Place this object" style="font-size:10px;padding:1px 5px;cursor:pointer">\u2295</button>
+      <button class="ct-tag-btn" title="Edit tags" style="font-size:10px;padding:1px 5px;cursor:pointer">\ud83c\udff7\ufe0f</button>
+      <button class="ct-del-btn" title="Delete template" style="font-size:10px;padding:1px 5px;cursor:pointer;color:#f85149">\u2715</button>
+      ${tagHtml}
     `;
     div.querySelector('.ct-place-btn').addEventListener('click', (ev) => {
       ev.stopPropagation();
-      state._placingCustomTemplate = t.id;
-      state.mode = 'place';
-      if (modeSelect) modeSelect.value = 'place';
-      refreshStatus();
+      if (isImported) {
+        const target = new THREE.Vector3(0, 0, -5).applyQuaternion(editorCam.quaternion).add(editorCam.position);
+        placeImportedTemplate(t.id, target);
+      } else {
+        state._placingCustomTemplate = t.id;
+        state.mode = 'place';
+        if (modeSelect) modeSelect.value = 'place';
+        refreshStatus();
+      }
+    });
+    div.querySelector('.ct-tag-btn').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const currentTags = (t.tags || []).join(', ');
+      const newTags = prompt('Tags (comma-separated):', currentTags);
+      if (newTags === null) return;
+      t.tags = newTags.split(',').map(s => s.trim()).filter(Boolean);
+      refreshCustomObjectUI();
+      markRestoreDirty();
     });
     div.querySelector('.ct-del-btn').addEventListener('click', (ev) => {
       ev.stopPropagation();
@@ -8982,6 +10739,389 @@ function refreshCustomObjectUI() {
     });
     container.appendChild(div);
   }
+}
+// ─── Imported 3D Model Support ───────────────────────────────────────────────
+
+// Count triangles across all geometries in a list of serialized objects
+function _countTemplateTriangles(template) {
+  if (template.triangleCount != null) return template.triangleCount;
+  if (template.type === 'imported' && template._importedGeometries) {
+    let total = 0;
+    for (const g of template._importedGeometries) {
+      total += g.index ? g.index.length / 3 : (g.position ? g.position.length / 9 : 0);
+    }
+    return total;
+  }
+  // For native templates, estimate from object count
+  return template.objects.length * 12; // rough estimate
+}
+
+// Compute scene total triangles from renderer info
+function _getSceneTriangleCount() {
+  return renderer.info.render.triangles || 0;
+}
+
+// Generate a LOD proxy (simplified bounding-box mesh) for an imported model
+function _generateLODProxy(geometries, materials) {
+  const mergedBox = new THREE.Box3();
+  for (const geo of geometries) {
+    geo.computeBoundingBox();
+    mergedBox.union(geo.boundingBox);
+  }
+  const size = new THREE.Vector3();
+  mergedBox.getSize(size);
+  const center = new THREE.Vector3();
+  mergedBox.getCenter(center);
+
+  // Pick proxy shape based on aspect ratio
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const minDim = Math.min(size.x, size.y, size.z);
+  const ratio = minDim / (maxDim || 1);
+
+  let proxyGeo;
+  if (ratio > 0.7) {
+    // Roughly cubic/spherical — use low-poly sphere
+    const radius = maxDim / 2;
+    proxyGeo = new THREE.SphereGeometry(radius, 6, 4);
+  } else {
+    // Elongated — use box
+    proxyGeo = new THREE.BoxGeometry(size.x || 0.1, size.y || 0.1, size.z || 0.1);
+  }
+
+  // Pick dominant color from first material
+  let proxyColor = 0x888888;
+  if (materials.length > 0) {
+    const mat = materials[0];
+    if (mat.color) proxyColor = mat.color.getHex();
+  }
+
+  const proxyMat = new THREE.MeshStandardMaterial({
+    color: proxyColor,
+    roughness: 0.9,
+    transparent: true,
+    opacity: 0.6,
+    wireframe: true,
+  });
+
+  const proxyMesh = new THREE.Mesh(proxyGeo, proxyMat);
+  proxyMesh.position.copy(center);
+  return { mesh: proxyMesh, triangleCount: proxyGeo.index ? proxyGeo.index.count / 3 : 0 };
+}
+
+// Performance warning dialog — returns promise resolving to 'full', 'lod', or 'cancel'
+function _showPerfWarningDialog(templateName, triCount, sceneTriCount) {
+  return new Promise(resolve => {
+    const isCritical = triCount >= PERF_CRITICAL_TRIANGLE_THRESHOLD;
+    const sceneTotalAfter = sceneTriCount + triCount;
+    const sceneExceeded = sceneTotalAfter > PERF_SCENE_WARN_THRESHOLD;
+    const severityColor = isCritical ? '#f85149' : '#d29922';
+    const severityLabel = isCritical ? '⚠️ High Poly Warning' : '⚡ Performance Notice';
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed;inset:0;z-index:99998;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);';
+    modal.innerHTML = `<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px 28px;min-width:380px;max-width:460px;box-shadow:0 8px 32px rgba(0,0,0,0.5)">
+      <div style="color:${severityColor};font-size:15px;font-weight:600;margin-bottom:12px">${severityLabel}</div>
+      <div style="color:#e6edf3;font-size:12px;margin-bottom:8px"><b>${escapeHtml(templateName)}</b></div>
+      <div style="color:#8b949e;font-size:11px;margin-bottom:6px">
+        This object has <b style="color:${severityColor}">${triCount.toLocaleString()}</b> triangles.
+        ${isCritical ? '<br>This is very high and may cause significant lag on lower-end devices like Chromebooks.' : '<br>This may impact performance on lower-end devices.'}
+      </div>
+      ${sceneExceeded ? `<div style="color:#d29922;font-size:11px;margin-bottom:6px">⚠ Scene total after placement: <b>${sceneTotalAfter.toLocaleString()}</b> triangles (exceeds ${PERF_SCENE_WARN_THRESHOLD.toLocaleString()} threshold)</div>` : ''}
+      <div style="background:#21262d;border-radius:6px;padding:8px 10px;margin:10px 0;font-size:10px;color:#8b949e">
+        <div style="margin-bottom:4px"><b>Full Detail:</b> Renders the complete model. May cause lag.</div>
+        <div><b>Low Detail (LOD):</b> Renders a simplified shape. Video recording will still capture full detail.</div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;flex-wrap:wrap">
+        <button data-choice="cancel" style="background:#21262d;color:#e6edf3;border:1px solid #30363d;padding:6px 14px;border-radius:5px;cursor:pointer;font-size:11px">Cancel</button>
+        <button data-choice="lod" style="background:#1a7f37;color:#fff;border:none;padding:6px 14px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600">🔷 Low Detail (LOD)</button>
+        <button data-choice="full" style="background:#1f6feb;color:#fff;border:none;padding:6px 14px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600">🔶 Full Detail</button>
+      </div>
+    </div>`;
+    document.body.appendChild(modal);
+    modal.querySelectorAll('button[data-choice]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        modal.remove();
+        resolve(btn.dataset.choice);
+      });
+    });
+  });
+}
+
+// Import a GLTF/GLB file and create a custom object template from it
+async function importGLTFModel(file) {
+  if (!file) return;
+  const arrayBuffer = await file.arrayBuffer();
+  const blob = new Blob([arrayBuffer]);
+  const url = URL.createObjectURL(blob);
+
+  let gltf;
+  try {
+    gltf = await new Promise((resolve, reject) => {
+      _gltfLoader.load(url, resolve, undefined, reject);
+    });
+  } catch (err) {
+    alert('Failed to load model: ' + (err.message || err));
+    return;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+
+  // Collect all meshes from the loaded scene
+  const meshes = [];
+  const geometries = [];
+  const materials = [];
+  let totalTriangles = 0;
+  let totalVertices = 0;
+
+  gltf.scene.updateMatrixWorld(true);
+  gltf.scene.traverse(child => {
+    if (child.isMesh && child.geometry) {
+      meshes.push(child);
+      geometries.push(child.geometry);
+      if (child.material) {
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        for (const m of mats) {
+          if (!materials.includes(m)) materials.push(m);
+        }
+      }
+      const geo = child.geometry;
+      const triCount = geo.index ? geo.index.count / 3 : geo.attributes.position.count / 3;
+      totalTriangles += triCount;
+      totalVertices += geo.attributes.position.count;
+    }
+  });
+
+  if (!meshes.length) {
+    alert('No meshes found in this model file.');
+    return;
+  }
+
+  // Compute bounding box and normalize scale
+  const bbox = new THREE.Box3().setFromObject(gltf.scene);
+  const bboxSize = new THREE.Vector3();
+  bbox.getSize(bboxSize);
+  const bboxCenter = new THREE.Vector3();
+  bbox.getCenter(bboxCenter);
+
+  const maxDim = Math.max(bboxSize.x, bboxSize.y, bboxSize.z);
+  const targetSize = 2; // target size in world units
+  const scaleFactor = maxDim > 0 ? Math.min(targetSize / maxDim, IMPORTED_MODEL_MAX_SCALE) : 1;
+
+  // Center and scale the scene
+  gltf.scene.position.sub(bboxCenter).multiplyScalar(scaleFactor);
+  gltf.scene.scale.multiplyScalar(scaleFactor);
+  gltf.scene.updateMatrixWorld(true);
+
+  // Serialize geometry data for storage
+  const importedGeometries = [];
+  const importedMaterials = [];
+  for (const mesh of meshes) {
+    const geo = mesh.geometry;
+    const geoData = {
+      position: Array.from(geo.attributes.position.array),
+      index: geo.index ? Array.from(geo.index.array) : null,
+      normal: geo.attributes.normal ? Array.from(geo.attributes.normal.array) : null,
+      uv: geo.attributes.uv ? Array.from(geo.attributes.uv.array) : null,
+      // Store the world matrix so we can reconstruct position/rotation/scale
+      matrix: mesh.matrixWorld.elements.slice(),
+    };
+    importedGeometries.push(geoData);
+
+    // Serialize material
+    const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+    importedMaterials.push({
+      color: mat.color ? mat.color.getHex() : 0x888888,
+      roughness: mat.roughness ?? 0.8,
+      metalness: mat.metalness ?? 0,
+      transparent: mat.transparent || false,
+      opacity: mat.opacity ?? 1,
+    });
+  }
+
+  // Generate LOD proxy
+  const lodProxy = _generateLODProxy(geometries, materials);
+
+  // Determine dominant color
+  const dominantColor = materials.length > 0 && materials[0].color ? materials[0].color.getHex() : 0x888888;
+
+  const templateName = file.name.replace(/\.(glb|gltf|obj)$/i, '') || 'Imported Model';
+  const template = {
+    id: 'ct_' + (_nextCustomTemplateId++),
+    name: templateName,
+    type: 'imported',
+    objects: [],          // not used for imported — we use _importedGeometries
+    color: dominantColor,
+    triangleCount: totalTriangles,
+    vertexCount: totalVertices,
+    meshCount: meshes.length,
+    dateAdded: Date.now(),
+    tags: [],
+    fileSize: arrayBuffer.byteLength,
+    _importedGeometries: importedGeometries,
+    _importedMaterials: importedMaterials,
+    _lodProxyTriangles: lodProxy.triangleCount,
+    _originalArrayBuffer: arrayBuffer,
+    scaleFactor,
+  };
+
+  // Check performance threshold
+  if (totalTriangles >= PERF_WARN_TRIANGLE_THRESHOLD) {
+    const choice = await _showPerfWarningDialog(templateName, totalTriangles, _getSceneTriangleCount());
+    if (choice === 'cancel') return;
+    template._defaultLOD = choice === 'lod';
+  }
+
+  customObjectTemplates.push(template);
+  refreshCustomObjectUI();
+  refreshObjLib();
+  markRestoreDirty();
+  console.log(`[Flame3D] Imported "${templateName}": ${totalTriangles} tris, ${totalVertices} verts, ${meshes.length} meshes`);
+}
+
+// Reconstruct Three.js meshes from a stored imported template
+function _reconstructImportedMeshes(template, useLOD = false) {
+  if (template.type !== 'imported' || !template._importedGeometries) return null;
+
+  const group = new THREE.Group();
+  group.userData._isImportedModel = true;
+  group.userData._templateId = template.id;
+  group.userData._templateName = template.name;
+  group.userData._lodActive = useLOD;
+  group.userData._triangleCount = template.triangleCount;
+
+  if (useLOD) {
+    // Build LOD proxy mesh
+    const allGeos = template._importedGeometries.map(g => {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(g.position, 3));
+      if (g.index) geo.setIndex(g.index);
+      if (g.normal) geo.setAttribute('normal', new THREE.Float32BufferAttribute(g.normal, 3));
+      geo.computeBoundingBox();
+      return geo;
+    });
+    const proxy = _generateLODProxy(allGeos, template._importedMaterials.map(m => {
+      return new THREE.MeshStandardMaterial({ color: m.color });
+    }));
+    group.add(proxy.mesh);
+    group.userData._lodMesh = proxy.mesh;
+    // Dispose temp geometries
+    for (const g of allGeos) g.dispose();
+  } else {
+    // Build full-detail meshes
+    for (let i = 0; i < template._importedGeometries.length; i++) {
+      const gData = template._importedGeometries[i];
+      const mData = template._importedMaterials[i] || { color: 0x888888, roughness: 0.8, metalness: 0 };
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(gData.position), 3));
+      if (gData.index) geo.setIndex(new THREE.BufferAttribute(new Uint32Array(gData.index), 1));
+      if (gData.normal) geo.setAttribute('normal', new THREE.Float32BufferAttribute(new Float32Array(gData.normal), 3));
+      if (gData.uv) geo.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(gData.uv), 2));
+      if (!gData.normal) geo.computeVertexNormals();
+
+      const mat = new THREE.MeshStandardMaterial({
+        color: mData.color,
+        roughness: mData.roughness,
+        metalness: mData.metalness,
+        transparent: mData.transparent,
+        opacity: mData.opacity,
+      });
+
+      const mesh = new THREE.Mesh(geo, mat);
+      // Apply stored world matrix
+      if (gData.matrix) {
+        const m4 = new THREE.Matrix4().fromArray(gData.matrix);
+        mesh.applyMatrix4(m4);
+      }
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+    }
+  }
+
+  return group;
+}
+
+// Place an imported model template into the scene
+async function placeImportedTemplate(templateId, pos, forceLOD) {
+  const template = customObjectTemplates.find(t => t.id === templateId);
+  if (!template || template.type !== 'imported') return;
+
+  let useLOD = forceLOD ?? template._defaultLOD ?? false;
+
+  // Performance check on placement
+  if (forceLOD === undefined && template.triangleCount >= PERF_WARN_TRIANGLE_THRESHOLD) {
+    const choice = await _showPerfWarningDialog(template.name, template.triangleCount, _getSceneTriangleCount());
+    if (choice === 'cancel') return;
+    useLOD = choice === 'lod';
+  }
+
+  const group = _reconstructImportedMeshes(template, useLOD);
+  if (!group) return;
+
+  // Create a wrapper mesh (invisible box) so it integrates with sceneObjects array
+  const bbox = new THREE.Box3().setFromObject(group);
+  const size = new THREE.Vector3();
+  bbox.getSize(size);
+  const wrapperGeo = new THREE.BoxGeometry(size.x || 0.1, size.y || 0.1, size.z || 0.1);
+  const wrapperMat = new THREE.MeshStandardMaterial({ visible: false, transparent: true, opacity: 0 });
+  const wrapper = new THREE.Mesh(wrapperGeo, wrapperMat);
+  wrapper.position.copy(pos);
+  wrapper.userData.type = 'imported_model';
+  wrapper.userData.label = template.name;
+  wrapper.userData._isImportedModel = true;
+  wrapper.userData._templateId = template.id;
+  wrapper.userData._lodActive = useLOD;
+  wrapper.userData._triangleCount = template.triangleCount;
+  wrapper.userData._importedGroup = group;
+  wrapper.userData._lodOverride = 'auto'; // auto | always-full | always-lod
+  wrapper.castShadow = false;
+  wrapper.receiveShadow = false;
+
+  // Offset group to center on wrapper
+  const center = new THREE.Vector3();
+  bbox.getCenter(center);
+  group.position.sub(center);
+
+  wrapper.add(group);
+  addToScene(wrapper);
+  pushUndo({ type: 'add', mesh: wrapper });
+  refreshStatus();
+  markSpatialDirty();
+  return wrapper;
+}
+
+// Toggle LOD on a placed imported model
+function setImportedMeshLOD(wrapper, useLOD) {
+  if (!wrapper?.userData?._isImportedModel) return;
+  if (wrapper.userData._lodActive === useLOD) return;
+
+  const template = customObjectTemplates.find(t => t.id === wrapper.userData._templateId);
+  if (!template || template.type !== 'imported') return;
+
+  // Remove old group
+  const oldGroup = wrapper.userData._importedGroup;
+  if (oldGroup) {
+    wrapper.remove(oldGroup);
+    oldGroup.traverse(child => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) {
+        if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+        else child.material.dispose();
+      }
+    });
+  }
+
+  // Build new group
+  const newGroup = _reconstructImportedMeshes(template, useLOD);
+  if (newGroup) {
+    const bbox = new THREE.Box3().setFromObject(newGroup);
+    const center = new THREE.Vector3();
+    bbox.getCenter(center);
+    newGroup.position.sub(center);
+    wrapper.add(newGroup);
+    wrapper.userData._importedGroup = newGroup;
+  }
+  wrapper.userData._lodActive = useLOD;
 }
 
 // ─── Terrain Sculpting ──────────────────────────────────────────────────────
@@ -9321,39 +11461,39 @@ function applyTexturePaint(mesh, pattern, color1, color2, scale, customImg) {
 function serializeSettings() {
   return {
     sun: {
-      intensity:   parseFloat(sunIntensityInput.value),
-      time:        parseFloat(sunTimeInput.value),
-      north:       parseFloat(sunNorthInput.value),
-      turbidity:   parseFloat(sunTurbidityInput.value),
-      shadowRange: parseFloat(sunShadowRangeInput.value),
-      dayDuration: parseFloat(sunDayDurationInput.value),
-      dayCycleEnabled: !!(sunDayCycleEnabledInput && sunDayCycleEnabledInput.checked),
-      size: parseFloat(sunSizeInput?.value) || SUN_SIZE_DEFAULT,
+      intensity:     parseFloat(sunIntensityInput?.value)  || SUN_INTENSITY_DEFAULT,
+      time:          parseFloat(sunTimeInput?.value)       || SUN_TIME_DEFAULT,
+      north:         parseFloat(sunNorthInput?.value)      || SUN_NORTH_DEFAULT,
+      turbidity:     parseFloat(sunTurbidityInput?.value)  || SUN_TURBIDITY_DEFAULT,
+      shadowRange:   parseFloat(sunShadowRangeInput?.value) || SUN_SHADOW_RANGE_DEFAULT,
+      dayDuration:   parseFloat(sunDayDurationInput?.value) || SUN_DAY_DURATION_DEFAULT,
+      dayCycleEnabled: sunDayCycleInput?.checked ?? SUN_DAY_CYCLE_DEFAULT,
+      size:          parseFloat(sunSizeInput?.value)       || SUN_SIZE_DEFAULT,
     },
-    skyColor: skyColorInput?.value || SKY_COLOR_DEFAULT,
+    skyColor:        skyColorInput?.value || SKY_COLOR_DEFAULT,
     clouds: {
-      enabled: cloudsEnabledInput ? cloudsEnabledInput.checked : CLOUDS_ENABLED_DEFAULT,
+      enabled:   cloudsEnabledInput?.checked ?? CLOUDS_ENABLED_DEFAULT,
       windSpeed: parseFloat(cloudWindSpeedInput?.value) || CLOUD_WIND_SPEED_DEFAULT,
-      windDir: parseFloat(cloudWindDirInput?.value) || CLOUD_WIND_DIR_DEFAULT,
-      opacity: parseFloat(cloudOpacityInput?.value) ?? CLOUD_OPACITY_DEFAULT,
+      windDir:   parseFloat(cloudWindDirInput?.value)   || CLOUD_WIND_DIR_DEFAULT,
+      opacity:   parseFloat(cloudOpacityInput?.value)   ?? CLOUD_OPACITY_DEFAULT,
     },
     stars: {
-      enabled: starsEnabledInput ? starsEnabledInput.checked : STARS_ENABLED_DEFAULT,
-      count: parseInt(starsCountInput?.value) || STARS_COUNT_DEFAULT,
+      enabled:    starsEnabledInput?.checked ?? STARS_ENABLED_DEFAULT,
+      count:      parseInt(starsCountInput?.value, 10) || STARS_COUNT_DEFAULT,
       brightness: parseFloat(starsBrightnessInput?.value) || STARS_BRIGHTNESS_DEFAULT,
     },
     moon: {
-      enabled: moonEnabledInput ? moonEnabledInput.checked : MOON_ENABLED_DEFAULT,
+      enabled:    moonEnabledInput?.checked ?? MOON_ENABLED_DEFAULT,
       brightness: parseFloat(moonBrightnessInput?.value) || MOON_BRIGHTNESS_DEFAULT,
-      aura: parseFloat(moonAuraInput?.value) ?? MOON_AURA_DEFAULT,
+      aura:       parseFloat(moonAuraInput?.value)       || MOON_AURA_DEFAULT,
     },
+    fog: { ...fogSettings },
     gameRules: { ...gameRules },
     gameRulesVarBinds: { ...gameRulesVarBinds },
     gridFill: { enabled: gridFillEnabled, color: gridFillColor, texture: gridFillTexture },
     worldBorder: { enabled: worldBorderEnabled, minX: worldBorderMinX, maxX: worldBorderMaxX, minZ: worldBorderMinZ, maxZ: worldBorderMaxZ },
     worlds: worlds.map(w => ({ ...w })),
     activeWorldId,
-    fog: { ...fogSettings },
     fov: { editor: editorFov, playtest: playtestFov },
     conditionalTriggers: conditionalTriggers.map(ct => ({
       conditionType: ct.conditionType,
@@ -9393,75 +11533,52 @@ function serializeSettings() {
   };
 }
 
-function syncSunInputs() {
-  if (!sunTimeInput.value)        sunTimeInput.value        = SUN_TIME_DEFAULT;
-  if (!sunNorthInput.value)       sunNorthInput.value       = SUN_NORTH_DEFAULT;
-  if (!sunTurbidityInput.value)   sunTurbidityInput.value   = SUN_TURBIDITY_DEFAULT;
-  if (!sunShadowRangeInput.value) sunShadowRangeInput.value = SUN_SHADOW_RANGE_DEFAULT;
-  if (!sunIntensityInput.value)   sunIntensityInput.value   = SUN_INTENSITY_DEFAULT;
-  if (!sunDayDurationInput.value) sunDayDurationInput.value = SUN_DAY_DURATION_DEFAULT;
-}
-
-function applySunUI() {
-  syncSunInputs();
-  updateSunSky();
-  refreshStatus();
-  markRestoreDirty();
-}
-
 function applySceneSettings(settings = {}) {
-  const d = settings.sun ?? settings.mainLight;
-  if (d) {
-    if (d.intensity   !== undefined) sunIntensityInput.value   = d.intensity;
-    if (d.time        !== undefined) sunTimeInput.value        = d.time;
-    if (d.north       !== undefined) sunNorthInput.value       = d.north;
-    if (d.turbidity   !== undefined) sunTurbidityInput.value   = d.turbidity;
-    if (d.shadowRange !== undefined) sunShadowRangeInput.value = d.shadowRange;
-    if (d.dayDuration !== undefined) sunDayDurationInput.value = d.dayDuration;
-    if (d.size !== undefined && sunSizeInput) sunSizeInput.value = d.size;
-    if (sunDayCycleEnabledInput) {
-      if (d.dayCycleEnabled !== undefined) {
-        sunDayCycleEnabledInput.checked = !!d.dayCycleEnabled;
-      } else if (d.dayDuration !== undefined) {
-        sunDayCycleEnabledInput.checked = Number(d.dayDuration) > 0;
-      } else {
-        sunDayCycleEnabledInput.checked = SUN_DAY_CYCLE_ENABLED_DEFAULT;
-      }
-    }
-    if (d.time === undefined && d.elevation !== undefined) {
-      const elev = THREE.MathUtils.clamp(d.elevation, -10, 89);
-      sunTimeInput.value = (12 + elev / 90 * 7).toFixed(1);
-    }
-    if (d.time === undefined && d.azimuth !== undefined) {
-      sunNorthInput.value = Math.round(d.azimuth);
-    }
+  // ─── Restore sky / atmosphere settings ───
+  if (settings.sun) {
+    const s = settings.sun;
+    if (sunIntensityInput)   sunIntensityInput.value   = s.intensity   ?? SUN_INTENSITY_DEFAULT;
+    if (sunTimeInput)        sunTimeInput.value        = s.time        ?? SUN_TIME_DEFAULT;
+    if (sunNorthInput)       sunNorthInput.value       = s.north       ?? SUN_NORTH_DEFAULT;
+    if (sunTurbidityInput)   sunTurbidityInput.value   = s.turbidity   ?? SUN_TURBIDITY_DEFAULT;
+    if (sunShadowRangeInput) sunShadowRangeInput.value = s.shadowRange ?? SUN_SHADOW_RANGE_DEFAULT;
+    if (sunDayDurationInput) sunDayDurationInput.value = s.dayDuration ?? SUN_DAY_DURATION_DEFAULT;
+    if (sunDayCycleInput)    sunDayCycleInput.checked  = s.dayCycleEnabled ?? SUN_DAY_CYCLE_DEFAULT;
+    if (sunSizeInput)        sunSizeInput.value        = s.size        ?? SUN_SIZE_DEFAULT;
+  } else {
+    syncSunInputs();
   }
-  // Sky color
   if (settings.skyColor && skyColorInput) skyColorInput.value = settings.skyColor;
-  // Clouds
   if (settings.clouds) {
-    if (cloudsEnabledInput) cloudsEnabledInput.checked = settings.clouds.enabled !== false;
-    if (cloudWindSpeedInput && settings.clouds.windSpeed !== undefined) cloudWindSpeedInput.value = settings.clouds.windSpeed;
-    if (cloudWindDirInput && settings.clouds.windDir !== undefined) cloudWindDirInput.value = settings.clouds.windDir;
-    if (cloudOpacityInput && settings.clouds.opacity !== undefined) cloudOpacityInput.value = settings.clouds.opacity;
+    const c = settings.clouds;
+    if (cloudsEnabledInput)  cloudsEnabledInput.checked = c.enabled ?? CLOUDS_ENABLED_DEFAULT;
+    if (cloudWindSpeedInput) cloudWindSpeedInput.value  = c.windSpeed ?? CLOUD_WIND_SPEED_DEFAULT;
+    if (cloudWindDirInput)   cloudWindDirInput.value    = c.windDir ?? CLOUD_WIND_DIR_DEFAULT;
+    if (cloudOpacityInput)   cloudOpacityInput.value    = c.opacity ?? CLOUD_OPACITY_DEFAULT;
   }
-  // Stars
   if (settings.stars) {
-    if (starsEnabledInput) starsEnabledInput.checked = settings.stars.enabled !== false;
-    if (starsCountInput && settings.stars.count !== undefined) {
-      starsCountInput.value = settings.stars.count;
-      _buildStars(settings.stars.count);
+    const st = settings.stars;
+    if (starsEnabledInput)    starsEnabledInput.checked  = st.enabled ?? STARS_ENABLED_DEFAULT;
+    if (starsCountInput)      starsCountInput.value      = st.count ?? STARS_COUNT_DEFAULT;
+    if (starsBrightnessInput) starsBrightnessInput.value = st.brightness ?? STARS_BRIGHTNESS_DEFAULT;
+    const newCount = parseInt(starsCountInput?.value, 10) || STARS_COUNT_DEFAULT;
+    if (_starsMesh && _starsMesh.geometry.attributes.position.count !== newCount) {
+      _buildStars(newCount);
     }
-    if (starsBrightnessInput && settings.stars.brightness !== undefined) starsBrightnessInput.value = settings.stars.brightness;
   }
-  // Moon
   if (settings.moon) {
-    if (moonEnabledInput) moonEnabledInput.checked = settings.moon.enabled !== false;
-    if (moonBrightnessInput && settings.moon.brightness !== undefined) moonBrightnessInput.value = settings.moon.brightness;
-    if (moonAuraInput && settings.moon.aura !== undefined) moonAuraInput.value = settings.moon.aura;
+    const mo = settings.moon;
+    if (moonEnabledInput)    moonEnabledInput.checked  = mo.enabled ?? MOON_ENABLED_DEFAULT;
+    if (moonBrightnessInput) moonBrightnessInput.value = mo.brightness ?? MOON_BRIGHTNESS_DEFAULT;
+    if (moonAuraInput)       moonAuraInput.value       = mo.aura ?? MOON_AURA_DEFAULT;
+  }
+  if (settings.fog) {
+    Object.assign(fogSettings, settings.fog);
+    syncFogUI();
+    applyFogSettings();
   }
   updateSunSky();
-  syncSunInputs();
+
   // Restore game rules
   if (settings.gameRules) {
     Object.assign(gameRules, settings.gameRules);
@@ -9507,18 +11624,6 @@ function applySceneSettings(settings = {}) {
   } else {
     activeWorldId = worlds[0]?.id || 'world_1';
   }
-  // Restore fog
-  if (settings.fog) {
-    fogSettings.enabled = settings.fog.enabled !== false;
-    fogSettings.mode = settings.fog.mode === 'linear' ? 'linear' : 'exp2';
-    fogSettings.color = Number.isFinite(settings.fog.color) ? settings.fog.color : 0x87ceeb;
-    fogSettings.density = Number.isFinite(settings.fog.density) ? settings.fog.density : 0.0008;
-    fogSettings.near = Number.isFinite(settings.fog.near) ? settings.fog.near : 10;
-    fogSettings.far = Number.isFinite(settings.fog.far) ? settings.fog.far : 500;
-    fogSettings.brightness = Number.isFinite(settings.fog.brightness) ? settings.fog.brightness : 1;
-  }
-  applyFogSettings();
-  syncFogUI();
   // Restore FOV
   if (settings.fov) {
     editorFov = THREE.MathUtils.clamp(Number.isFinite(settings.fov.editor) ? settings.fov.editor : 60, 30, 150);
@@ -9697,6 +11802,8 @@ function serializeScene() {
     if (m.userData._hasCustomGeometry) {
       o.customGeometry = _serializeBufferGeometry(m.geometry);
     }
+    if (m.userData._mergedOriginals) o.mergedOriginals = m.userData._mergedOriginals;
+    if (m.userData._isStatic) o.isStatic = true;
     return o;
   });
   // Combine with stored objects from other worlds
@@ -9800,6 +11907,17 @@ function deserializeObject(d) {
     setMeshGeometry(mesh, restoredGeo);
     mesh.userData._hasCustomGeometry = true;
     mesh.userData.collisionMode = 'geometry';
+    // Enable vertex colors if the geometry has a color attribute (merged meshes)
+    if (restoredGeo.attributes.color && mesh.material) {
+      mesh.material.vertexColors = true;
+      mesh.material.needsUpdate = true;
+    }
+  }
+  if (d.mergedOriginals) {
+    mesh.userData._mergedOriginals = d.mergedOriginals;
+  }
+  if (d.isStatic) {
+    setObjectStatic(mesh, true);
   }
   if (d.lightColor !== undefined && mesh.userData.pointLight) {
     mesh.userData.pointLight.color.setHex(d.lightColor);
@@ -9954,9 +12072,7 @@ function getStoredProjects() {
 
 function setStoredProjects(projects) {
   _storageCache.projects = Array.isArray(projects) ? projects : [];
-  _flushProjects().catch(err => {
-    alert('Failed to persist projects to storage: ' + err.message);
-  });
+  _flushProjects();
 }
 
 function saveEditorSettings() {
@@ -9964,6 +12080,9 @@ function saveEditorSettings() {
     renderDist: quality.renderDist,
     shadows:    quality.shadows,
     lightDist:  quality.lightDist,
+    shadowMapRes: quality.shadowMapRes,
+    resolutionScale: quality.resolutionScale,
+    showStats: quality.showStats,
     snapSize:   state.snapSize,
     placeSides: state.placeSides,
     place2DDepth: state.place2DDepth,
@@ -9979,6 +12098,12 @@ function saveEditorSettings() {
     customBlockSkins: serializeCustomBlockSkins(),
     customSculptSkins: serializeCustomSculptSkins(),
     customObjectTemplates: serializeCustomObjectTemplates(),
+    lodEnabled: quality.lodEnabled !== false,
+    lodDist: quality.lodDist || 80,
+    customObjectSort: _customObjectSort,
+    bottomHeight: bottomPanelState.height,
+    bottomCollapsed: bottomPanelState.collapsed,
+    activeBottomTab: _activeBpPane,
   }));
 }
 
@@ -9998,6 +12123,23 @@ function loadEditorSettings() {
     if (s.lightDist != null) {
       quality.lightDist = THREE.MathUtils.clamp(parseFloat(s.lightDist) || 60, 10, 200);
       qualityLightDistInput.value = quality.lightDist;
+    }
+    if (s.shadowMapRes != null) {
+      applyShadowMapResolution(parseInt(s.shadowMapRes, 10) || 4096);
+      const resEl = document.getElementById('quality-shadow-res');
+      if (resEl) resEl.value = String(quality.shadowMapRes);
+    }
+    if (s.resolutionScale != null) {
+      applyResolutionScale(parseFloat(s.resolutionScale) || Math.min(devicePixelRatio, 2));
+      const scaleEl = document.getElementById('quality-resolution');
+      if (scaleEl) scaleEl.value = String(quality.resolutionScale);
+    }
+    if (s.showStats != null) {
+      quality.showStats = !!s.showStats;
+      const statsEl = document.getElementById('quality-show-stats');
+      if (statsEl) statsEl.checked = quality.showStats;
+      const perfEl = document.getElementById('perf-stats');
+      if (perfEl) perfEl.style.display = quality.showStats ? '' : 'none';
     }
     if (s.snapSize != null) {
       setSnap(s.snapSize);
@@ -10020,6 +12162,27 @@ function loadEditorSettings() {
     if (s.customSculptSkins && typeof s.customSculptSkins === 'object') {
       setCustomSculptSkinsMap(s.customSculptSkins);
     }
+    if (s.lodEnabled != null) {
+      quality.lodEnabled = !!s.lodEnabled;
+      const lodEl = document.getElementById('quality-lod-enabled');
+      if (lodEl) lodEl.checked = quality.lodEnabled;
+    }
+    if (s.lodDist != null) {
+      quality.lodDist = THREE.MathUtils.clamp(parseFloat(s.lodDist) || 80, 20, 500);
+      const lodDistEl = document.getElementById('quality-lod-dist');
+      if (lodDistEl) lodDistEl.value = quality.lodDist;
+    }
+    if (s.customObjectSort) {
+      _customObjectSort = s.customObjectSort;
+      const sortEl = document.getElementById('custom-obj-sort');
+      if (sortEl) sortEl.value = _customObjectSort;
+    }
+    if (s.customObjectTemplates) {
+      loadCustomObjectTemplates(s.customObjectTemplates);
+    }
+    if (s.bottomHeight != null) bottomPanelState.height = parseFloat(s.bottomHeight) || 200;
+    if (s.bottomCollapsed != null) bottomPanelState.collapsed = !!s.bottomCollapsed;
+    if (s.activeBottomTab) _activeBpPane = s.activeBottomTab;
   } catch (err) { console.warn('[Settings] Failed to apply scene settings (corrupt data?):', err); }
 }
 
@@ -10091,6 +12254,44 @@ function stopFunctionsPanelResize() {
   document.body.style.cursor = '';
   document.body.style.userSelect = '';
   applyFunctionsPanelState({ save: true, reflow: true });
+}
+
+const BOTTOM_PANEL_MIN_HEIGHT = 100;
+const BOTTOM_PANEL_MAX_FRACTION = 0.5;
+
+function clampBottomHeight(value) {
+  const maxHeight = Math.max(BOTTOM_PANEL_MIN_HEIGHT, Math.floor(window.innerHeight * BOTTOM_PANEL_MAX_FRACTION));
+  return Math.max(BOTTOM_PANEL_MIN_HEIGHT, Math.min(maxHeight, parseFloat(value) || bottomPanelState.height || 200));
+}
+
+function applyBottomPanelState(options = {}) {
+  const save = options.save !== false;
+  const reflow = options.reflow !== false;
+
+  bottomPanelState.height = clampBottomHeight(bottomPanelState.height);
+  document.documentElement.style.setProperty('--bottomH', `${bottomPanelState.height}px`);
+  document.body.classList.toggle('bottom-collapsed', bottomPanelState.collapsed);
+
+  if (bottomPanelEl) bottomPanelEl.setAttribute('aria-hidden', bottomPanelState.collapsed ? 'true' : 'false');
+  if (bottomToggleBtn) {
+    const collapsed = bottomPanelState.collapsed;
+    bottomToggleBtn.textContent = collapsed ? '▲' : '▼';
+    bottomToggleBtn.title = collapsed ? 'Expand bottom panel' : 'Collapse bottom panel';
+    bottomToggleBtn.setAttribute('aria-label', bottomToggleBtn.title);
+    bottomToggleBtn.setAttribute('aria-pressed', String(collapsed));
+  }
+
+  if (save) saveEditorSettings();
+  if (reflow) onResize();
+}
+
+function stopBottomResize() {
+  if (!bottomPanelState.resizing) return;
+  bottomPanelState.resizing = false;
+  document.body.classList.remove('bottom-resizing');
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
+  applyBottomPanelState({ save: true, reflow: true });
 }
 
 function buildLevelPayload() {
@@ -10326,6 +12527,8 @@ function createDefaultFunctionAction() {
     skelAnimCommand: 'play',
     skelAnimClip: '',
     skelAnimSpeed: 1,
+    scaleOffset: [1, 1, 1],
+    scaleStartOffset: [1, 1, 1],
   };
 }
 
@@ -10384,6 +12587,8 @@ function normalizeFunctionAction(config = {}) {
     skelAnimCommand: SKELETON_ANIM_COMMANDS.includes(config.skelAnimCommand) ? config.skelAnimCommand : 'play',
     skelAnimClip: String(config.skelAnimClip ?? '').trim(),
     skelAnimSpeed: Math.max(0, Number.isFinite(parseFloat(config.skelAnimSpeed)) ? parseFloat(config.skelAnimSpeed) : 1),
+    scaleOffset: normalizeVec(config.scaleOffset ?? [1, 1, 1]),
+    scaleStartOffset: normalizeVec(config.scaleStartOffset ?? [1, 1, 1]),
   };
 }
 
@@ -10393,17 +12598,188 @@ function createDefaultControlFunction(groupId = '') {
     groupId: String(groupId ?? '').trim(),
     alwaysActive: false,
     actions: [createDefaultFunctionAction()],
+    graphX: NaN,
+    graphY: NaN,
+    nodes: [],        // Phase 1: node-based assembly
+    connections: [],   // Phase 1: { from, to }
   };
 }
 
 function normalizeControlFunction(fn = {}) {
   const actions = Array.isArray(fn.actions) ? fn.actions.map(normalizeFunctionAction) : [];
-  return {
+  const nodes = Array.isArray(fn.nodes) ? fn.nodes.map(normalizeGraphNode) : [];
+  const connections = Array.isArray(fn.connections) ? fn.connections.filter(c => c && c.from && c.to) : [];
+  const result = {
     name: String(fn.name ?? '').trim(),
     groupId: String(fn.groupId ?? '').trim(),
     alwaysActive: fn.alwaysActive === true,
     actions: actions.length ? actions : [createDefaultFunctionAction()],
+    graphX: Number.isFinite(fn.graphX) ? fn.graphX : NaN,
+    graphY: Number.isFinite(fn.graphY) ? fn.graphY : NaN,
+    nodes,
+    connections,
   };
+  // Auto-migrate old functions that have no nodes yet
+  if (!result.nodes.length && result.actions.length) {
+    migrateOldFunctionToNodes(result);
+  }
+  _bpSyncFnActionsFromNodes(result);
+  return result;
+}
+
+// ── Node-based assembly helpers (Phase 1) ────────────────────────────────────
+let _nodeIdCounter = 0;
+function _genNodeId() { return 'n' + Date.now().toString(36) + '_' + (++_nodeIdCounter); }
+
+function createDefaultTargetNode(refType = 'group', refValue = '') {
+  return {
+    id: _genNodeId(),
+    type: 'target',
+    refType,
+    refValue: String(refValue ?? '').trim(),
+    graphX: NaN,
+    graphY: NaN,
+  };
+}
+
+function createDefaultConditionNode(conditions = null) {
+  return {
+    id: _genNodeId(),
+    type: 'condition',
+    conditions: conditions || [createDefaultCondition()],
+    conditionLogic: 'and',
+    graphX: NaN,
+    graphY: NaN,
+  };
+}
+
+function createDefaultActionNode(actions = null) {
+  return {
+    id: _genNodeId(),
+    type: 'action',
+    actions: actions || [createDefaultFunctionAction()],
+    graphX: NaN,
+    graphY: NaN,
+  };
+}
+
+function normalizeGraphNode(node = {}) {
+  const type = ['target', 'condition', 'action'].includes(node.type) ? node.type : 'action';
+  const base = {
+    id: node.id || _genNodeId(),
+    type,
+    label: String(node.label ?? '').trim(),
+    graphX: Number.isFinite(node.graphX) ? node.graphX : NaN,
+    graphY: Number.isFinite(node.graphY) ? node.graphY : NaN,
+  };
+  if (type === 'target') {
+    base.refType = node.refType === 'name' ? 'name' : 'group';
+    base.refValue = String(node.refValue ?? '').trim();
+  } else if (type === 'condition') {
+    base.conditions = Array.isArray(node.conditions)
+      ? node.conditions.map(c => normalizeCondition(c))
+      : [normalizeCondition({})];
+    base.conditionLogic = node.conditionLogic === 'or' ? 'or' : 'and';
+  } else if (type === 'action') {
+    base.actions = Array.isArray(node.actions)
+      ? node.actions.map(normalizeFunctionAction)
+      : [createDefaultFunctionAction()];
+  }
+  return base;
+}
+
+// Migrate a legacy function (actions-only) into node-based assembly
+function migrateOldFunctionToNodes(fn) {
+  if (!fn) return;
+  const nodes = [];
+  const connections = [];
+  let x = 30;
+
+  // Create one action node with all the function's actions
+  const actionNode = createDefaultActionNode(fn.actions.map(a => normalizeFunctionAction(a)));
+  actionNode.graphX = x;
+  actionNode.graphY = 30;
+  nodes.push(actionNode);
+  x += 250;
+
+  // Check each action for target references — create target nodes
+  const seen = new Set();
+  fn.actions.forEach(a => {
+    const key = `${a.refType}:${a.refValue}`;
+    if (a.refValue && !seen.has(key)) {
+      seen.add(key);
+      const tn = createDefaultTargetNode(a.refType, a.refValue);
+      tn.graphX = x;
+      tn.graphY = 30 + (nodes.length - 1) * 120;
+      nodes.push(tn);
+      connections.push({ from: tn.id, to: actionNode.id });
+    }
+  });
+
+  fn.nodes = nodes;
+  fn.connections = connections;
+}
+
+// Sync fn.actions from action nodes — walks the connection graph to inherit
+// upstream target-node refs and attach condition-node chain conditions.
+function _bpSyncFnActionsFromNodes(fn) {
+  if (!fn || !Array.isArray(fn.nodes) || !fn.nodes.length) return;
+
+  const nodeMap = new Map();
+  for (const node of fn.nodes) nodeMap.set(node.id, node);
+
+  // Build incoming edges: nodeId -> [sourceNodeIds]
+  const incoming = new Map();
+  if (Array.isArray(fn.connections)) {
+    for (const conn of fn.connections) {
+      if (!incoming.has(conn.to)) incoming.set(conn.to, []);
+      incoming.get(conn.to).push(conn.from);
+    }
+  }
+
+  // Walk upstream from a node, collecting target and condition nodes
+  function walkUpstream(nodeId, visited) {
+    if (!visited) visited = new Set();
+    if (visited.has(nodeId)) return { targets: [], conditions: [] };
+    visited.add(nodeId);
+    const targets = [];
+    const conditions = [];
+    const sources = incoming.get(nodeId) || [];
+    for (const srcId of sources) {
+      const src = nodeMap.get(srcId);
+      if (!src) continue;
+      if (src.type === 'target') targets.push(src);
+      else if (src.type === 'condition') conditions.push(src);
+      const up = walkUpstream(srcId, visited);
+      targets.push(...up.targets);
+      conditions.push(...up.conditions);
+    }
+    return { targets, conditions };
+  }
+
+  const allActions = [];
+  for (const node of fn.nodes) {
+    if (node.type === 'action' && Array.isArray(node.actions)) {
+      const { targets, conditions } = walkUpstream(node.id);
+      const targetNode = targets.length ? targets[0] : null;
+      const chainConds = conditions.flatMap(cn => cn.conditions || []);
+      const chainLogic = conditions.length === 1 ? (conditions[0].conditionLogic || 'and') : 'and';
+
+      for (const a of node.actions) {
+        // Inherit target from upstream target node if action has none
+        if (!a.refValue && targetNode) {
+          a.refType = targetNode.refType;
+          a.refValue = targetNode.refValue;
+        }
+        // Attach chain conditions for runtime evaluation
+        a._chainConditions = chainConds.length ? chainConds : undefined;
+        a._chainConditionLogic = chainConds.length ? chainLogic : undefined;
+        a._nodeId = node.id;
+        allActions.push(a);
+      }
+    }
+  }
+  fn.actions = allActions.length ? allActions : [createDefaultFunctionAction()];
 }
 
 function getControlFunctionByName(name) {
@@ -10699,13 +13075,13 @@ function setRuntimeShadowQuality(level) {
 }
 
 function setRuntimeRenderDistance(value) {
-  quality.renderDist = THREE.MathUtils.clamp(parseFloat(value) || quality.renderDist, 20, 500);
+  quality.renderDist = THREE.MathUtils.clamp(parseFloat(value) || quality.renderDist, 20, 2000);
   if (qualityRenderDistInput) qualityRenderDistInput.value = quality.renderDist;
   syncRuntimeSettingsPanel();
 }
 
 function setRuntimeLightDistance(value) {
-  quality.lightDist = THREE.MathUtils.clamp(parseFloat(value) || quality.lightDist, 10, 200);
+  quality.lightDist = THREE.MathUtils.clamp(parseFloat(value) || quality.lightDist, 10, 500);
   if (qualityLightDistInput) qualityLightDistInput.value = quality.lightDist;
   syncRuntimeSettingsPanel();
 }
@@ -10931,16 +13307,10 @@ function showRuntimePauseMenu() {
   overlay.querySelector('#rp-quality-render')?.addEventListener('change', e => setRuntimeRenderDistance(e.target.value));
   overlay.querySelector('#rp-quality-light')?.addEventListener('change', e => setRuntimeLightDistance(e.target.value));
   overlay.querySelector('#rp-day-cycle')?.addEventListener('change', e => {
-    if (sunDayCycleEnabledInput) sunDayCycleEnabledInput.checked = !!e.target.checked;
-    updateSunSky();
-    syncRuntimeSettingsPanel();
+    if (sunDayCycleInput) sunDayCycleInput.checked = e.target.checked;
   });
   overlay.querySelector('#rp-day-duration')?.addEventListener('change', e => {
-    const val = clampSunDayDuration(parseFloat(e.target.value));
-    if (sunDayDurationInput) sunDayDurationInput.value = String(val);
-    e.target.value = val;
-    updateSunSky();
-    syncRuntimeSettingsPanel();
+    if (sunDayDurationInput) sunDayDurationInput.value = e.target.value;
   });
   overlay.querySelector('#rp-auto-perf')?.addEventListener('change', e => setRuntimeAutoPerformance(!!e.target.checked));
   overlay.querySelector('#rp-auto-visual')?.addEventListener('change', e => setRuntimeAutoVisual(!!e.target.checked));
@@ -10961,8 +13331,8 @@ function syncRuntimeSettingsPanel() {
     if (shadowSelect) shadowSelect.value = quality.shadows;
     if (renderInput) renderInput.value = quality.renderDist;
     if (lightInput) lightInput.value = quality.lightDist;
-    if (cycleInput && sunDayCycleEnabledInput) cycleInput.checked = !!sunDayCycleEnabledInput.checked;
-    if (dayDurInput && sunDayDurationInput) dayDurInput.value = clampSunDayDuration(parseFloat(sunDayDurationInput.value));
+    if (cycleInput) cycleInput.checked = sunDayCycleInput?.checked ?? SUN_DAY_CYCLE_DEFAULT;
+    if (dayDurInput) dayDurInput.value = sunDayDurationInput?.value ?? SUN_DAY_DURATION_DEFAULT;
     if (autoPerfInput) autoPerfInput.checked = !!runtimeOptimizer.autoPerformance;
     if (autoVisualInput) autoVisualInput.checked = !!runtimeOptimizer.autoVisual;
   }
@@ -10979,8 +13349,8 @@ function syncRuntimeSettingsPanel() {
     if (shadowSelect) shadowSelect.value = quality.shadows;
     if (renderInput) renderInput.value = quality.renderDist;
     if (lightInput) lightInput.value = quality.lightDist;
-    if (cycleInput && sunDayCycleEnabledInput) cycleInput.checked = !!sunDayCycleEnabledInput.checked;
-    if (dayDurInput && sunDayDurationInput) dayDurInput.value = clampSunDayDuration(parseFloat(sunDayDurationInput.value));
+    if (cycleInput) cycleInput.checked = sunDayCycleInput?.checked ?? SUN_DAY_CYCLE_DEFAULT;
+    if (dayDurInput) dayDurInput.value = sunDayDurationInput?.value ?? SUN_DAY_DURATION_DEFAULT;
     if (autoPerfInput) autoPerfInput.checked = !!runtimeOptimizer.autoPerformance;
     if (autoVisualInput) autoVisualInput.checked = !!runtimeOptimizer.autoVisual;
   }
@@ -11053,16 +13423,10 @@ function ensureRuntimeHud() {
   panel.querySelector('#rt-quality-render')?.addEventListener('change', e => setRuntimeRenderDistance(e.target.value));
   panel.querySelector('#rt-quality-light')?.addEventListener('change', e => setRuntimeLightDistance(e.target.value));
   panel.querySelector('#rt-day-cycle')?.addEventListener('change', e => {
-    if (sunDayCycleEnabledInput) sunDayCycleEnabledInput.checked = !!e.target.checked;
-    updateSunSky();
-    syncRuntimeSettingsPanel();
+    if (sunDayCycleInput) sunDayCycleInput.checked = e.target.checked;
   });
   panel.querySelector('#rt-day-duration')?.addEventListener('change', e => {
-    const val = clampSunDayDuration(parseFloat(e.target.value));
-    if (sunDayDurationInput) sunDayDurationInput.value = String(val);
-    e.target.value = val;
-    updateSunSky();
-    syncRuntimeSettingsPanel();
+    if (sunDayDurationInput) sunDayDurationInput.value = e.target.value;
   });
   panel.querySelector('#rt-auto-perf')?.addEventListener('change', e => {
     setRuntimeAutoPerformance(!!e.target.checked);
@@ -11302,8 +13666,6 @@ function showStudio() {
   if (functionsPanelEl) functionsPanelEl.style.display = runtimeMode ? 'none' : '';
   if (functionsResizerEl) functionsResizerEl.style.display = runtimeMode ? 'none' : '';
   if (runtimeMode) applyRuntimeChrome();
-  syncSunInputs();
-  updateSunSky();
   onResize();
   refreshStatus();
   _offerRestore();
@@ -11341,9 +13703,6 @@ function startNewProject() {
   resetSceneForNewProject();
   _pendingRestore = null;
   clearRestoreSlot();
-  syncSunInputs();
-  updateSunSky();
-  applyFogSettings();
   showStudio();
 }
 
@@ -11697,6 +14056,7 @@ function ensureSimLightState(mesh) {
 function simulateFunction(fnIdx) {
   const fn = controlFunctions[fnIdx];
   if (!fn || !fn.name) return;
+  _bpSyncFnActionsFromNodes(fn);
   _simActive = true;
   const nowSeconds = performance.now() / 1000;
 
@@ -12550,37 +14910,6 @@ function syncFpsCamera() {
   fpsCam.rotation.x = fpsPitch;
 }
 
-// ─── Fog ──────────────────────────────────────────────────────────────────────
-function applyFogSettings() {
-  if (!fogSettings.enabled) {
-    scene.fog = null;
-    return;
-  }
-  const b = THREE.MathUtils.clamp(fogSettings.brightness ?? 1, 0, 5);
-  const base = new THREE.Color(fogSettings.color);
-  const col = base.multiplyScalar(b);
-  if (fogSettings.mode === 'linear') {
-    scene.fog = new THREE.Fog(col, fogSettings.near, fogSettings.far);
-  } else {
-    scene.fog = new THREE.FogExp2(col, fogSettings.density);
-  }
-}
-function syncFogUI() {
-  if (fogEnabledInput) fogEnabledInput.checked = fogSettings.enabled;
-  if (fogColorInput)   fogColorInput.value = '#' + (fogSettings.color >>> 0).toString(16).padStart(6, '0');
-  if (fogDensityInput) fogDensityInput.value = fogSettings.density;
-  if (fogBrightnessInput) fogBrightnessInput.value = fogSettings.brightness ?? 1;
-}
-
-function readFogUI() {
-  fogSettings.enabled = !!(fogEnabledInput && fogEnabledInput.checked);
-  if (fogColorInput) fogSettings.color = parseInt(fogColorInput.value.replace('#', ''), 16) || 0;
-  if (fogDensityInput) fogSettings.density = parseFloat(fogDensityInput.value) || 0.025;
-  if (fogBrightnessInput) fogSettings.brightness = parseFloat(fogBrightnessInput.value) || 1;
-  applyFogSettings();
-  markRestoreDirty();
-}
-
 function syncFovUI() {
   if (fovEditorInput) fovEditorInput.value = editorFov;
   if (fovPlaytestInput) fovPlaytestInput.value = playtestFov;
@@ -12854,6 +15183,8 @@ function _serializeBufferGeometry(geo) {
   if (norm) data.normal = Array.from(norm.array);
   const uv = geo.attributes.uv;
   if (uv) data.uv = Array.from(uv.array);
+  const col = geo.attributes.color;
+  if (col) data.color = Array.from(col.array);
   if (geo.index) data.index = Array.from(geo.index.array);
   return data;
 }
@@ -12863,6 +15194,7 @@ function _deserializeBufferGeometry(data) {
   if (data.position) geo.setAttribute('position', new THREE.Float32BufferAttribute(data.position, 3));
   if (data.normal)   geo.setAttribute('normal',   new THREE.Float32BufferAttribute(data.normal, 3));
   if (data.uv)       geo.setAttribute('uv',       new THREE.Float32BufferAttribute(data.uv, 2));
+  if (data.color)    geo.setAttribute('color',     new THREE.Float32BufferAttribute(data.color, 3));
   if (data.index)    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(data.index), 1));
   geo.computeBoundingBox();
   geo.computeBoundingSphere();
@@ -12951,6 +15283,12 @@ function serializeSingleObject(m) {
   if (m.userData.metalness !== undefined) o.metalness = m.userData.metalness;
   if (m.userData.roughness !== undefined) o.roughness = m.userData.roughness;
   if (m.userData._hasCustomGeometry) {
+  if (m.userData._mergedOriginals) {
+    o.mergedOriginals = m.userData._mergedOriginals;
+  }
+  if (m.userData._isStatic) {
+    o.isStatic = true;
+  }
     o.customGeometry = _serializeBufferGeometry(m.geometry);
   }
   return o;
@@ -14144,6 +16482,7 @@ function executeControlFunction(functionName, callerMesh, active, context = {}) 
   if ((context.depth ?? 0) > 6) return false;
   const func = getControlFunctionByName(functionName);
   if (!func) return false;
+  _bpSyncFnActionsFromNodes(func);
   if (active && isControlFunctionStopped(func.name)) return false;
   if (active && isFunctionPaused(func.name)) return false;
   const nowSeconds = performance.now() / 1000;
@@ -14153,6 +16492,14 @@ function executeControlFunction(functionName, callerMesh, active, context = {}) 
     const action = normalizeFunctionAction(func.actions[i]);
     const needsTargetRef = ['move', 'rotate', 'light', 'path'].includes(action.actionType);
     if (needsTargetRef && !action.refValue) continue;
+
+    // Evaluate chain conditions from upstream condition nodes in the graph
+    if (active && action._chainConditions && action._chainConditions.length) {
+      const chainMet = action._chainConditionLogic === 'or'
+        ? action._chainConditions.some(c => evaluateCondition(c, callerMesh, context.activatedAt))
+        : action._chainConditions.every(c => evaluateCondition(c, callerMesh, context.activatedAt));
+      if (!chainMet) continue;
+    }
 
     if (action.actionType === 'move') {
       hasTransformAction = true;
@@ -14323,7 +16670,7 @@ function evaluateTriggerCalls(mesh) {
         if (call.oneShot) call.completed = true;
       } else {
         const runStartedAt = performance.now() / 1000;
-        const started = executeControlFunction(call.functionName, mesh, true);
+        const started = executeControlFunction(call.functionName, mesh, true, { activatedAt: call.activatedAt });
         if (started) {
           call.started = true;
           call.runStartedAt = runStartedAt;
@@ -15551,30 +17898,49 @@ document.addEventListener('mousemove', e => {
 });
 // ─── Canvas pointer events ────────────────────────────────────────────────────
 let pDownPos = null;
+let pDownPosR = null;   // right-button
 renderer.domElement.addEventListener('pointerdown', e => {
-  if (e.button !== 0) return;
-  pDownPos = { x: e.clientX, y: e.clientY };
+  if (e.button === 0) pDownPos = { x: e.clientX, y: e.clientY };
+  if (e.button === 2) pDownPosR = { x: e.clientX, y: e.clientY };
 });
 renderer.domElement.addEventListener('pointerup', e => {
-  if (e.button !== 0) return;
-  if (!pDownPos) return;
-  const dx = e.clientX - pDownPos.x;
-  const dy = e.clientY - pDownPos.y;
-  pDownPos = null;
-  if (Math.hypot(dx, dy) > 5) return;          // drag -> not a click
-  if (state.isPlaytest) {                       // playtest: lock or shoot
-    if (runtimeMode && runtimePauseActive) return;
-    if (tryOpenRuntimeKeypadFromPointerEvent(e)) return;
-    if (tryOpenRuntimeScreenFromPointerEvent(e)) return;
-    if (!fpsLocked) renderer.domElement.requestPointerLock();
-    else fpsShoot();
-    return;
+  if (e.button === 0) {
+    if (!pDownPos) return;
+    const dx = e.clientX - pDownPos.x;
+    const dy = e.clientY - pDownPos.y;
+    pDownPos = null;
+    if (Math.hypot(dx, dy) > 5) return;          // drag -> not a click
+    if (state.isPlaytest) {                       // playtest: lock or shoot
+      if (runtimeMode && runtimePauseActive) return;
+      if (tryOpenRuntimeKeypadFromPointerEvent(e)) return;
+      if (tryOpenRuntimeScreenFromPointerEvent(e)) return;
+      if (!fpsLocked) renderer.domElement.requestPointerLock();
+      else fpsShoot();
+      return;
+    }
+    if (transformControls.dragging) return;
+    handleEditorClick(e);
   }
-  if (transformControls.dragging) return;
-  handleEditorClick(e);
+  // ── Right-click select ───────────────────────────────────
+  if (e.button === 2) {
+    if (!pDownPosR) return;
+    const dx = e.clientX - pDownPosR.x;
+    const dy = e.clientY - pDownPosR.y;
+    pDownPosR = null;
+    if (Math.hypot(dx, dy) > 5) return;          // was a drag (orbit pan)
+    if (state.isPlaytest || runtimeMode) return;
+    const ndc = toNDC(e);
+    const obj = hitObject(ndc);
+    if (obj) {
+      setMode('select');
+      selectObject(obj);
+      selectEditorGroup(obj);
+    }
+  }
 });
 
 renderer.domElement.addEventListener('contextmenu', e => {
+  if (!state.isPlaytest) { e.preventDefault(); return; }
   if (state.isPlaytest && pickKeypadMeshFromPointerEvent(e)) e.preventDefault();
 });
 
@@ -15896,6 +18262,14 @@ window.addEventListener('keydown', e => {
     if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space'].includes(e.code)) e.preventDefault();
   }
 
+  // Arrow keys rotate ghost preview by 15°
+  if (state.mode === 'place' && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
+    e.preventDefault();
+    const step = Math.PI / 12;   // 15°
+    state.placeRotationY += e.code === 'ArrowLeft' ? step : -step;
+    if (ghost) ghost.rotation.y = state.placeRotationY;
+  }
+
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'c') { e.preventDefault(); copySelected(); return; }
@@ -15908,11 +18282,7 @@ window.addEventListener('keydown', e => {
   }
 
   if (state.mode === 'select' && !e.ctrlKey && !e.metaKey) {
-    if (state.transformMode === 'scale') {
-      if (e.code === 'KeyX') { e.preventDefault(); toggleScaleSide('x'); return; }
-      if (e.code === 'KeyY') { e.preventDefault(); toggleScaleSide('y'); return; }
-      if (e.code === 'KeyZ') { e.preventDefault(); toggleScaleSide('z'); return; }
-    }
+
     if (e.code === 'Digit1') { setTransformMode('translate'); return; }
     if (e.code === 'Digit2') { setTransformMode('rotate');    return; }
     if (e.code === 'Digit3') { setTransformMode('scale');     return; }
@@ -15924,7 +18294,11 @@ window.addEventListener('keydown', e => {
     return;
   }
   if (k === 'p') { startPlaytest(); return; }
-  if (k === 'escape') { if (editorFreeLook) { stopEditorFreeLook(); return; } stopPlaytest(); }
+  if (k === 'escape') {
+    if (_cameraPreviewActive) { stopCameraAnimationPreview(); refreshProps(); return; }
+    if (editorFreeLook) { stopEditorFreeLook(); return; }
+    stopPlaytest();
+  }
   if (k === 'f' && !e.ctrlKey && !e.metaKey) {
     e.preventDefault();
     if (editorFreeLook) stopEditorFreeLook(); else startEditorFreeLook();
@@ -15965,6 +18339,8 @@ function setMode(mode) {
   if (mode !== 'paint') state.colorPickArmed = false;
   if (mode !== 'place') state._placingCustomTemplate = null;
   if (modeSelect) modeSelect.value = mode;
+  // highlight sidebar mode button
+  document.querySelectorAll('.tool-btn[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
   if (mode !== 'select') selectObject(null);
   transformGroup.style.opacity       = mode === 'select' ? '1'    : '.4';
   transformGroup.style.pointerEvents = mode === 'select' ? ''     : 'none';
@@ -15976,6 +18352,8 @@ function setTransformMode(tm) {
   state.transformMode = tm;
   transformControls.setMode(tm);
   if (gizmoSelect) gizmoSelect.value = tm;
+  // highlight sidebar transform button
+  document.querySelectorAll('.tool-btn[data-transform]').forEach(b => b.classList.toggle('active', b.dataset.transform === tm));
   refreshStatus();
 }
 
@@ -16063,7 +18441,7 @@ function activeCameraPosition() {
 }
 
 function setChunkRange(val) {
-  const range = THREE.MathUtils.clamp(parseInt(val, 10) || 1, 1, 5);
+  const range = THREE.MathUtils.clamp(parseInt(val, 10) || 1, 1, 20);
   state.chunkRenderRadius = range;
   chunkRangeSelect.value = String(range);
   lastChunkX = Infinity;
@@ -16076,7 +18454,7 @@ function setChunkRange(val) {
 
 function setTopMenu(panelName) {
   const selected = panelName || 'block';
-  topMenuSelect.value = selected;
+  if (topMenuSelect) topMenuSelect.value = selected;
   topPanels.forEach(panel => panel.classList.toggle('active', panel.dataset.panel === selected));
   // Switch sidebar sections
   document.querySelectorAll('.sidebar-section').forEach(s => s.classList.remove('active'));
@@ -16112,7 +18490,144 @@ function moveEditorCamera(dt) {
 
 if (modeSelect) modeSelect.addEventListener('change', () => setMode(modeSelect.value));
 if (gizmoSelect) gizmoSelect.addEventListener('change', () => setTransformMode(gizmoSelect.value));
+
+// ─── Sidebar tool-button wiring ──────────────────────────────────────────────
+document.querySelectorAll('.tool-btn[data-mode]').forEach(b => {
+  b.addEventListener('click', () => setMode(b.dataset.mode));
+});
+document.querySelectorAll('.tool-btn[data-transform]').forEach(b => {
+  b.addEventListener('click', () => setTransformMode(b.dataset.transform));
+});
+
+// ─── Menu-bar dropdown system ────────────────────────────────────────────────
+{
+  let _activeMenu = null;  // currently open dropdown element
+
+  function closeActiveMenu() {
+    if (_activeMenu) { _activeMenu.remove(); _activeMenu = null; }
+    document.removeEventListener('pointerdown', _menuOutsideHandler, true);
+  }
+
+  function _menuOutsideHandler(e) {
+    if (_activeMenu && !_activeMenu.contains(e.target) && !e.target.classList.contains('menu-bar-btn')) {
+      closeActiveMenu();
+    }
+  }
+
+  function openMenuDropdown(btnEl, items) {
+    // If clicking the same button again, just close
+    if (_activeMenu && _activeMenu._menuBtn === btnEl) { closeActiveMenu(); return; }
+    closeActiveMenu();
+
+    const dd = document.createElement('div');
+    dd.className = 'menu-dropdown';
+    dd._menuBtn = btnEl;
+
+    items.forEach(item => {
+      if (item === '---') {
+        const hr = document.createElement('div');
+        hr.className = 'menu-divider';
+        dd.appendChild(hr);
+        return;
+      }
+      const mi = document.createElement('div');
+      mi.className = 'menu-item';
+      mi.textContent = item.label + (item.shortcut ? '    ' + item.shortcut : '');
+      if (item.disabled) { mi.style.opacity = '.4'; mi.style.pointerEvents = 'none'; }
+      mi.addEventListener('click', () => { closeActiveMenu(); if (item.action) item.action(); });
+      dd.appendChild(mi);
+    });
+
+    // Position below the button
+    const r = btnEl.getBoundingClientRect();
+    dd.style.position = 'fixed';
+    dd.style.left = r.left + 'px';
+    dd.style.top = r.bottom + 'px';
+    document.body.appendChild(dd);
+    _activeMenu = dd;
+    setTimeout(() => document.addEventListener('pointerdown', _menuOutsideHandler, true), 0);
+  }
+
+  // ── File menu ──
+  const menuFileBtn = document.getElementById('menu-file');
+  if (menuFileBtn) menuFileBtn.addEventListener('click', () => openMenuDropdown(menuFileBtn, [
+    { label: '💾 Save Project',     shortcut: '',          action: () => saveProjectToLibrary() },
+    { label: '📤 Export JSON',      shortcut: '',          action: () => saveLevel() },
+    { label: '📂 Load JSON',        shortcut: '',          action: () => loadInput.click() },
+    '---',
+    { label: '🎮 Export Game HTML', shortcut: '',          action: () => exportStandaloneGameHtml() },
+    { label: '🧩 Export Loader HTML', shortcut: '',        action: () => exportRuntimeLoaderHtml() },
+    '---',
+    { label: '🗑 Clear All',        shortcut: '',          action: () => clearAll() },
+    '---',
+    { label: '🏠 Back to Menu',     shortcut: '',          action: () => showMainMenu() },
+  ]));
+
+  // ── Edit menu ──
+  const menuEditBtn = document.getElementById('menu-edit');
+  if (menuEditBtn) menuEditBtn.addEventListener('click', () => openMenuDropdown(menuEditBtn, [
+    { label: '↩ Undo',             shortcut: 'Ctrl+Z',   action: () => undo() },
+    { label: '↪ Redo',             shortcut: 'Ctrl+Y',   action: () => redo() },
+    '---',
+    { label: '☷ Select All',       shortcut: 'Ctrl+A',   action: () => selectAllObjects() },
+    { label: '⊞ Group',            shortcut: 'Ctrl+G',   action: () => groupSelected() },
+    { label: '⊟ Ungroup',          shortcut: 'Ctrl+Shift+G', action: () => ungroupSelected() },
+    '---',
+    { label: '⊕ Merge',            shortcut: '',          action: () => mergeSelectedObjects() },
+    { label: '⊖ Unmerge',          shortcut: '',          action: () => unmergeSelectedObject() },
+  ]));
+
+  // ── View menu ──
+  const menuViewBtn = document.getElementById('menu-view');
+  if (menuViewBtn) menuViewBtn.addEventListener('click', () => openMenuDropdown(menuViewBtn, [
+    { label: '🧱 Block / Library',  shortcut: '',         action: () => setTopMenu('block') },
+    { label: '💡 Light',             shortcut: '',         action: () => setTopMenu('light') },
+    { label: '⊞ Grid',              shortcut: '',         action: () => setTopMenu('grid') },
+    { label: '🏃 Player',            shortcut: '',         action: () => setTopMenu('player') },
+    '---',
+    { label: '🔢 Vars',             shortcut: '',         action: () => setTopMenu('vars') },
+    { label: '☑ Bools',             shortcut: '',         action: () => setTopMenu('bools') },
+    { label: '🌍 Worlds',           shortcut: '',         action: () => setTopMenu('worlds') },
+    '---',
+    { label: '📁 Files',            shortcut: '',         action: () => setTopMenu('files') },
+  ]));
+}
+
+// ─── Library hover tooltips ──────────────────────────────────────────────────
+const _libTooltips = {
+  wall:       'Standard wall block (1×1×1)',
+  floor:      'Thin floor tile (1×0.1×1)',
+  terrain:    'Sculpt-able terrain chunk',
+  cube:       'Basic cube primitive',
+  sphere:     'Smooth sphere primitive',
+  cylinder:   'Cylinder primitive',
+  cone:       'Cone primitive',
+  pyramid:    'Pyramid (4-sided cone)',
+  prism:      'Triangular prism',
+  torus:      'Donut / torus shape',
+  plane2d:    'Flat 2D rectangle',
+  triangle2d: 'Flat 2D triangle',
+  circle2d:   'Flat 2D circle / disc',
+  polygon2d:  'Flat 2D regular polygon',
+  light:      'Point light source — illuminates nearby objects',
+  target:     'Blueprint target — attach actions via Blueprint',
+  checkpoint: 'Player respawn point',
+  spawn:      'World spawn position',
+  joint:      'Physics joint connecting two objects',
+  pivot:      'Pivot point for rotating objects',
+  teleport:   'Teleport destination marker',
+  trigger:    'Invisible trigger zone — fires actions on enter',
+  keypad:     'Interactive keypad / code panel',
+  npc:        'Non-player character',
+  text:       '2D text label overlay',
+  text3d:     '3D extruded text object',
+  screen:     'Interactive screen / display surface',
+  camera:     'Camera viewpoint for cinematic or fixed angles',
+};
+
 document.querySelectorAll('.lib-btn').forEach(b => {
+  const tip = _libTooltips[b.dataset.type];
+  if (tip) b.title = tip;
   b.addEventListener('click', () => setPlacingType(b.dataset.type));
   b.addEventListener('contextmenu', e => {
     if (runtimeMode || state.isPlaytest) return;
@@ -16194,28 +18709,40 @@ if (audioImportBtn && audioImportInput) {
 
 snapSelect.addEventListener('change', () => { setSnap(snapSelect.value); saveEditorSettings(); });
 lightIntensityInput.addEventListener('change', () => setDefaultLightIntensity(lightIntensityInput.value));
-sunIntensityInput.addEventListener('change', applySunUI);
-[sunTimeInput, sunNorthInput, sunTurbidityInput, sunShadowRangeInput].forEach(el => el.addEventListener('change', applySunUI));
+// ─── Sky / atmosphere event listeners ────────────────────────────────────────
+if (sunTimeInput)        sunTimeInput.addEventListener('input', applySunUI);
+if (sunNorthInput)       sunNorthInput.addEventListener('input', applySunUI);
+if (sunIntensityInput)   sunIntensityInput.addEventListener('change', applySunUI);
+if (sunTurbidityInput)   sunTurbidityInput.addEventListener('input', applySunUI);
+if (sunShadowRangeInput) sunShadowRangeInput.addEventListener('change', applySunUI);
+if (sunSizeInput)        sunSizeInput.addEventListener('change', applySunUI);
+if (sunDayCycleInput)    sunDayCycleInput.addEventListener('change', applySunUI);
 if (sunDayDurationInput) sunDayDurationInput.addEventListener('change', applySunUI);
-if (sunDayCycleEnabledInput) sunDayCycleEnabledInput.addEventListener('change', applySunUI);
-// New sky/cloud/star/moon listeners
-if (sunSizeInput) sunSizeInput.addEventListener('change', applySunUI);
-if (skyColorInput) skyColorInput.addEventListener('input', applySunUI);
-if (cloudsEnabledInput) cloudsEnabledInput.addEventListener('change', applySunUI);
+if (skyColorInput)       skyColorInput.addEventListener('input', applySunUI);
+if (cloudsEnabledInput)  cloudsEnabledInput.addEventListener('change', applySunUI);
 if (cloudWindSpeedInput) cloudWindSpeedInput.addEventListener('change', applySunUI);
-if (cloudWindDirInput) cloudWindDirInput.addEventListener('change', applySunUI);
-if (cloudOpacityInput) cloudOpacityInput.addEventListener('change', applySunUI);
-if (starsEnabledInput) starsEnabledInput.addEventListener('change', applySunUI);
-if (starsCountInput) starsCountInput.addEventListener('change', () => { _buildStars(parseInt(starsCountInput.value) || STARS_COUNT_DEFAULT); applySunUI(); });
+if (cloudWindDirInput)   cloudWindDirInput.addEventListener('change', applySunUI);
+if (cloudOpacityInput)   cloudOpacityInput.addEventListener('input', applySunUI);
+if (starsEnabledInput)   starsEnabledInput.addEventListener('change', applySunUI);
+if (starsCountInput)     starsCountInput.addEventListener('change', () => {
+  const c = THREE.MathUtils.clamp(parseInt(starsCountInput.value, 10) || STARS_COUNT_DEFAULT, 100, 5000);
+  _buildStars(c);
+  applySunUI();
+});
 if (starsBrightnessInput) starsBrightnessInput.addEventListener('change', applySunUI);
-if (moonEnabledInput) moonEnabledInput.addEventListener('change', applySunUI);
+if (moonEnabledInput)    moonEnabledInput.addEventListener('change', applySunUI);
 if (moonBrightnessInput) moonBrightnessInput.addEventListener('change', applySunUI);
-if (moonAuraInput) moonAuraInput.addEventListener('change', applySunUI);
+if (moonAuraInput)       moonAuraInput.addEventListener('change', applySunUI);
+if (fogEnabledInput)     fogEnabledInput.addEventListener('change', readFogUI);
+if (fogModeInput)        fogModeInput.addEventListener('change', readFogUI);
+if (fogColorInput)       fogColorInput.addEventListener('input', readFogUI);
+if (fogDensityInput)     fogDensityInput.addEventListener('change', readFogUI);
+if (fogNearInput)        fogNearInput.addEventListener('change', readFogUI);
+if (fogFarInput)         fogFarInput.addEventListener('change', readFogUI);
+if (fogBrightnessInput)  fogBrightnessInput.addEventListener('change', readFogUI);
 chunkRangeSelect.addEventListener('change', () => setChunkRange(chunkRangeSelect.value));
-topMenuSelect.addEventListener('change', () => setTopMenu(topMenuSelect.value));
-if (scaleSideXSelect) scaleSideXSelect.addEventListener('change', () => { state.scaleSides.x = scaleSideXSelect.value === 'neg' ? 'neg' : 'pos'; refreshStatus(); });
-if (scaleSideYSelect) scaleSideYSelect.addEventListener('change', () => { state.scaleSides.y = scaleSideYSelect.value === 'neg' ? 'neg' : 'pos'; refreshStatus(); });
-if (scaleSideZSelect) scaleSideZSelect.addEventListener('change', () => { state.scaleSides.z = scaleSideZSelect.value === 'neg' ? 'neg' : 'pos'; refreshStatus(); });
+if (topMenuSelect) topMenuSelect.addEventListener('change', () => setTopMenu(topMenuSelect.value));
+
 if (shapeSidesInput) shapeSidesInput.addEventListener('change', () => setPlacementSides(shapeSidesInput.value));
 if (shapeDepthInput) shapeDepthInput.addEventListener('change', () => setPlacementDepth(shapeDepthInput.value));
 if (placeOpacityInput) placeOpacityInput.addEventListener('change', () => setPlacementOpacity(placeOpacityInput.value));
@@ -16317,7 +18844,51 @@ if (btnSaveCustom) btnSaveCustom.addEventListener('click', () => {
   saveSelectionAsCustomObject(name || undefined);
 });
 
-syncScaleSideUI();
+// Import 3D Model button
+const btnImportModel = document.getElementById('btn-import-model');
+const importModelInput = document.getElementById('import-model-input');
+if (btnImportModel && importModelInput) {
+  btnImportModel.addEventListener('click', () => importModelInput.click());
+  importModelInput.addEventListener('change', async () => {
+    const file = importModelInput.files[0];
+    if (file) await importGLTFModel(file);
+    importModelInput.value = '';
+  });
+}
+
+// Drag-and-drop 3D model import on canvas
+canvasContainer.addEventListener('dragover', (e) => {
+  if ([...e.dataTransfer.types].includes('Files')) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    canvasContainer.style.outline = '2px dashed var(--accent)';
+  }
+});
+canvasContainer.addEventListener('dragleave', () => {
+  canvasContainer.style.outline = '';
+});
+canvasContainer.addEventListener('drop', async (e) => {
+  canvasContainer.style.outline = '';
+  const files = [...e.dataTransfer.files];
+  const modelFile = files.find(f => /\.(glb|gltf)$/i.test(f.name));
+  if (modelFile) {
+    e.preventDefault();
+    await importGLTFModel(modelFile);
+  }
+});
+
+// Custom object search and sort controls
+const customObjSearchInput = document.getElementById('custom-obj-search');
+const customObjSortSelect = document.getElementById('custom-obj-sort');
+if (customObjSearchInput) customObjSearchInput.addEventListener('input', () => {
+  _customObjectSearch = customObjSearchInput.value;
+  refreshCustomObjectUI();
+});
+if (customObjSortSelect) customObjSortSelect.addEventListener('change', () => {
+  _customObjectSort = customObjSortSelect.value;
+  refreshCustomObjectUI();
+  saveEditorSettings();
+});
 
 // Gamerule inputs — support variable names in number fields
 function bindVarAwareGrInput(inputEl, ruleKey, parseFn, fallback) {
@@ -16471,8 +19042,11 @@ undoBtn.addEventListener('click', undo);
 redoBtn.addEventListener('click', redo);
 document.getElementById('btn-group').addEventListener('click', groupSelected);
 document.getElementById('btn-ungroup').addEventListener('click', ungroupSelected);
+document.getElementById('btn-merge').addEventListener('click', mergeSelectedObjects);
+document.getElementById('btn-unmerge').addEventListener('click', unmergeSelectedObject);
 document.getElementById('btn-select-all').addEventListener('click', selectAllObjects);
-document.getElementById('btn-clear').addEventListener('click', clearAll);
+const _btnClear = document.getElementById('btn-clear');
+if (_btnClear) _btnClear.addEventListener('click', clearAll);
 
 const btnSaveJson = document.getElementById('btn-save-json') || document.getElementById('btn-save');
 if (btnSaveJson) btnSaveJson.addEventListener('click', saveLevel);
@@ -16508,7 +19082,8 @@ if (btnExportLoader) {
     }
   });
 }
-document.getElementById('btn-load').addEventListener('click', () => loadInput.click());
+const _btnLoad = document.getElementById('btn-load');
+if (_btnLoad) _btnLoad.addEventListener('click', () => loadInput.click());
 loadInput.addEventListener('change', () => {
   const file = loadInput.files[0];
   if (!file) return;
@@ -16625,6 +19200,11 @@ window.addEventListener('resize', () => {
   if (nextFnWidth !== functionsPanelState.width) {
     functionsPanelState.width = nextFnWidth;
     applyFunctionsPanelState({ save: true, reflow: false });
+  }
+  const nextBotH = clampBottomHeight(bottomPanelState.height);
+  if (nextBotH !== bottomPanelState.height) {
+    bottomPanelState.height = nextBotH;
+    applyBottomPanelState({ save: true, reflow: false });
   }
 });
 
@@ -17067,6 +19647,16 @@ function bindTractionToggle(mesh) {
       t.userData.traction = toggle.checked;
       if (before !== toggle.checked) pushUndo({ type: 'traction', mesh: t, before, after: toggle.checked });
     }
+  });
+}
+
+function bindStaticToggle(mesh) {
+  const toggle = document.getElementById('prop-static-toggle');
+  if (!toggle || state.selectedObject !== mesh) return;
+  toggle.addEventListener('change', () => {
+    const targets = getPropertyTargets(mesh);
+    for (const t of targets) setObjectStatic(t, toggle.checked);
+    markRestoreDirty();
   });
 }
 
@@ -17756,22 +20346,356 @@ function bindScreenProps(mesh) {
 function bindCameraProps(mesh) {
   if (state.selectedObject !== mesh) return;
   const targets = getPropertyTargets(mesh).filter(t => t.userData.type === 'camera');
+
+  const getCurrentConfig = () => normalizeCameraConfig(mesh.userData.cameraConfig);
+  const getClipName = () => getCurrentConfig().currentClip;
+  const getClip = () => { const cfg = getCurrentConfig(); return _getActiveClip(cfg); };
+
+  const updateAll = (patch) => {
+    for (const t of targets) {
+      const cur = normalizeCameraConfig(t.userData.cameraConfig);
+      t.userData.cameraConfig = { ...cur, ...patch };
+    }
+    _updateCameraFrustumHelper();
+    _updateCameraLookAtHelper();
+    _refreshCameraPathPreview(mesh);
+    markRestoreDirty();
+  };
+
+  const updateClip = (clipPatch) => {
+    const clipName = getClipName();
+    if (!clipName) return;
+    for (const t of targets) {
+      const cur = normalizeCameraConfig(t.userData.cameraConfig);
+      if (cur.clips[clipName]) {
+        cur.clips[clipName] = normalizeCameraClip({ ...cur.clips[clipName], ...clipPatch });
+        t.userData.cameraConfig = cur;
+      }
+    }
+    _updateCameraFrustumHelper();
+    _updateCameraLookAtHelper();
+    _refreshCameraPathPreview(mesh);
+    markRestoreDirty();
+  };
+
+  // Lens properties
   const fovInput = document.getElementById('prop-camera-fov');
   const nearInput = document.getElementById('prop-camera-near');
   const farInput = document.getElementById('prop-camera-far');
-  const update = () => {
+  const aspectInput = document.getElementById('prop-camera-aspect');
+  const lensUpdate = () => updateAll({
+    fov: parseFloat(fovInput?.value) || 60,
+    near: parseFloat(nearInput?.value) || 0.1,
+    far: parseFloat(farInput?.value) || 1000,
+    aspectRatio: parseFloat(aspectInput?.value) || (16 / 9),
+  });
+  if (fovInput) fovInput.addEventListener('change', lensUpdate);
+  if (nearInput) nearInput.addEventListener('change', lensUpdate);
+  if (farInput) farInput.addEventListener('change', lensUpdate);
+  if (aspectInput) aspectInput.addEventListener('change', lensUpdate);
+
+  // Look-At Target
+  const lookAtEnabled = document.getElementById('prop-camera-lookat-enabled');
+  if (lookAtEnabled) lookAtEnabled.addEventListener('change', () => {
+    updateAll({ lookAtEnabled: lookAtEnabled.checked });
+    if (lookAtEnabled.checked) {
+      _createCameraLookAtHelper(mesh);
+    } else {
+      _removeCameraLookAtHelper();
+    }
+    refreshProps();
+  });
+  const lookAtX = document.getElementById('prop-camera-lookat-x');
+  const lookAtY = document.getElementById('prop-camera-lookat-y');
+  const lookAtZ = document.getElementById('prop-camera-lookat-z');
+  const lookAtUpdate = () => {
+    updateAll({ lookAtTarget: [parseFloat(lookAtX?.value) || 0, parseFloat(lookAtY?.value) || 0, parseFloat(lookAtZ?.value) || 0] });
+    _updateCameraLookAtHelper();
+  };
+  if (lookAtX) lookAtX.addEventListener('change', lookAtUpdate);
+  if (lookAtY) lookAtY.addEventListener('change', lookAtUpdate);
+  if (lookAtZ) lookAtZ.addEventListener('change', lookAtUpdate);
+
+  // ── Clip management ──
+  const clipSelect = document.getElementById('prop-camera-clip-select');
+  if (clipSelect) clipSelect.addEventListener('change', () => {
+    updateAll({ currentClip: clipSelect.value });
+    refreshProps();
+  });
+
+  const clipNewBtn = document.getElementById('prop-camera-clip-new');
+  if (clipNewBtn) clipNewBtn.addEventListener('click', () => {
+    const cfg = getCurrentConfig();
+    const name = prompt('New clip name:', 'Clip_' + (Object.keys(cfg.clips).length + 1));
+    if (!name?.trim()) return;
+    cfg.clips[name.trim()] = normalizeCameraClip({});
+    cfg.currentClip = name.trim();
     for (const t of targets) {
-      t.userData.cameraConfig = normalizeCameraConfig({
-        fov: parseFloat(fovInput?.value) || 60,
-        near: parseFloat(nearInput?.value) || 0.1,
-        far: parseFloat(farInput?.value) || 1000,
-      });
+      t.userData.cameraConfig = cfg;
     }
     markRestoreDirty();
-  };
-  if (fovInput) fovInput.addEventListener('change', update);
-  if (nearInput) nearInput.addEventListener('change', update);
-  if (farInput) farInput.addEventListener('change', update);
+    refreshProps();
+  });
+
+  const clipDelBtn = document.getElementById('prop-camera-clip-del');
+  if (clipDelBtn) clipDelBtn.addEventListener('click', () => {
+    const cfg = getCurrentConfig();
+    const clipName = cfg.currentClip;
+    if (!clipName) return;
+    delete cfg.clips[clipName];
+    cfg.currentClip = Object.keys(cfg.clips)[0] || '';
+    for (const t of targets) {
+      t.userData.cameraConfig = cfg;
+    }
+    markRestoreDirty();
+    _refreshCameraPathPreview(mesh);
+    refreshProps();
+  });
+
+  // ── Clip speed, loop, path settings ──
+  const speedInput = document.getElementById('prop-camera-clip-speed');
+  if (speedInput) speedInput.addEventListener('change', () => {
+    updateClip({ speed: parseFloat(speedInput.value) || 2 });
+    refreshProps(); // refresh to update computed duration display
+  });
+
+  const loopInput = document.getElementById('prop-camera-clip-loop');
+  if (loopInput) loopInput.addEventListener('change', () => {
+    updateClip({ loop: loopInput.checked });
+  });
+
+  const pathTypeSelect = document.getElementById('prop-camera-path-type');
+  if (pathTypeSelect) pathTypeSelect.addEventListener('change', () => {
+    updateClip({ pathType: pathTypeSelect.value });
+  });
+
+  const tensionSlider = document.getElementById('prop-camera-path-tension');
+  const tensionVal = document.getElementById('prop-camera-tension-val');
+  if (tensionSlider) tensionSlider.addEventListener('input', () => {
+    if (tensionVal) tensionVal.textContent = parseFloat(tensionSlider.value).toFixed(2);
+    updateClip({ pathTension: parseFloat(tensionSlider.value) || 0.5 });
+  });
+
+  // ── Keyframe management ──
+  const addKfBtn = document.getElementById('prop-camera-add-kf');
+  if (addKfBtn) addKfBtn.addEventListener('click', () => {
+    const clip = getClip();
+    if (!clip) return;
+    const pos = mesh.position.toArray();
+    const rot = mesh.quaternion.toArray();
+    const time = clip.keyframes.length > 0
+      ? clip.keyframes[clip.keyframes.length - 1].time + 1
+      : 0;
+    const kf = normalizeCameraKeyframe({ time, position: pos, rotation: rot, easing: 'ease-in-out' });
+    clip.keyframes.push(kf);
+    clip.keyframes.sort((a, b) => a.time - b.time);
+    updateClip({ keyframes: clip.keyframes });
+    refreshProps();
+  });
+
+  const delLastBtn = document.getElementById('prop-camera-del-last-kf');
+  if (delLastBtn) delLastBtn.addEventListener('click', () => {
+    const clip = getClip();
+    if (!clip || !clip.keyframes.length) return;
+    clip.keyframes.pop();
+    updateClip({ keyframes: clip.keyframes });
+    refreshProps();
+  });
+
+  const clearBtn = document.getElementById('prop-camera-clear-kfs');
+  if (clearBtn) clearBtn.addEventListener('click', () => {
+    updateClip({ keyframes: [] });
+    refreshProps();
+  });
+
+  // Per-keyframe easing edits
+  document.querySelectorAll('.cam-kf-easing').forEach(select => {
+    select.addEventListener('change', () => {
+      const clip = getClip();
+      if (!clip) return;
+      const idx = parseInt(select.dataset.kfIndex);
+      if (clip.keyframes[idx]) {
+        clip.keyframes[idx].easing = select.value;
+        updateClip({ keyframes: clip.keyframes });
+      }
+    });
+  });
+  document.querySelectorAll('.cam-kf-del').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const clip = getClip();
+      if (!clip) return;
+      const idx = parseInt(btn.dataset.kfIndex);
+      clip.keyframes.splice(idx, 1);
+      updateClip({ keyframes: clip.keyframes });
+      refreshProps();
+    });
+  });
+
+  // Preview animation
+  const previewBtn = document.getElementById('prop-camera-preview');
+  const stopBtn = document.getElementById('prop-camera-stop-preview');
+  if (previewBtn) previewBtn.addEventListener('click', () => {
+    startCameraAnimationPreview(mesh);
+    if (previewBtn) previewBtn.style.display = 'none';
+    if (stopBtn) stopBtn.style.display = '';
+  });
+  if (stopBtn) stopBtn.addEventListener('click', () => {
+    stopCameraAnimationPreview();
+    if (previewBtn) previewBtn.style.display = '';
+    if (stopBtn) stopBtn.style.display = 'none';
+  });
+
+  // Timeline scrubber
+  const scrubber = document.getElementById('prop-camera-scrubber');
+  const scrubTime = document.getElementById('prop-camera-scrub-time');
+  const scrubFrame = document.getElementById('prop-camera-scrub-frame');
+  if (scrubber) {
+    const _scrubUpdate = () => {
+      const cfg2 = getCurrentConfig();
+      const clipInfo2 = _getActiveClipInfo(cfg2);
+      const t = parseFloat(scrubber.value) * clipInfo2.duration;
+      const fps2 = 30;
+      if (scrubTime) scrubTime.textContent = t.toFixed(2) + 's';
+      if (scrubFrame) scrubFrame.textContent = 'Frame ' + Math.round(t * fps2);
+      const result = _interpolateCameraAnimation(cfg2, t);
+      if (result) {
+        mesh.position.copy(result.position);
+        if (result.lookAt) {
+          mesh.lookAt(result.lookAt);
+        } else if (result.rotation) {
+          mesh.quaternion.copy(result.rotation);
+        }
+        _refreshCameraPathPreview(mesh);
+        _renderCameraPip();
+      }
+    };
+    scrubber.addEventListener('input', _scrubUpdate);
+
+    // Step forward/back buttons
+    const stepBack = document.getElementById('prop-camera-step-back');
+    const stepFwd = document.getElementById('prop-camera-step-fwd');
+    const _stepFrame = (dir) => {
+      const cfg2 = getCurrentConfig();
+      const clipInfo2 = _getActiveClipInfo(cfg2);
+      const fps2 = 30;
+      const frameStep = 1 / (clipInfo2.duration * fps2);
+      scrubber.value = Math.max(0, Math.min(1, parseFloat(scrubber.value) + dir * frameStep));
+      _scrubUpdate();
+    };
+    if (stepBack) stepBack.addEventListener('click', () => _stepFrame(-1));
+    if (stepFwd) stepFwd.addEventListener('click', () => _stepFrame(1));
+
+    // Keyframe tick clicks — jump scrubber to keyframe time
+    document.querySelectorAll('.cam-kf-tick').forEach(tick => {
+      tick.addEventListener('click', () => {
+        const cfg2 = getCurrentConfig();
+        const clipInfo2 = _getActiveClipInfo(cfg2);
+        const idx = parseInt(tick.dataset.kfTick);
+        const kf = clipInfo2.keyframes[idx];
+        if (kf && clipInfo2.duration > 0) {
+          scrubber.value = (kf.time || idx) / clipInfo2.duration;
+          _scrubUpdate();
+        }
+      });
+    });
+
+    // Play from here
+    const playFromBtn = document.getElementById('prop-camera-play-from');
+    if (playFromBtn) playFromBtn.addEventListener('click', () => {
+      const cfg2 = getCurrentConfig();
+      const clipInfo2 = _getActiveClipInfo(cfg2);
+      const startOffset = parseFloat(scrubber.value) * clipInfo2.duration;
+      startCameraAnimationPreview(mesh);
+      // Offset the preview start time so it begins at the scrubber position
+      _cameraPreviewStartTime = performance.now() / 1000 - startOffset;
+      if (previewBtn) previewBtn.style.display = 'none';
+      if (stopBtn) stopBtn.style.display = '';
+    });
+
+    // Keyboard: left/right arrow when scrubber focused
+    scrubber.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowLeft') { e.preventDefault(); _stepFrame(-1); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); _stepFrame(1); }
+    });
+  }
+
+  // Render to video
+  const renderBtn = document.getElementById('prop-camera-render');
+  if (renderBtn) renderBtn.addEventListener('click', () => showRenderToVideoDialog(mesh));
+
+  // Screenshot
+  const shotBtn = document.getElementById('prop-camera-screenshot');
+  if (shotBtn) shotBtn.addEventListener('click', () => {
+    const cfg = getCurrentConfig();
+    const shotCam = new THREE.PerspectiveCamera(cfg.fov, cfg.aspectRatio, cfg.near, cfg.far);
+    mesh.updateMatrixWorld(true);
+    const wp = new THREE.Vector3();
+    mesh.getWorldPosition(wp);
+    shotCam.position.copy(wp);
+    if (cfg.lookAtEnabled) {
+      shotCam.lookAt(cfg.lookAtTarget[0], cfg.lookAtTarget[1], cfg.lookAtTarget[2]);
+    } else {
+      const wq = new THREE.Quaternion();
+      mesh.getWorldQuaternion(wq);
+      shotCam.quaternion.copy(wq);
+    }
+    shotCam.updateProjectionMatrix();
+    const w = 1920, h = Math.round(1920 / cfg.aspectRatio);
+    const rt = new THREE.WebGLRenderTarget(w, h);
+    const wasVis = mesh.visible;
+    mesh.visible = false;
+
+    // Hide objects invisible in-game for screenshot too
+    const hiddenForShot = [];
+    for (const sm of sceneObjects) {
+      if (sm.userData.hiddenInGame || ['light', 'spawn', 'trigger', 'pivot'].includes(sm.userData.type)) {
+        if (sm.visible || (sm.material && sm.material.visible)) {
+          hiddenForShot.push({ mesh: sm, wasV: sm.visible, matV: sm.material?.visible });
+          sm.visible = false;
+          if (sm.material) sm.material.visible = false;
+          if (sm.userData.customSkinGroup) sm.userData.customSkinGroup.visible = false;
+        }
+      }
+    }
+
+    const curTarget = renderer.getRenderTarget();
+    renderer.setRenderTarget(rt);
+    renderer.render(scene, shotCam);
+    renderer.setRenderTarget(curTarget);
+    mesh.visible = wasVis;
+
+    // Restore hidden
+    for (const sh of hiddenForShot) {
+      sh.mesh.visible = sh.wasV;
+      if (sh.mesh.material) sh.mesh.material.visible = sh.matV;
+      if (sh.mesh.userData.customSkinGroup) sh.mesh.userData.customSkinGroup.visible = true;
+    }
+
+    const buf = new Uint8Array(w * h * 4);
+    renderer.readRenderTargetPixels(rt, 0, 0, w, h, buf);
+    rt.dispose();
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    const imgData = ctx.createImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      const src = (h - 1 - y) * w * 4, dst = y * w * 4;
+      imgData.data.set(buf.subarray(src, src + w * 4), dst);
+    }
+    ctx.putImageData(imgData, 0, 0);
+    c.toBlob(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `flame3d-screenshot-${Date.now()}.png`; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }, 'image/png');
+  });
+
+  // Setup helpers
+  _createCameraFrustumHelper(mesh);
+  if (getCurrentConfig().lookAtEnabled) _createCameraLookAtHelper(mesh);
+  _createCameraPip(mesh);
+  _refreshCameraPathPreview(mesh);
 }
 
 function bindTriggerStopProps(mesh) {
@@ -18345,6 +21269,7 @@ function refreshProps() {
   const curRoughness = m.material.roughness ?? 0.5;
   const reflectControls = `<div class="prop-row"><span class="prop-key">Metal</span><div class="prop-controls"><input id="prop-metalness-range" type="range" min="0" max="1" step="0.01" value="${r3(curMetalness, 2)}"/><input id="prop-metalness-number" type="number" min="0" max="1" step="0.01" value="${r3(curMetalness, 2)}"/></div></div><div class="prop-row"><span class="prop-key">Rough</span><div class="prop-controls"><input id="prop-roughness-range" type="range" min="0" max="1" step="0.01" value="${r3(curRoughness, 2)}"/><input id="prop-roughness-number" type="number" min="0" max="1" step="0.01" value="${r3(curRoughness, 2)}"/></div></div>`;
   const tractionToggle = `<div class="prop-row"><span class="prop-key" title="When enabled, the player moves with this object (like standing on a moving platform)">Moving Platform</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-traction-toggle" type="checkbox" ${m.userData.traction ? 'checked' : ''}/> Carry player</label></div></div>`;
+  const staticToggle = `<div class="prop-row"><span class="prop-key" title="Static objects skip per-frame matrix updates (better FPS for scenery)">Static</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-static-toggle" type="checkbox" ${m.userData._isStatic ? 'checked' : ''}/> Freeze transforms</label></div></div>`;
   const gameVisibleToggle = `<div class="prop-row"><span class="prop-key">In-Game</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-game-visible" type="checkbox" ${!m.userData.hiddenInGame ? 'checked' : ''}/> Visible</label></div></div>`;
   const collisionControls = `<div class="prop-row"><span class="prop-key" title="How the game checks if the player bumps into this object">Collision</span><div class="prop-controls"><select id="prop-collision-mode" style="font-size:10px;padding:2px 3px"><option value="aabb" ${collisionMode !== 'geometry' ? 'selected' : ''}>Simple Box</option><option value="geometry" ${collisionMode === 'geometry' ? 'selected' : ''}>Exact Shape</option></select><span style="color:var(--muted);font-size:9px">exact shape = matches erased holes</span></div></div>
     ${collisionMode !== 'geometry' ? `<div class="prop-row"><span class="prop-key">Hitbox</span><div class="prop-controls"><select id="prop-hitbox-mode" style="font-size:10px;padding:2px 3px"><option value="auto" ${hitboxConfig.mode !== 'manual' ? 'selected' : ''}>Auto</option><option value="manual" ${hitboxConfig.mode === 'manual' ? 'selected' : ''}>Manual</option></select><button id="prop-hitbox-autofit" type="button" style="font-size:10px;padding:2px 6px">Auto Fit</button></div></div>
@@ -18440,8 +21365,79 @@ function refreshProps() {
   // Camera controls
   const isCamera = m.userData.type === 'camera';
   const cameraConfig = isCamera ? normalizeCameraConfig(m.userData.cameraConfig) : null;
+  const _camClip = isCamera ? _getActiveClip(cameraConfig) : null;
+  const _camClipInfo = isCamera ? _getActiveClipInfo(cameraConfig) : null;
+  const _camClipNames = isCamera ? Object.keys(cameraConfig.clips) : [];
   const cameraControls = isCamera
-    ? `<div class="prop-row"><span class="prop-key">FOV</span><div class="prop-controls"><input id="prop-camera-fov" type="number" min="10" max="150" step="1" value="${cameraConfig.fov}" style="width:56px"/></div></div><div class="prop-row"><span class="prop-key">Near</span><div class="prop-controls"><input id="prop-camera-near" type="number" min="0.01" step="0.1" value="${cameraConfig.near}" style="width:56px"/></div></div><div class="prop-row"><span class="prop-key">Far</span><div class="prop-controls"><input id="prop-camera-far" type="number" min="1" step="10" value="${cameraConfig.far}" style="width:56px"/></div></div>`
+    ? `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">📷 Lens</span></div>` +
+      `<div class="prop-row"><span class="prop-key">FOV</span><div class="prop-controls"><input id="prop-camera-fov" type="number" min="10" max="150" step="1" value="${cameraConfig.fov}" style="width:56px"/></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Near</span><div class="prop-controls"><input id="prop-camera-near" type="number" min="0.01" step="0.1" value="${cameraConfig.near}" style="width:56px"/></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Far</span><div class="prop-controls"><input id="prop-camera-far" type="number" min="1" step="10" value="${cameraConfig.far}" style="width:56px"/></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Aspect</span><div class="prop-controls"><select id="prop-camera-aspect" style="font-size:10px"><option value="1.7778" ${Math.abs(cameraConfig.aspectRatio - 16/9) < 0.01 ? 'selected' : ''}>16:9</option><option value="2.3333" ${Math.abs(cameraConfig.aspectRatio - 21/9) < 0.01 ? 'selected' : ''}>21:9</option><option value="1.3333" ${Math.abs(cameraConfig.aspectRatio - 4/3) < 0.01 ? 'selected' : ''}>4:3</option><option value="2.35" ${Math.abs(cameraConfig.aspectRatio - 2.35) < 0.01 ? 'selected' : ''}>2.35:1 Cine</option><option value="1" ${Math.abs(cameraConfig.aspectRatio - 1) < 0.01 ? 'selected' : ''}>1:1</option></select></div></div>` +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">🎯 Look-At Target</span></div>` +
+      `<div class="prop-row"><span class="prop-key">Enabled</span><div class="prop-controls"><label style="font-size:10px;cursor:pointer"><input id="prop-camera-lookat-enabled" type="checkbox" ${cameraConfig.lookAtEnabled ? 'checked' : ''}/> Track point</label></div></div>` +
+      (cameraConfig.lookAtEnabled ? `<div class="prop-row"><span class="prop-key">Target</span><div class="prop-controls"><input id="prop-camera-lookat-x" type="number" step="0.5" value="${r3(cameraConfig.lookAtTarget[0])}" style="width:50px" title="X"/><input id="prop-camera-lookat-y" type="number" step="0.5" value="${r3(cameraConfig.lookAtTarget[1])}" style="width:50px" title="Y"/><input id="prop-camera-lookat-z" type="number" step="0.5" value="${r3(cameraConfig.lookAtTarget[2])}" style="width:50px" title="Z"/></div></div>` : '') +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">🎬 Motion Clips</span></div>` +
+      `<div class="prop-row"><span class="prop-key">Clip</span><div class="prop-controls" style="display:flex;gap:4px;align-items:center">` +
+        `<select id="prop-camera-clip-select" style="font-size:10px;max-width:100px">${_camClipNames.length ? _camClipNames.map(n => `<option value="${n}" ${n === cameraConfig.currentClip ? 'selected' : ''}>${n}</option>`).join('') : '<option value="">No clips</option>'}</select>` +
+        `<button id="prop-camera-clip-new" style="font-size:8px;padding:1px 6px;background:#238636;color:#fff;border:none;border-radius:3px;cursor:pointer" title="New clip">+</button>` +
+        `<button id="prop-camera-clip-del" style="font-size:8px;padding:1px 6px;background:#21262d;color:#f85149;border:1px solid #30363d;border-radius:3px;cursor:pointer" title="Delete clip"${_camClipNames.length < 1 ? ' disabled' : ''}>✕</button>` +
+      `</div></div>` +
+      (_camClip ? (
+      `<div class="prop-row"><span class="prop-key">Speed</span><div class="prop-controls"><input id="prop-camera-clip-speed" type="number" min="0.1" max="100" step="0.1" value="${r3(_camClip.speed)}" style="width:56px"/><span style="font-size:9px;color:var(--muted)">u/s</span></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Duration</span><span class="prop-val" style="font-size:10px;color:#58a6ff;font-weight:600">${r3(_camClipInfo.duration, 2)}s</span></div>` +
+      `<div class="prop-row"><span class="prop-key">Loop</span><div class="prop-controls"><label style="font-size:10px;cursor:pointer"><input id="prop-camera-clip-loop" type="checkbox" ${_camClip.loop ? 'checked' : ''}/> Loop</label></div></div>` +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">🛤 Path Settings</span></div>` +
+      `<div class="prop-row"><span class="prop-key">Type</span><div class="prop-controls"><select id="prop-camera-path-type" style="font-size:10px">${CAMERA_PATH_TYPES.map(pt => `<option value="${pt}" ${_camClip.pathType === pt ? 'selected' : ''}>${pt}</option>`).join('')}</select></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Tension</span><div class="prop-controls"><input id="prop-camera-path-tension" type="range" min="0" max="1" step="0.05" value="${_camClip.pathTension}" style="width:80px"/><span id="prop-camera-tension-val" style="font-size:9px;color:var(--muted);min-width:24px">${r3(_camClip.pathTension, 2)}</span></div></div>` +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">◆ Keyframes</span></div>` +
+      `<div class="prop-row"><span class="prop-key">Count</span><span class="prop-val" style="font-size:10px;color:var(--accentHi)">${_camClip.keyframes.length} keyframe${_camClip.keyframes.length !== 1 ? 's' : ''}</span></div>` +
+      `<div class="prop-row"><div class="prop-controls" style="display:flex;gap:4px;flex-wrap:wrap">` +
+        `<button id="prop-camera-add-kf" style="font-size:9px;padding:2px 8px;background:#1f6feb;color:#fff;border:none;border-radius:3px;cursor:pointer" title="Add keyframe at camera's current position">◆ Add KF</button>` +
+        `<button id="prop-camera-del-last-kf" style="font-size:9px;padding:2px 8px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:3px;cursor:pointer" title="Delete last keyframe">✕ Del Last</button>` +
+        `<button id="prop-camera-clear-kfs" style="font-size:9px;padding:2px 8px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:3px;cursor:pointer" title="Clear all keyframes">🗑 Clear</button>` +
+      `</div></div>` +
+      (_camClip.keyframes.length ? `<div class="prop-row" style="flex-direction:column;align-items:stretch;gap:2px;max-height:140px;overflow-y:auto">` +
+        _camClip.keyframes.map((kf, i) =>
+          `<div style="display:flex;align-items:center;gap:4px;font-size:9px;padding:1px 0">` +
+            `<span style="color:#00ccff;min-width:16px">◆${i + 1}</span>` +
+            `<span style="color:var(--muted)" title="Position">${r3(kf.position[0],1)},${r3(kf.position[1],1)},${r3(kf.position[2],1)}</span>` +
+            `<select class="cam-kf-easing" data-kf-index="${i}" style="font-size:8px;padding:0 2px">${CAMERA_EASING_TYPES.map(e => `<option value="${e}" ${kf.easing === e ? 'selected' : ''}>${e}</option>`).join('')}</select>` +
+            `<button class="cam-kf-del" data-kf-index="${i}" style="font-size:8px;padding:0 4px;background:none;border:none;color:#f85149;cursor:pointer" title="Delete this keyframe">✕</button>` +
+          `</div>`
+        ).join('') +
+      `</div>` : '') +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">🕐 Timeline Scrubber</span></div>` +
+      (_camClip.keyframes.length >= 2 ? (
+      `<div class="prop-row" style="flex-direction:column;gap:4px;padding:4px 11px">` +
+        `<div style="display:flex;align-items:center;gap:6px;width:100%">` +
+          `<input id="prop-camera-scrubber" type="range" min="0" max="1" step="0.001" value="0" style="flex:1;accent-color:#00ccff;cursor:pointer" title="Scrub through camera animation"/>` +
+        `</div>` +
+        `<div style="display:flex;justify-content:space-between;font-size:9px;color:var(--muted)">` +
+          `<span id="prop-camera-scrub-time">0.00s</span>` +
+          `<span id="prop-camera-scrub-frame">Frame 0</span>` +
+          `<span>${r3(_camClipInfo.duration, 2)}s</span>` +
+        `</div>` +
+        `<div style="position:relative;height:10px;background:#21262d;border-radius:3px;overflow:hidden;margin:2px 0" id="prop-camera-kf-ticks">` +
+          _camClip.keyframes.map((kf, i) => {
+            const pct = _camClipInfo.duration > 0 ? ((kf.time || i) / _camClipInfo.duration * 100) : 0;
+            return `<div class="cam-kf-tick" data-kf-tick="${i}" style="position:absolute;left:${pct}%;top:0;width:2px;height:100%;background:#00ccff;cursor:pointer;opacity:0.7" title="KF ${i + 1}"></div>`;
+          }).join('') +
+        `</div>` +
+        `<div style="display:flex;gap:4px">` +
+          `<button id="prop-camera-play-from" style="font-size:8px;padding:2px 6px;background:#238636;color:#fff;border:none;border-radius:3px;cursor:pointer" title="Play from current scrubber position">▶ Play from here</button>` +
+          `<button id="prop-camera-step-back" style="font-size:8px;padding:2px 6px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:3px;cursor:pointer" title="Step back 1 frame">◀</button>` +
+          `<button id="prop-camera-step-fwd" style="font-size:8px;padding:2px 6px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:3px;cursor:pointer" title="Step forward 1 frame">▶</button>` +
+        `</div>` +
+      `</div>`) : `<div class="prop-row"><span style="font-size:9px;color:var(--muted);padding:0 11px">Need 2+ keyframes for scrubber</span></div>`) +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">▶ Preview & Render</span></div>` +
+      `<div class="prop-row"><div class="prop-controls" style="display:flex;gap:4px;flex-wrap:wrap">` +
+        `<button id="prop-camera-preview" style="font-size:9px;padding:3px 10px;background:#238636;color:#fff;border:none;border-radius:3px;cursor:pointer" title="Preview animation — moves camera along path${_camClip.keyframes.length < 2 ? ' (need 2+ KFs)' : ''}" ${_camClip.keyframes.length < 2 ? 'disabled' : ''}>▶ Preview</button>` +
+        `<button id="prop-camera-stop-preview" style="font-size:9px;padding:3px 10px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:3px;cursor:pointer;display:none">⏹ Stop</button>` +
+        `<button id="prop-camera-render" style="font-size:9px;padding:3px 10px;background:#8957e5;color:#fff;border:none;border-radius:3px;cursor:pointer" title="Render to video${_camClip.keyframes.length < 2 ? ' (need 2+ KFs)' : ''}" ${_camClip.keyframes.length < 2 ? 'disabled' : ''}>🎬 Render</button>` +
+        `<button id="prop-camera-screenshot" style="font-size:9px;padding:3px 10px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:3px;cursor:pointer" title="Screenshot from camera view">📸 Shot</button>` +
+      `</div></div>`
+      ) : '')
     : '';
 
   // NPC controls
@@ -18641,6 +21637,7 @@ function refreshProps() {
         ${solidToggle}
         ${solidnessControls}
         ${tractionToggle}
+        ${staticToggle}
         ${collisionControls}
         ${gameVisibleToggle}
       </div>
@@ -18716,6 +21713,7 @@ function refreshProps() {
   bindOpacityProps(m);
   bindReflectProps(m);
   bindTractionToggle(m);
+  bindStaticToggle(m);
   bindGameVisibleToggle(m);
   bindCollisionProps(m);
   if (hasLight) bindLightProps(m);
@@ -18837,14 +21835,9 @@ function refreshStatus() {
     txt += `<span class="s-sep">│</span>Depth: ${r3(state.place2DDepth, 2)}`;
   if (state.mode === 'place')
     txt += `<span class="s-sep">│</span>Opacity: ${r3(state.placeOpacity, 2)}`;
-  txt += `<span class="s-sep">│</span>Sun: ${r3(parseFloat(sunTimeInput.value), 1)}h`;
   txt += `<span class="s-sep">│</span>Grid: ${(state.chunkRenderRadius * 2) + 1}x${(state.chunkRenderRadius * 2) + 1}`;
-  if (state.mode === 'select' && state.transformMode === 'scale') {
-    const sx = state.scaleSides.x === 'pos' ? '+X' : '-X';
-    const sy = state.scaleSides.y === 'pos' ? '+Y' : '-Y';
-    const sz = state.scaleSides.z === 'pos' ? '+Z' : '-Z';
-    txt += `<span class="s-sep">│</span>Scale Sides: ${sx} ${sy} ${sz}`;
-  }
+  if (state.chunkRenderRadius > 8) txt += `<span style="color:#f0883e;font-weight:600" title="Large grid may reduce performance"> ⚠</span>`;
+
   const selectionCount = (state.selectedObject ? 1 : 0) + state.extraSelected.length;
   if (selectionCount) txt += `<span class="s-sep">│</span>Selected: ${selectionCount}`;
   if (state.selectedObject) {
@@ -19211,21 +22204,678 @@ document.addEventListener('mousedown', (e) => {
   });
 }
 
-// ─── Control functions UI (project-level function editor) ────────────────────
-function refreshControlFunctionsUI() {
-  if (!controlFunctionsListEl) return;
-  ensureControlFunctionGroups();
-  const search = String(controlFnSearchInput?.value ?? '').trim().toLowerCase();
-  const visible = controlFunctions
-    .map((fn, fnIdx) => ({ fn, fnIdx }))
-    .filter(({ fn }) => !search || String(fn.name ?? '').toLowerCase().includes(search));
+// ─── Blueprint Graph System ──────────────────────────────────────────────────
+const _bpGraph = {
+  panX: 0, panY: 0, zoom: 1,
+  selectedFnIdx: -1,   // which control function is being viewed
+  selectedNodeId: null, // which node within that function is selected
+  dragging: null,       // { nid, startX, startY, origGX, origGY }
+  panning: false,
+  panStart: null,
+  nodeW: 180,
+  wiring: null,         // { fromNodeId, fromPin, startX, startY, mx, my }
+  detailedMode: false,
+};
+const _bpGraphEl     = document.getElementById('bp-graph');
+const _bpGraphNodesEl = document.getElementById('bp-graph-nodes');
+const _bpGraphSvg    = document.getElementById('bp-graph-svg');
+const _bpDetailEl    = document.getElementById('bp-detail');
+const _bpDetailTitle = document.getElementById('bp-detail-title');
+const _bpDetailResizer = document.getElementById('bp-detail-resizer');
+const _bpGraphFitBtn = document.getElementById('bp-graph-fit');
+const _bpDetailToggleBtn = document.getElementById('bp-detail-toggle');
 
+// ── Auto-layout for nodes without saved positions ────────────────────────────
+function _bpAutoLayout(fn) {
+  if (!fn || !Array.isArray(fn.nodes)) return;
+  const cols = 3, padX = 220, padY = 120;
+  let idx = 0;
+  fn.nodes.forEach(n => {
+    if (!Number.isFinite(n.graphX) || !Number.isFinite(n.graphY)) {
+      n.graphX = 30 + (idx % cols) * padX;
+      n.graphY = 30 + Math.floor(idx / cols) * padY;
+    }
+    idx++;
+  });
+}
+
+// ── Action-type color map ────────────────────────────────────────────────────
+const _bpPinColors = {
+  move: '#3fb950', rotate: '#d29922', scale: '#58a6ff', light: '#f0e060', audio: '#a371f7',
+  path: '#79c0ff', functionControl: '#f78166', playerGroup: '#56d4dd',
+  setVar: '#ff7b72', setBool: '#d2a8ff', playerStats: '#ffa657',
+  teleport: '#7ee787', skeleton: '#e0e0e0',
+};
+
+// Node-type header colors
+const _bpNodeTypeColors = {
+  target:    { bg: 'linear-gradient(135deg, #0d4a3a, #0a3a2c)', icon: '🎯', label: 'Target' },
+  condition: { bg: 'linear-gradient(135deg, #5c4a0a, #44380a)', icon: '◆',  label: 'Condition' },
+  action:    { bg: 'linear-gradient(135deg, #1a3a5c, #162a44)', icon: '⚡', label: 'Action' },
+};
+
+// ── Lightweight transform update (perf: no innerHTML rebuild) ────────────────
+function _bpUpdateTransform() {
+  if (!_bpGraphEl || !_bpGraphNodesEl) return;
+  const z = _bpGraph.zoom;
+  const px = _bpGraph.panX;
+  const py = _bpGraph.panY;
+
+  // Update grid background to follow pan/zoom
+  const majorSz = 100 * z;
+  const minorSz = 20 * z;
+  _bpGraphEl.style.backgroundSize = `${majorSz}px ${majorSz}px, ${majorSz}px ${majorSz}px, ${minorSz}px ${minorSz}px, ${minorSz}px ${minorSz}px`;
+  _bpGraphEl.style.backgroundPosition = `${px - 1}px ${py - 1}px, ${px - 1}px ${py - 1}px, ${px - 1}px ${py - 1}px, ${px - 1}px ${py - 1}px`;
+
+  // Move each node div by updating left/top (positions are set per-node)
+  const fn = controlFunctions[_bpGraph.selectedFnIdx];
+  if (!fn || !Array.isArray(fn.nodes)) return;
+  const nodeEls = _bpGraphNodesEl.querySelectorAll('.bp-gnode');
+  nodeEls.forEach(el => {
+    const nid = el.dataset.nid;
+    const node = fn.nodes.find(n => n.id === nid);
+    if (!node) return;
+    const x = node.graphX * z + px;
+    const y = node.graphY * z + py;
+    const w = _bpGraph.nodeW * z;
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+    el.style.width = w + 'px';
+  });
+
+  _bpDrawWires();
+}
+
+// ── Render graph nodes (full rebuild) ────────────────────────────────────────
+function refreshBpGraph() {
+  if (!_bpGraphNodesEl) return;
+
+  // Determine which function is being viewed
+  const fnIdx = _bpGraph.selectedFnIdx ?? -1;
+  const fn = controlFunctions[fnIdx];
+
+  if (!fn || !Array.isArray(fn.nodes)) {
+    _bpGraphNodesEl.innerHTML = '<div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:11px;color:#444d56;pointer-events:none;text-align:center">Select a function from the list<br>or add one with + Fn</div>';
+    if (_bpGraphSvg) _bpGraphSvg.innerHTML = '';
+    return;
+  }
+
+  _bpAutoLayout(fn);
+  const z = _bpGraph.zoom;
+  const px = _bpGraph.panX;
+  const py = _bpGraph.panY;
+
+  let html = '';
+  fn.nodes.forEach(node => {
+    const x = node.graphX * z + px;
+    const y = node.graphY * z + py;
+    const w = _bpGraph.nodeW * z;
+    const sel = node.id === _bpGraph.selectedNodeId ? ' selected' : '';
+    const typeInfo = _bpNodeTypeColors[node.type] || _bpNodeTypeColors.action;
+
+    // Build node content based on type
+    let bodyHtml = '';
+    let headerTitle = '';
+    let headerClass = `bp-gnode-hdr bp-gnode-hdr-${node.type}`;
+    const dm = _bpGraph.detailedMode;
+    const detailStyle = 'padding:1px 6px;font-size:7px;color:rgba(255,255,255,0.45);line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+
+    if (node.type === 'target') {
+      headerTitle = `${node.refType === 'name' ? '📛' : '👥'} ${escapeHtml(node.refValue || '(no target)')}`;
+      let detailHtml = '';
+      if (dm) {
+        detailHtml = `<div style="${detailStyle};border-bottom:1px solid rgba(255,255,255,0.06)">Type: ${node.refType}</div>`;
+      }
+      bodyHtml = detailHtml + `<div class="bp-gnode-pin" style="justify-content:flex-end">
+        <span class="bp-gnode-pin-label">out</span>
+        <span class="bp-gnode-pin-dot bp-gnode-pin-out-dot" data-nid="${node.id}" data-pin="out" style="background:#58a6ff;border-color:#58a6ff;cursor:crosshair"></span>
+      </div>`;
+    } else if (node.type === 'condition') {
+      const condTypes = (node.conditions || []).map(c => c.type).filter(t => t !== 'none');
+      const condLabel = condTypes.length ? condTypes.join(` ${node.conditionLogic || 'and'} `) : 'always';
+      headerTitle = `◆ ${condLabel}`;
+      let detailHtml = '';
+      if (dm) {
+        const condLines = (node.conditions || []).map(c => {
+          if (c.type === 'none') return null;
+          if (c.type === 'timer') return `${c.negate ? '!' : ''}timer \u2265 ${c.timerSeconds ?? 0}s`;
+          if (c.type === 'key') return `${c.negate ? '!' : ''}key: ${c.keyCode || '?'}`;
+          if (c.type === 'fnDone') return `${c.negate ? '!' : ''}fn done: ${c.ref || '?'}`;
+          if (c.type === 'touching') return `${c.negate ? '!' : ''}touching: ${c.touchRef || '?'}`;
+          if (c.type === 'touchingPlayer') return `${c.negate ? '!' : ''}touching player`;
+          if (c.type === 'grounded') return `${c.negate ? '!' : ''}grounded`;
+          if (c.type === 'varCmp') return `${c.negate ? '!' : ''}${c.varCmpName || '?'} ${c.varCmpOp || '='} ${c.varCmpValue ?? 0}`;
+          if (c.type === 'bool') return `${c.negate ? '!' : ''}bool: ${c.boolName || '?'}`;
+          if (c.type === 'position') return `${c.negate ? '!' : ''}${c.posSubject || 'player'}.${c.posAxis || 'y'} ${c.posOp || '>'} ${c.posValue ?? 0}`;
+          if (c.type === 'distance') return `${c.negate ? '!' : ''}dist ${c.distTarget || '?'} ${c.distOp || '<'} ${c.distValue ?? 0}`;
+          return c.type;
+        }).filter(Boolean);
+        if (condLines.length) {
+          detailHtml = condLines.map(l => `<div style="${detailStyle}">\u2022 ${escapeHtml(l)}</div>`).join('');
+          if (condLines.length > 1) detailHtml += `<div style="${detailStyle}">logic: ${node.conditionLogic || 'and'}</div>`;
+          detailHtml += `<div style="border-bottom:1px solid rgba(255,255,255,0.06)"></div>`;
+        }
+      }
+      bodyHtml = `<div class="bp-gnode-pin">
+        <span class="bp-gnode-pin-dot bp-gnode-pin-in-dot" data-nid="${node.id}" data-pin="in" style="background:#d29922;border-color:#d29922;cursor:crosshair"></span>
+        <span class="bp-gnode-pin-label">in</span>
+      </div>` + detailHtml + `
+      <div class="bp-gnode-pin" style="justify-content:flex-end">
+        <span class="bp-gnode-pin-label">out</span>
+        <span class="bp-gnode-pin-dot bp-gnode-pin-out-dot" data-nid="${node.id}" data-pin="out" style="background:#d29922;border-color:#d29922;cursor:crosshair"></span>
+      </div>`;
+    } else if (node.type === 'action') {
+      const actions = node.actions || [];
+      const actionTypes = [...new Set(actions.map(a => a.actionType))];
+      headerTitle = `⚡ ${actionTypes.length ? actionTypes.join(', ') : 'empty'}`;
+
+      let pinsHtml = `<div class="bp-gnode-pin">
+        <span class="bp-gnode-pin-dot bp-gnode-pin-in-dot" data-nid="${node.id}" data-pin="in" style="background:#58a6ff;border-color:#58a6ff;cursor:crosshair"></span>
+        <span class="bp-gnode-pin-label">in</span>
+      </div>`;
+      // Show action type pins
+      actionTypes.forEach(at => {
+        const color = _bpPinColors[at] || '#888';
+        const label = at === 'functionControl' ? 'fn ctrl' : at === 'playerGroup' ? 'p.group' : at === 'playerStats' ? 'p.stats' : at === 'setBool' ? 'bool' : at === 'setVar' ? 'var' : at;
+        pinsHtml += `<div class="bp-gnode-pin"><span class="bp-gnode-pin-dot" style="background:${color};border-color:${color}"></span><span class="bp-gnode-pin-label">${label}</span></div>`;
+      });
+      if (dm) {
+        pinsHtml += `<div style="border-top:1px solid rgba(255,255,255,0.06)"></div>`;
+        actions.forEach(a => {
+          const target = a.refValue ? ` \u2192 ${escapeHtml(a.refValue)}` : '';
+          const dur = a.duration ? ` (${a.duration}s)` : '';
+          const color = _bpPinColors[a.actionType] || '#888';
+          pinsHtml += `<div style="${detailStyle}"><span style="color:${color}">\u2022</span> ${escapeHtml(a.actionType)}${target}${dur}</div>`;
+        });
+      }
+      pinsHtml += `<div class="bp-gnode-pin" style="justify-content:flex-end">
+        <span class="bp-gnode-pin-label">then</span>
+        <span class="bp-gnode-pin-dot bp-gnode-pin-out-dot" data-nid="${node.id}" data-pin="out" style="background:#58a6ff;border-color:#58a6ff;cursor:crosshair"></span>
+      </div>`;
+      bodyHtml = pinsHtml;
+    }
+
+    html += `<div class="bp-gnode${sel}" data-nid="${node.id}" data-type="${node.type}"
+      style="left:${x}px;top:${y}px;width:${w}px;transform-origin:0 0">
+      <div class="${headerClass}" data-nid="${node.id}">
+        <span class="bp-gnode-title">${headerTitle}</span>
+        ${node.label ? `<span style="font-size:7px;color:rgba(255,255,255,0.5);display:block;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(node.label)}</span>` : ''}
+      </div>
+      <div class="bp-gnode-body">${bodyHtml}</div>
+    </div>`;
+  });
+
+  _bpGraphNodesEl.innerHTML = html;
+  _bpUpdateTransform();
+}
+
+// ── Draw SVG wires between connected nodes ───────────────────────────────────
+function _bpDrawWires() {
+  if (!_bpGraphSvg) return;
+  const fnIdx = _bpGraph.selectedFnIdx ?? -1;
+  const fn = controlFunctions[fnIdx];
+  if (!fn || !Array.isArray(fn.connections)) { _bpGraphSvg.innerHTML = ''; return; }
+
+  let paths = '';
+  const z = _bpGraph.zoom;
+  const px = _bpGraph.panX;
+  const py = _bpGraph.panY;
+  const nw = _bpGraph.nodeW * z;
+
+  fn.connections.forEach(conn => {
+    const fromNode = fn.nodes.find(n => n.id === conn.from);
+    const toNode = fn.nodes.find(n => n.id === conn.to);
+    if (!fromNode || !toNode) return;
+
+    // Source: right edge of from-node, vertically at bottom area
+    const fromH = _bpEstimateNodeHeight(fromNode) * z;
+    const sx = fromNode.graphX * z + px + nw;
+    const sy = fromNode.graphY * z + py + fromH - 10 * z;
+    // Target: left edge of to-node, vertically at top pin area
+    const tx = toNode.graphX * z + px;
+    const ty = toNode.graphY * z + py + (toNode.type === 'target' ? 14 : 30) * z;
+    // Bezier control points
+    const dx = Math.max(40, Math.abs(tx - sx) * 0.4);
+    // Arrow color based on connection type
+    const color = toNode.type === 'condition' ? '#d29922' : '#58a6ff';
+    paths += `<path d="M${sx},${sy} C${sx + dx},${sy} ${tx - dx},${ty} ${tx},${ty}"
+      fill="none" stroke="${color}" stroke-width="${2 * z}" stroke-opacity="0.6"
+      data-from="${conn.from}" data-to="${conn.to}" class="bp-wire"/>`;
+    // Arrow head
+    const arrowSize = 5 * z;
+    paths += `<polygon points="${tx},${ty} ${tx - arrowSize},${ty - arrowSize * 0.6} ${tx - arrowSize},${ty + arrowSize * 0.6}"
+      fill="${color}" fill-opacity="0.6"/>`;
+  });
+
+  // Preview wire during drag-to-connect
+  if (_bpGraph.wiring && _bpGraph.wiring.mx != null) {
+    const w = _bpGraph.wiring;
+    const dx = Math.max(40, Math.abs(w.mx - w.startX) * 0.4);
+    paths += `<path d="M${w.startX},${w.startY} C${w.startX + dx},${w.startY} ${w.mx - dx},${w.my} ${w.mx},${w.my}"
+      fill="none" stroke="#fff" stroke-width="${2 * z}" stroke-opacity="0.4" stroke-dasharray="6,4"/>`;
+  }
+
+  _bpGraphSvg.innerHTML = paths;
+}
+
+// Estimate node height in unscaled pixels for wire endpoint calc
+function _bpEstimateNodeHeight(node) {
+  const dm = _bpGraph.detailedMode;
+  if (node.type === 'target') return dm ? 62 : 48;
+  if (node.type === 'condition') {
+    if (!dm) return 58;
+    const condCount = (node.conditions || []).filter(c => c.type !== 'none').length;
+    return 58 + condCount * 14 + (condCount > 1 ? 14 : 0);
+  }
+  const distinctTypes = [...new Set((node.actions || []).map(a => a.actionType))].length;
+  const base = 48 + Math.max(0, distinctTypes) * 18;
+  if (!dm) return base;
+  return base + (node.actions || []).length * 14;
+}
+
+// ── Graph interaction: pan, zoom, drag nodes, select, wire ───────────────────
+if (_bpGraphEl) {
+  _bpGraphEl.addEventListener('mousedown', e => {
+    // Check if clicking on a pin dot (drag-to-connect)
+    const pinDot = e.target.closest('.bp-gnode-pin-out-dot');
+    if (pinDot) {
+      const nid = pinDot.dataset.nid;
+      const rect = pinDot.getBoundingClientRect();
+      const graphRect = _bpGraphEl.getBoundingClientRect();
+      _bpGraph.wiring = {
+        fromNodeId: nid,
+        fromPin: 'out',
+        startX: rect.left - graphRect.left + rect.width / 2,
+        startY: rect.top - graphRect.top + rect.height / 2,
+        mx: null, my: null,
+      };
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+
+    // Check if clicking on a node
+    const nodeEl = e.target.closest('.bp-gnode');
+    if (nodeEl) {
+      const nid = nodeEl.dataset.nid;
+      _bpGraph.selectedNodeId = nid;
+      refreshBpGraph();
+      _bpRefreshDetail();
+      // Start drag if on header
+      if (e.target.closest('.bp-gnode-hdr')) {
+        const fnIdx = _bpGraph.selectedFnIdx ?? -1;
+        const fn = controlFunctions[fnIdx];
+        const node = fn?.nodes?.find(n => n.id === nid);
+        if (node) {
+          _bpGraph.dragging = {
+            nid,
+            startX: e.clientX, startY: e.clientY,
+            origGX: node.graphX, origGY: node.graphY,
+          };
+        }
+      }
+      e.preventDefault();
+      return;
+    }
+    // Deselect on background click
+    _bpGraph.selectedNodeId = null;
+    _bpRefreshDetail();
+    // Start panning
+    _bpGraph.panning = true;
+    _bpGraph.panStart = { x: e.clientX, y: e.clientY, px: _bpGraph.panX, py: _bpGraph.panY };
+    e.preventDefault();
+  });
+
+  window.addEventListener('mousemove', e => {
+    // Drag-to-connect wire preview
+    if (_bpGraph.wiring) {
+      const graphRect = _bpGraphEl.getBoundingClientRect();
+      _bpGraph.wiring.mx = e.clientX - graphRect.left;
+      _bpGraph.wiring.my = e.clientY - graphRect.top;
+      _bpDrawWires();
+      return;
+    }
+    if (_bpGraph.dragging) {
+      const d = _bpGraph.dragging;
+      const dx = (e.clientX - d.startX) / _bpGraph.zoom;
+      const dy = (e.clientY - d.startY) / _bpGraph.zoom;
+      const fnIdx = _bpGraph.selectedFnIdx ?? -1;
+      const fn = controlFunctions[fnIdx];
+      const node = fn?.nodes?.find(n => n.id === d.nid);
+      if (node) {
+        node.graphX = d.origGX + dx;
+        node.graphY = d.origGY + dy;
+        _bpUpdateTransform(); // Perf: lightweight, no innerHTML rebuild
+      }
+    } else if (_bpGraph.panning && _bpGraph.panStart) {
+      const ps = _bpGraph.panStart;
+      _bpGraph.panX = ps.px + (e.clientX - ps.x);
+      _bpGraph.panY = ps.py + (e.clientY - ps.y);
+      _bpUpdateTransform(); // Perf: lightweight, no innerHTML rebuild
+    }
+  });
+
+  window.addEventListener('mouseup', e => {
+    // Complete drag-to-connect
+    if (_bpGraph.wiring) {
+      const pinDot = e.target.closest('.bp-gnode-pin-in-dot');
+      if (pinDot) {
+        const toNid = pinDot.dataset.nid;
+        const fromNid = _bpGraph.wiring.fromNodeId;
+        if (fromNid !== toNid) {
+          const fnIdx = _bpGraph.selectedFnIdx ?? -1;
+          const fn = controlFunctions[fnIdx];
+          if (fn && Array.isArray(fn.connections)) {
+            // Avoid duplicate connections
+            const exists = fn.connections.some(c => c.from === fromNid && c.to === toNid);
+            if (!exists) {
+              fn.connections.push({ from: fromNid, to: toNid });
+              refreshBpGraph();
+            }
+          }
+        }
+      }
+      _bpGraph.wiring = null;
+      _bpDrawWires();
+      return;
+    }
+    _bpGraph.dragging = null;
+    _bpGraph.panning = false;
+    _bpGraph.panStart = null;
+  });
+
+  // Zoom: mouse wheel
+  _bpGraphEl.addEventListener('wheel', e => {
+    e.preventDefault();
+    const rect = _bpGraphEl.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const oldZoom = _bpGraph.zoom;
+    const factor = e.deltaY < 0 ? 1.1 : 0.9;
+    _bpGraph.zoom = Math.max(0.25, Math.min(3, oldZoom * factor));
+    _bpGraph.panX = mx - (_bpGraph.zoom / oldZoom) * (mx - _bpGraph.panX);
+    _bpGraph.panY = my - (_bpGraph.zoom / oldZoom) * (my - _bpGraph.panY);
+    _bpUpdateTransform(); // Perf: lightweight
+  }, { passive: false });
+
+  // Double-click node to open detail
+  _bpGraphEl.addEventListener('dblclick', e => {
+    const nodeEl = e.target.closest('.bp-gnode');
+    if (!nodeEl) return;
+    _bpGraph.selectedNodeId = nodeEl.dataset.nid;
+    refreshBpGraph();
+    _bpRefreshDetail();
+  });
+
+  // Delete key removes selected node
+  window.addEventListener('keydown', e => {
+    if (!_bpOverlayEl?.classList.contains('active')) return;
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      const nid = _bpGraph.selectedNodeId;
+      if (!nid) return;
+      const fnIdx = _bpGraph.selectedFnIdx ?? -1;
+      const fn = controlFunctions[fnIdx];
+      if (!fn || !Array.isArray(fn.nodes)) return;
+      const nodeIdx = fn.nodes.findIndex(n => n.id === nid);
+      if (nodeIdx < 0) return;
+      fn.nodes.splice(nodeIdx, 1);
+      fn.connections = fn.connections.filter(c => c.from !== nid && c.to !== nid);
+      _bpSyncFnActionsFromNodes(fn);
+      _bpGraph.selectedNodeId = null;
+      refreshBpGraph();
+      _bpRefreshDetail();
+      e.preventDefault();
+    }
+    // F key: fit all
+    if (e.key === 'f' || e.key === 'F') {
+      _bpGraphFitBtn?.click();
+      e.preventDefault();
+    }
+  });
+
+  // Right-click wire to delete connection
+  _bpGraphSvg?.addEventListener?.('contextmenu', e => {
+    e.preventDefault();
+    const wire = e.target.closest('path.bp-wire');
+    if (!wire) return;
+    const fromId = wire.dataset.from;
+    const toId = wire.dataset.to;
+    const fnIdx = _bpGraph.selectedFnIdx ?? -1;
+    const fn = controlFunctions[fnIdx];
+    if (!fn || !Array.isArray(fn.connections)) return;
+    const idx = fn.connections.findIndex(c => c.from === fromId && c.to === toId);
+    if (idx === -1) return;
+    fn.connections.splice(idx, 1);
+    _bpSyncFnActionsFromNodes(fn);
+    refreshBpGraph();
+    _bpRefreshDetail();
+  });
+  _bpGraphEl.addEventListener('contextmenu', e => {
+    e.preventDefault();
+  });
+}
+
+// ── Detail toggle ────────────────────────────────────────────────────────────
+if (_bpDetailToggleBtn) {
+  _bpDetailToggleBtn.addEventListener('click', () => {
+    _bpGraph.detailedMode = !_bpGraph.detailedMode;
+    _bpDetailToggleBtn.style.background = _bpGraph.detailedMode ? 'rgba(88,166,255,0.25)' : '';
+    refreshBpGraph();
+  });
+}
+
+// ── Fit all nodes ────────────────────────────────────────────────────────────
+if (_bpGraphFitBtn) {
+  _bpGraphFitBtn.addEventListener('click', () => {
+    const fnIdx = _bpGraph.selectedFnIdx ?? -1;
+    const fn = controlFunctions[fnIdx];
+    if (!fn || !Array.isArray(fn.nodes) || !fn.nodes.length || !_bpGraphEl) return;
+    _bpAutoLayout(fn);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    fn.nodes.forEach(n => {
+      if (Number.isFinite(n.graphX) && Number.isFinite(n.graphY)) {
+        minX = Math.min(minX, n.graphX);
+        minY = Math.min(minY, n.graphY);
+        maxX = Math.max(maxX, n.graphX + _bpGraph.nodeW);
+        maxY = Math.max(maxY, n.graphY + 80);
+      }
+    });
+    if (!Number.isFinite(minX)) return;
+    const rect = _bpGraphEl.getBoundingClientRect();
+    const pad = 30;
+    const rangeX = maxX - minX + pad * 2;
+    const rangeY = maxY - minY + pad * 2;
+    _bpGraph.zoom = Math.min(1.5, Math.max(0.25, Math.min(rect.width / rangeX, rect.height / rangeY)));
+    _bpGraph.panX = (rect.width - rangeX * _bpGraph.zoom) / 2 - (minX - pad) * _bpGraph.zoom;
+    _bpGraph.panY = (rect.height - rangeY * _bpGraph.zoom) / 2 - (minY - pad) * _bpGraph.zoom;
+    refreshBpGraph();
+  });
+}
+
+// ── Detail panel resizer ─────────────────────────────────────────────────────
+if (_bpDetailResizer && _bpDetailEl) {
+  let _detailResizing = false;
+  _bpDetailResizer.addEventListener('mousedown', e => {
+    _detailResizing = true;
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', e => {
+    if (!_detailResizing) return;
+    const parentRect = _bpDetailEl.parentElement.getBoundingClientRect();
+    const newH = parentRect.bottom - e.clientY;
+    _bpDetailEl.style.height = Math.max(80, Math.min(parentRect.height * 0.7, newH)) + 'px';
+  });
+  window.addEventListener('mouseup', () => { _detailResizing = false; });
+}
+
+// ── Node detail helpers ──────────────────────────────────────────────────────
+function _bpRenderTargetNodeDetail(node) {
+  const moveOpts = getMoveTargetOptions(node.refType, node.refValue);
+  return `<div style="padding:8px">
+    <div style="font-size:10px;font-weight:700;color:#4fc3f7;margin-bottom:6px">🎯 Target Node</div>
+    <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px">
+      <span style="font-size:9px;color:var(--muted);min-width:42px">Type</span>
+      <select class="nd-target-reftype" style="font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px">
+        <option value="group" ${node.refType === 'group' ? 'selected' : ''}>group</option>
+        <option value="name" ${node.refType === 'name' ? 'selected' : ''}>name</option>
+      </select>
+    </div>
+    <div style="display:flex;align-items:center;gap:4px">
+      <span style="font-size:9px;color:var(--muted);min-width:42px">Value</span>
+      <input class="nd-target-refval" list="nd-target-opts" type="text" value="${escapeHtml(node.refValue)}" placeholder="${node.refType === 'name' ? 'object name' : 'group name'}" style="flex:1;font-size:9px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>
+      <datalist id="nd-target-opts">${moveOpts}</datalist>
+    </div>
+  </div>`;
+}
+
+function _bpRenderConditionNodeDetail(node) {
+  const conditions = node.conditions || [normalizeCondition({})];
+  const logic = node.conditionLogic || 'and';
+  const labelOpts = renderDatalistOptions(getKnownLabels());
+  const groupOpts = renderDatalistOptions(getKnownGroups());
+  const varOpts = renderDatalistOptions(getKnownVarNames());
+  const boolOpts = renderDatalistOptions(getKnownBoolNames());
+  const fnOpts = renderDatalistOptions(getKnownControlFunctionNames());
+  const logicToggle = conditions.length > 1
+    ? `<select class="nd-cond-logic" style="font-size:9px;padding:1px 3px;font-weight:700;color:var(--accentHi)"><option value="and" ${logic==='and'?'selected':''}>ALL (AND)</option><option value="or" ${logic==='or'?'selected':''}>ANY (OR)</option></select>`
+    : '';
+  const condRows = conditions.map((rawCond, di) => {
+    const cond = normalizeCondition(rawCond);
+    const condTypeOpts = CONDITION_TYPES.map(t => {
+      const labels = {none:'always',fnDone:'fn done',touching:'touch ref',touchingPlayer:'touching player',position:'position',distance:'distance',timer:'timer',key:'key held',grounded:'grounded',varCmp:'variable',bool:'boolean'};
+      return `<option value="${t}" ${cond.type === t ? 'selected' : ''}>${labels[t]}</option>`;
+    }).join('');
+    let condFields = '';
+    const dc = `data-cond-index="${di}"`;
+    switch (cond.type) {
+      case 'fnDone':
+        condFields = `<input class="nd-cond-ref" ${dc} list="nd-cond-fn-opts" type="text" value="${escapeHtml(cond.ref)}" placeholder="fn name" style="width:68px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>`;
+        break;
+      case 'touching':
+        condFields = `<select class="nd-cond-touch-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="group" ${cond.touchRefType==='group'?'selected':''}>grp</option><option value="name" ${cond.touchRefType==='name'?'selected':''}>name</option></select><input class="nd-cond-touch-ref" ${dc} list="nd-cond-${cond.touchRefType === 'name' ? 'label' : 'group'}-opts-${di}" type="text" value="${escapeHtml(cond.touchRef)}" placeholder="target" style="width:60px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="nd-cond-label-opts-${di}">${labelOpts}</datalist><datalist id="nd-cond-group-opts-${di}">${groupOpts}</datalist>`;
+        break;
+      case 'position':
+        condFields = `<input class="nd-cond-pos-subj" ${dc} list="nd-cond-pos-subj-opts" type="text" value="${escapeHtml(cond.posSubject)}" style="width:48px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="nd-cond-pos-subj-opts"><option value="player">${labelOpts}</datalist><select class="nd-cond-pos-axis" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_POS_AXES.map(a => `<option value="${a}" ${cond.posAxis===a?'selected':''}>.${a}</option>`).join('')}</select><select class="nd-cond-pos-op" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_OPS.map(o => `<option value="${o}" ${cond.posOp===o?'selected':''}>${escapeHtml(o)}</option>`).join('')}</select><select class="nd-cond-pos-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="digits" ${cond.posValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${cond.posValueType === 'var' ? 'selected' : ''}>var</option></select>${cond.posValueType === 'var' ? `<input class="nd-cond-pos-var" ${dc} list="nd-cond-var-opts" type="text" value="${escapeHtml(cond.posValueVar)}" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="nd-cond-pos-val" ${dc} type="number" step="0.1" value="${cond.posValue}" style="width:42px;font-size:9px;padding:1px 3px"/>`}`;
+        break;
+      case 'distance':
+        condFields = `<input class="nd-cond-dist-target" ${dc} list="nd-cond-dist-opts" type="text" value="${escapeHtml(cond.distTarget)}" placeholder="object" style="width:54px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="nd-cond-dist-opts">${labelOpts}</datalist><select class="nd-cond-dist-op" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_OPS.map(o => `<option value="${o}" ${cond.distOp===o?'selected':''}>${escapeHtml(o)}</option>`).join('')}</select><select class="nd-cond-dist-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="digits" ${cond.distValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${cond.distValueType === 'var' ? 'selected' : ''}>var</option></select>${cond.distValueType === 'var' ? `<input class="nd-cond-dist-var" ${dc} list="nd-cond-var-opts" type="text" value="${escapeHtml(cond.distValueVar)}" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="nd-cond-dist-val" ${dc} type="number" step="0.5" min="0" value="${cond.distValue}" style="width:38px;font-size:9px;padding:1px 3px"/>`}`;
+        break;
+      case 'timer':
+        condFields = `<select class="nd-cond-timer-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="digits" ${cond.timerType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${cond.timerType === 'var' ? 'selected' : ''}>var</option></select>${cond.timerType === 'var' ? `<input class="nd-cond-timer-var" ${dc} list="nd-cond-var-opts" type="text" value="${escapeHtml(cond.timerVar)}" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="nd-cond-timer" ${dc} type="number" step="0.1" min="0" value="${cond.timerSeconds}" style="width:42px;font-size:9px;padding:1px 3px"/>`}<span style="font-size:8px;color:var(--muted)">s</span>`;
+        break;
+      case 'key':
+        condFields = `<select class="nd-cond-key" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_KEY_CODES.map(k => `<option value="${k}" ${cond.keyCode===k?'selected':''}>${k.replace('Key','').replace('Digit','').replace('Left','')}</option>`).join('')}</select>`;
+        break;
+      case 'varCmp':
+        condFields = `<input class="nd-cond-var-name" ${dc} list="nd-cond-var-opts" type="text" value="${escapeHtml(cond.varCmpName)}" placeholder="var" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><select class="nd-cond-var-op" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_OPS.map(o => `<option value="${o}" ${cond.varCmpOp===o?'selected':''}>${escapeHtml(o)}</option>`).join('')}</select><select class="nd-cond-var-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="digits" ${cond.varCmpValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${cond.varCmpValueType === 'var' ? 'selected' : ''}>var</option></select>${cond.varCmpValueType === 'var' ? `<input class="nd-cond-var-ref" ${dc} list="nd-cond-var-opts" type="text" value="${escapeHtml(cond.varCmpValueVar)}" placeholder="var" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="nd-cond-var-val" ${dc} type="number" step="1" value="${cond.varCmpValue}" style="width:42px;font-size:9px;padding:1px 3px"/>`}`;
+        break;
+      case 'bool':
+        condFields = `<input class="nd-cond-bool-name" ${dc} list="nd-cond-bool-opts" type="text" value="${escapeHtml(cond.boolName)}" placeholder="bool" style="width:68px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>`;
+        break;
+      default: condFields = '';
+    }
+    const negateCheck = cond.type !== 'none' ? `<label style="display:flex;align-items:center;gap:2px;font-size:8px;color:var(--muted);cursor:pointer" title="Negate (NOT)"><input class="nd-cond-negate" ${dc} type="checkbox" ${cond.negate ? 'checked' : ''} style="margin:0"/>!</label>` : '';
+    const delCond = conditions.length > 1 ? `<button class="ct-del nd-cond-del" ${dc} title="Remove condition" style="font-size:8px;padding:0 3px">✕</button>` : '';
+    const prefix = di === 0 ? '' : `<span style="color:var(--accentHi);font-size:7px;font-weight:700;min-width:22px;text-align:center">${logic === 'or' ? 'OR' : 'AND'}</span>`;
+    return `<div style="display:flex;align-items:center;gap:3px;flex-wrap:wrap;padding:2px 0">${prefix}<select class="nd-cond-type" ${dc} style="font-size:9px;padding:1px 2px">${condTypeOpts}</select>${condFields}${negateCheck}${delCond}</div>`;
+  }).join('');
+  return `<div style="padding:8px">
+    <div style="font-size:10px;font-weight:700;color:#ffb74d;margin-bottom:6px">⚡ Condition Node</div>
+    <datalist id="nd-cond-fn-opts">${fnOpts}</datalist>
+    <datalist id="nd-cond-var-opts">${varOpts}</datalist>
+    <datalist id="nd-cond-bool-opts">${boolOpts}</datalist>
+    <div style="margin-bottom:4px">${logicToggle}</div>
+    ${condRows}
+    <button class="nd-cond-add" style="font-size:8px;padding:2px 6px;margin-top:4px;color:var(--muted);cursor:pointer;background:var(--surface2);border:1px solid var(--border);border-radius:3px">+ Condition</button>
+  </div>`;
+}
+
+function _bpRenderActionNodeDetail(node, fnIdx) {
+  const actionsHtml = _bpRenderActionCards(node.actions, fnIdx);
+  return `<div style="padding:4px 8px">
+    <div style="font-size:10px;font-weight:700;color:#81c784;margin-bottom:4px">⚙ Action Node</div>
+    <div class="bp-node-body">${actionsHtml}</div>
+    <div style="padding:4px 0"><button class="nd-add-act bp-add-action" data-fn="${fnIdx}">+ Action</button></div>
+  </div>`;
+}
+
+// ── Render selected function detail ──────────────────────────────────────────
+function _bpRefreshDetail() {
+  if (!controlFunctionsListEl || !_bpDetailTitle) return;
+  const fnIdx = _bpGraph.selectedFnIdx;
+  const fn = controlFunctions[fnIdx];
+  if (!fn) {
+    _bpDetailTitle.textContent = 'No FN Group selected';
+    controlFunctionsListEl.innerHTML = '<div style="font-size:10px;color:var(--muted);padding:8px">Select an FN Group to view its graph.</div>';
+    return;
+  }
+  const nodeId = _bpGraph.selectedNodeId;
+  const node = nodeId ? fn.nodes?.find(n => n.id === nodeId) : null;
+  _bpDetailTitle.textContent = 'ƒ ' + (fn.name || '(unnamed)');
+  ensureControlFunctionGroups();
   const groupOptionsHtml = controlFunctionGroups
     .map(group => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)}</option>`)
     .join('');
+  let html = `<div style="display:flex;align-items:center;gap:6px;padding:4px 8px;border-bottom:1px solid var(--border)">
+    <input class="cfn-name" data-fn="${fnIdx}" type="text" value="${escapeHtml(fn.name)}" placeholder="FN Group name" style="flex:1;font-size:10px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>
+    <select class="cfn-group" data-fn="${fnIdx}" style="font-size:9px;padding:1px 3px">${groupOptionsHtml}</select>
+    <label style="font-size:8px;color:var(--muted);display:flex;align-items:center;gap:2px;cursor:pointer" title="Auto-execute on playtest"><input class="cfn-always-active" data-fn="${fnIdx}" type="checkbox" ${fn.alwaysActive ? 'checked' : ''}/> Always</label>
+    <button class="cfn-sim" data-fn="${fnIdx}" title="Simulate" style="font-size:10px;padding:1px 5px;cursor:pointer">▶</button>
+    <button class="cfn-sim-reset" data-fn="${fnIdx}" title="Reset" style="font-size:10px;padding:1px 5px;cursor:pointer">■</button>
+    <button class="ct-del cfn-del-fn" data-fn="${fnIdx}" title="Delete FN Group" style="font-size:9px;cursor:pointer">✕</button>
+  </div>`;
+  if (!node) {
+    html += '<div style="font-size:10px;color:var(--muted);padding:12px 8px">Click a node in the graph to edit it.</div>';
+  } else if (node.type === 'target') {
+    html += _bpRenderTargetNodeDetail(node);
+  } else if (node.type === 'condition') {
+    html += _bpRenderConditionNodeDetail(node);
+  } else if (node.type === 'action') {
+    html += _bpRenderActionNodeDetail(node, fnIdx);
+  }
+  if (node) {
+    // Label input
+    html += `<div style="display:flex;align-items:center;gap:4px;padding:4px 8px;border-top:1px solid var(--border)">
+      <span style="font-size:9px;color:var(--muted);min-width:36px">Label</span>
+      <input class="nd-label" type="text" value="${escapeHtml(node.label || '')}" placeholder="optional label" style="flex:1;font-size:9px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>
+    </div>`;
+    // Connections list
+    const incoming = (fn.connections || []).filter(c => c.to === node.id);
+    const outgoing = (fn.connections || []).filter(c => c.from === node.id);
+    if (incoming.length || outgoing.length) {
+      let connHtml = '<div style="padding:4px 8px;border-top:1px solid var(--border)"><div style="font-size:9px;font-weight:700;color:var(--muted);margin-bottom:3px">Connections</div>';
+      incoming.forEach(c => {
+        const src = fn.nodes?.find(n => n.id === c.from);
+        const srcLabel = src ? (src.label || src.type + ' ' + src.id.slice(-4)) : c.from;
+        connHtml += `<div style="display:flex;align-items:center;gap:4px;padding:1px 0"><span style="font-size:8px;color:#58a6ff">← in</span><span style="font-size:8px;color:var(--text);flex:1">${escapeHtml(srcLabel)}</span><button class="nd-conn-del" data-conn-from="${escapeHtml(c.from)}" data-conn-to="${escapeHtml(c.to)}" style="font-size:7px;padding:0 3px;cursor:pointer;color:var(--muted)" title="Remove connection">✕</button></div>`;
+      });
+      outgoing.forEach(c => {
+        const tgt = fn.nodes?.find(n => n.id === c.to);
+        const tgtLabel = tgt ? (tgt.label || tgt.type + ' ' + tgt.id.slice(-4)) : c.to;
+        connHtml += `<div style="display:flex;align-items:center;gap:4px;padding:1px 0"><span style="font-size:8px;color:#81c784">→ out</span><span style="font-size:8px;color:var(--text);flex:1">${escapeHtml(tgtLabel)}</span><button class="nd-conn-del" data-conn-from="${escapeHtml(c.from)}" data-conn-to="${escapeHtml(c.to)}" style="font-size:7px;padding:0 3px;cursor:pointer;color:var(--muted)" title="Remove connection">✕</button></div>`;
+      });
+      connHtml += '</div>';
+      html += connHtml;
+    }
+  }
+  controlFunctionsListEl.innerHTML = html;
+  controlFunctionsListEl.querySelectorAll('.cfn-group').forEach(select => {
+    select.value = fn.groupId;
+  });
+  _bpBindNodeDetailUI();
+}
 
-  const renderFunctionCard = (fn, fnIdx) => {
-    const actionsHtml = fn.actions.map((action, actIdx) => {
+// ─── Control functions UI (project-level function editor) ────────────────────
+function refreshControlFunctionsUI() {
+  if (!controlFunctionsListEl) return;
+  _bpRefreshFnSelect();
+  refreshBpGraph();
+  _bpRefreshDetail();
+}
+
+function _bpRenderActionCards(actions, fnIdx) {
+  return actions.map((action, actIdx) => {
       const isLight = action.actionType === 'light';
       const isRotate = action.actionType === 'rotate';
       const isAudio = action.actionType === 'audio';
@@ -19236,6 +22886,7 @@ function refreshControlFunctionsUI() {
       const isSetBool = action.actionType === 'setBool';
       const isPlayerStats = action.actionType === 'playerStats';
       const isTeleport = action.actionType === 'teleport';
+      const isScale = action.actionType === 'scale';
       const isSkeletonAct = action.actionType === 'skeleton';
       const moveOpts = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool || isPlayerStats || isTeleport || isSkeletonAct) ? '' : getMoveTargetOptions(action.refType, action.refValue);
       const moveListId = `cfn-target-opts-${fnIdx}-${actIdx}`;
@@ -19267,6 +22918,10 @@ function refreshControlFunctionsUI() {
         ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Audio</span><input class="cfn-audio-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${audioListId}" type="text" value="${escapeHtml(action.audioName || '')}" placeholder="audio name" style="flex:1;min-width:94px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${audioListId}">${knownAudioNames}</datalist></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Mode</span><select class="cfn-audio-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${AUDIO_PLAY_MODES.map(mode => `<option value="${mode}" ${action.audioMode === mode ? 'selected' : ''}>${mode}</option>`).join('')}</select><span style="font-size:8px;color:var(--muted)">Range</span><input class="cfn-audio-dist" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="1" max="800" step="1" value="${action.audioDistance}" style="width:52px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Until</span><select class="cfn-audio-until" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${AUDIO_UNTIL_EVENTS.map(ev => `<option value="${ev}" ${action.audioUntil === ev ? 'selected' : ''}>${ev}</option>`).join('')}</select><input class="cfn-audio-until-fn" data-fn="${fnIdx}" data-act="${actIdx}" list="${fnListId}" type="text" value="${escapeHtml(action.audioUntilFunction || '')}" placeholder="fn name" style="width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-audio-loop" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.audioLoop ? 'checked' : ''}/> Loop</label></div><datalist id="${fnListId}">${knownFnNames}</datalist>`
         : isLight
         ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Light</span><select class="cfn-light-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${CONTROL_LIGHT_OPS.map(op => `<option value="${op}" ${action.lightOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select><input class="cfn-light-val" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.lightValue}" style="width:46px;font-size:9px"/></div>`
+        : isScale
+          ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To Scale</span><input class="cfn-scx" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-scy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-scz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleOffset[2]}" style="width:42px;font-size:9px"/></div>
+          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From Scale</span><input class="cfn-ssx" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleStartOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-ssy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleStartOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-ssz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleStartOffset[2]}" style="width:42px;font-size:9px"/></div>
+          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`
         : isRotate
           ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To Rot°</span><input class="cfn-rox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-roy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-roz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[2]}" style="width:42px;font-size:9px"/></div>
           <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From Rot°</span><input class="cfn-rsox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-rsoy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-rsoz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[2]}" style="width:42px;font-size:9px"/></div>
@@ -19276,526 +22931,366 @@ function refreshControlFunctionsUI() {
           : `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To (orig)</span><input class="cfn-ox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[0]}" style="width:42px;font-size:9px"/><input class="cfn-oy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[1]}" style="width:42px;font-size:9px"/><input class="cfn-oz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[2]}" style="width:42px;font-size:9px"/></div>
           <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From (orig)</span><input class="cfn-sox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-soy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-soz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[2]}" style="width:42px;font-size:9px"/></div>
           <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`;
-      const posReadout = (!isLight && !isPlayerGroup && !isFunctionControl && !isAudio && !isPath && !isSetVar && !isSetBool && !isPlayerStats && !isTeleport && !isSkeletonAct) ? `<div class="cfn-pos-readout" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:8px;color:var(--accentHi);margin-left:34px;min-height:12px;font-family:monospace;opacity:0.8"></div>` : '';
+      const posReadout = (!isLight && !isPlayerGroup && !isFunctionControl && !isAudio && !isPath && !isSetVar && !isSetBool && !isPlayerStats && !isTeleport && !isSkeletonAct) ? `<div class="cfn-pos-readout" data-fn="${fnIdx}" data-act="${actIdx}"></div>` : '';
       const targetRefHtml = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool || isPlayerStats || isTeleport || isSkeletonAct)
-        ? `<span style="font-size:8px;color:var(--muted);min-width:56px">player</span>`
-        : `<select class="cfn-ref-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="group" ${action.refType === 'group' ? 'selected' : ''}>group</option><option value="name" ${action.refType === 'name' ? 'selected' : ''}>name</option></select><input class="cfn-ref-val" data-fn="${fnIdx}" data-act="${actIdx}" list="${moveListId}" type="text" value="${escapeHtml(action.refValue)}" style="width:70px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${moveListId}">${moveOpts}</datalist>`;
-      return `<div style="border-left:2px solid var(--border);margin-left:4px;padding-left:6px;margin-bottom:4px">
-        <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">#${actIdx+1}</span>${targetRefHtml}<select class="cfn-action-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="move" ${action.actionType === 'move' ? 'selected' : ''}>move</option><option value="rotate" ${action.actionType === 'rotate' ? 'selected' : ''}>rotate</option><option value="light" ${action.actionType === 'light' ? 'selected' : ''}>light</option><option value="audio" ${action.actionType === 'audio' ? 'selected' : ''}>audio</option><option value="path" ${action.actionType === 'path' ? 'selected' : ''}>path</option><option value="functionControl" ${action.actionType === 'functionControl' ? 'selected' : ''}>function ctrl</option><option value="playerGroup" ${action.actionType === 'playerGroup' ? 'selected' : ''}>player group</option><option value="setVar" ${action.actionType === 'setVar' ? 'selected' : ''}>set var</option><option value="setBool" ${action.actionType === 'setBool' ? 'selected' : ''}>set bool</option><option value="playerStats" ${action.actionType === 'playerStats' ? 'selected' : ''}>player stats</option><option value="teleport" ${action.actionType === 'teleport' ? 'selected' : ''}>teleport</option><option value="skeleton" ${action.actionType === 'skeleton' ? 'selected' : ''}>skeleton</option></select><button class="ct-del cfn-del-act" data-fn="${fnIdx}" data-act="${actIdx}" title="Remove action">✕</button></div>
-        ${primaryHtml}${posReadout}
+        ? `<span class="bp-act-num">player</span>`
+        : `<select class="cfn-ref-type" data-fn="${fnIdx}" data-act="${actIdx}"><option value="group" ${action.refType === 'group' ? 'selected' : ''}>group</option><option value="name" ${action.refType === 'name' ? 'selected' : ''}>name</option></select><input class="cfn-ref-val" data-fn="${fnIdx}" data-act="${actIdx}" list="${moveListId}" type="text" value="${escapeHtml(action.refValue)}" placeholder="target"/><datalist id="${moveListId}">${moveOpts}</datalist>`;
+      return `<div class="bp-action">
+        <div class="bp-action-hdr">
+          <span class="bp-pin bp-pin-${action.actionType}"></span>
+          <span class="bp-act-num">#${actIdx+1}</span>
+          ${targetRefHtml}
+          <select class="cfn-action-type" data-fn="${fnIdx}" data-act="${actIdx}"><option value="move" ${action.actionType === 'move' ? 'selected' : ''}>move</option><option value="rotate" ${action.actionType === 'rotate' ? 'selected' : ''}>rotate</option><option value="scale" ${action.actionType === 'scale' ? 'selected' : ''}>scale</option><option value="light" ${action.actionType === 'light' ? 'selected' : ''}>light</option><option value="audio" ${action.actionType === 'audio' ? 'selected' : ''}>audio</option><option value="path" ${action.actionType === 'path' ? 'selected' : ''}>path</option><option value="functionControl" ${action.actionType === 'functionControl' ? 'selected' : ''}>function ctrl</option><option value="playerGroup" ${action.actionType === 'playerGroup' ? 'selected' : ''}>player group</option><option value="setVar" ${action.actionType === 'setVar' ? 'selected' : ''}>set var</option><option value="setBool" ${action.actionType === 'setBool' ? 'selected' : ''}>set bool</option><option value="playerStats" ${action.actionType === 'playerStats' ? 'selected' : ''}>player stats</option><option value="teleport" ${action.actionType === 'teleport' ? 'selected' : ''}>teleport</option><option value="skeleton" ${action.actionType === 'skeleton' ? 'selected' : ''}>skeleton</option></select>
+          <button class="ct-del cfn-del-act" data-fn="${fnIdx}" data-act="${actIdx}" title="Remove action">✕</button>
+        </div>
+        <div class="bp-action-fields">
+          ${primaryHtml}
+        </div>
+        ${posReadout}
       </div>`;
     }).join('');
-
-    return `<div class="ct-entry" style="flex-wrap:wrap" data-fn-index="${fnIdx}">
-      <div class="sf-row" style="gap:4px;width:100%"><span style="font-size:9px;color:var(--accentHi);font-weight:700">ƒ</span><input class="cfn-name" data-fn="${fnIdx}" type="text" value="${escapeHtml(fn.name)}" placeholder="name" style="flex:1;font-size:10px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><select class="cfn-group" data-fn="${fnIdx}" style="font-size:9px;padding:1px 3px">${groupOptionsHtml}</select><label style="display:flex;align-items:center;gap:2px;cursor:pointer;font-size:9px;color:var(--muted)" title="Auto-execute when playtest starts"><input class="cfn-always-active" data-fn="${fnIdx}" type="checkbox" ${fn.alwaysActive ? 'checked' : ''}/> Always Active</label><button class="cfn-sim" data-fn="${fnIdx}" title="Simulate" style="background:none;border:none;color:var(--accentHi);cursor:pointer;font-size:11px;padding:0 2px">▶</button><button class="cfn-sim-reset" data-fn="${fnIdx}" title="Reset" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:10px;padding:0 2px">■</button><button class="ct-del cfn-del-fn" data-fn="${fnIdx}" title="Delete function">✕</button></div>
-      ${actionsHtml}
-      <button class="cfn-add-act" data-fn="${fnIdx}" style="font-size:8px;padding:1px 5px;margin-left:12px">+ Action</button>
-    </div>`;
-  };
-
-  const groupedHtml = controlFunctionGroups.map(group => {
-    const rows = visible.filter(({ fn }) => fn.groupId === group.id);
-    if (!rows.length && search) return '';
-    const body = rows.map(({ fn, fnIdx }) => renderFunctionCard(fn, fnIdx)).join('') || '<div style="font-size:9px;color:var(--muted);padding:5px 2px">No functions in this group.</div>';
-    const caret = group.collapsed ? '▸' : '▾';
-    return `<div class="cfn-group-wrap" data-cfg="${escapeHtml(group.id)}"><button class="cfn-group-toggle" data-cfg="${escapeHtml(group.id)}"><span>${caret} ${escapeHtml(group.name)}</span><span style="opacity:.7">${rows.length}</span></button><div class="cfn-group-body" style="${group.collapsed ? 'display:none' : ''}">${body}</div><button class="cfn-group-add" data-cfg="${escapeHtml(group.id)}">+ Add Function</button></div>`;
-  }).join('');
-
-  controlFunctionsListEl.innerHTML = groupedHtml || '<div style="font-size:10px;color:var(--muted);padding:5px 1px">No matching functions.</div>';
-
-  controlFunctionsListEl.querySelectorAll('.cfn-group').forEach(select => {
-    const fnIdx = parseInt(select.dataset.fn, 10);
-    if (Number.isFinite(fnIdx) && controlFunctions[fnIdx]) {
-      select.value = controlFunctions[fnIdx].groupId;
-    }
-  });
-
-  bindControlFunctionsUI();
 }
 
-function bindControlFunctionsUI() {
+// ── Node-specific detail bindings ────────────────────────────────────────────
+function _bpBindNodeDetailUI() {
   if (!controlFunctionsListEl) return;
+  const fnIdx = _bpGraph.selectedFnIdx;
+  const fn = controlFunctions[fnIdx];
 
-  const withFnAction = (fnIdx, actIdx, updater) => {
-    const fn = controlFunctions[fnIdx];
-    if (!fn) return;
-    while (fn.actions.length <= actIdx) fn.actions.push(createDefaultFunctionAction());
-    updater(fn.actions[actIdx]);
-  };
-
+  // ── Function-level bindings ──
   controlFunctionsListEl.querySelectorAll('.cfn-name').forEach(input => {
     input.addEventListener('change', () => {
-      const idx = parseInt(input.dataset.fn, 10);
-      if (controlFunctions[idx]) controlFunctions[idx].name = input.value.trim();
+      if (fn) {
+        fn.name = input.value.trim();
+        if (_bpDetailTitle) _bpDetailTitle.textContent = 'ƒ ' + (fn.name || '(unnamed)');
+        refreshBpGraph();
+        _bpRefreshFnSelect();
+      }
     });
   });
-
   controlFunctionsListEl.querySelectorAll('.cfn-always-active').forEach(input => {
-    input.addEventListener('change', () => {
-      const idx = parseInt(input.dataset.fn, 10);
-      if (controlFunctions[idx]) controlFunctions[idx].alwaysActive = !!input.checked;
-    });
+    input.addEventListener('change', () => { if (fn) fn.alwaysActive = !!input.checked; });
   });
-
   controlFunctionsListEl.querySelectorAll('.cfn-group').forEach(select => {
     select.addEventListener('change', () => {
-      const idx = parseInt(select.dataset.fn, 10);
-      const fn = controlFunctions[idx];
       if (!fn) return;
-      if (controlFunctionGroups.some(group => group.id === select.value)) {
-        fn.groupId = select.value;
-      }
-      refreshControlFunctionsUI();
+      if (controlFunctionGroups.some(g => g.id === select.value)) fn.groupId = select.value;
     });
   });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-group-toggle').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const group = controlFunctionGroups.find(g => g.id === btn.dataset.cfg);
-      if (!group) return;
-      group.collapsed = !group.collapsed;
-      refreshControlFunctionsUI();
-    });
-  });
-
   controlFunctionsListEl.querySelectorAll('.cfn-del-fn').forEach(btn => {
     btn.addEventListener('click', () => {
-      const idx = parseInt(btn.dataset.fn, 10);
-      if (idx >= 0 && idx < controlFunctions.length) controlFunctions.splice(idx, 1);
-      refreshControlFunctionsUI();
+      if (fnIdx >= 0 && fnIdx < controlFunctions.length) {
+        controlFunctions.splice(fnIdx, 1);
+        _bpGraph.selectedFnIdx = -1;
+        _bpGraph.selectedNodeId = null;
+        refreshControlFunctionsUI();
+      }
     });
   });
-
   controlFunctionsListEl.querySelectorAll('.cfn-sim').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (state.isPlaytest) return;
-      simulateFunction(parseInt(btn.dataset.fn, 10));
-    });
+    btn.addEventListener('click', () => { if (!state.isPlaytest) simulateFunction(fnIdx); });
   });
-
   controlFunctionsListEl.querySelectorAll('.cfn-sim-reset').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (state.isPlaytest) return;
-      resetSimulation();
+    btn.addEventListener('click', () => { if (!state.isPlaytest) resetSimulation(); });
+  });
+
+  // ── Target node bindings ──
+  controlFunctionsListEl.querySelectorAll('.nd-target-reftype').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const node = fn?.nodes?.find(n => n.id === _bpGraph.selectedNodeId);
+      if (node && node.type === 'target') { node.refType = sel.value === 'name' ? 'name' : 'group'; _bpRefreshDetail(); refreshBpGraph(); }
     });
   });
 
-  controlFunctionsListEl.querySelectorAll('.cfn-add-act').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const idx = parseInt(btn.dataset.fn, 10);
-      if (controlFunctions[idx]) controlFunctions[idx].actions.push(createDefaultFunctionAction());
-      refreshControlFunctionsUI();
+  // ── Label binding ──
+  controlFunctionsListEl.querySelectorAll('.nd-label').forEach(input => {
+    input.addEventListener('change', () => {
+      const node = fn?.nodes?.find(n => n.id === _bpGraph.selectedNodeId);
+      if (node) { node.label = input.value.trim(); refreshBpGraph(); }
     });
   });
 
+  // ── Connection delete from detail panel ──
+  controlFunctionsListEl.querySelectorAll('.nd-conn-del').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (!fn || !Array.isArray(fn.connections)) return;
+      const fromId = btn.dataset.connFrom;
+      const toId = btn.dataset.connTo;
+      const idx = fn.connections.findIndex(c => c.from === fromId && c.to === toId);
+      if (idx !== -1) fn.connections.splice(idx, 1);
+      _bpSyncFnActionsFromNodes(fn);
+      refreshBpGraph();
+      _bpRefreshDetail();
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.nd-target-refval').forEach(input => {
+    input.addEventListener('change', () => {
+      const node = fn?.nodes?.find(n => n.id === _bpGraph.selectedNodeId);
+      if (node && node.type === 'target') { node.refValue = input.value.trim(); refreshBpGraph(); }
+    });
+  });
+
+  // ── Condition node bindings ──
+  const getCondNode = () => {
+    const node = fn?.nodes?.find(n => n.id === _bpGraph.selectedNodeId);
+    return (node && node.type === 'condition') ? node : null;
+  };
+  controlFunctionsListEl.querySelectorAll('.nd-cond-logic').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const node = getCondNode(); if (node) { node.conditionLogic = sel.value === 'or' ? 'or' : 'and'; _bpRefreshDetail(); }
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.nd-cond-type').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const node = getCondNode(); if (!node) return;
+      const di = parseInt(sel.dataset.condIndex, 10);
+      if (di >= 0 && di < node.conditions.length) { node.conditions[di] = normalizeCondition({ ...node.conditions[di], type: sel.value }); }
+      _bpRefreshDetail();
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.nd-cond-negate').forEach(input => {
+    input.addEventListener('change', () => {
+      const node = getCondNode(); if (!node) return;
+      const di = parseInt(input.dataset.condIndex, 10);
+      if (di >= 0 && di < node.conditions.length) node.conditions[di].negate = input.checked;
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.nd-cond-del').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const node = getCondNode(); if (!node) return;
+      const di = parseInt(btn.dataset.condIndex, 10);
+      if (di >= 0 && di < node.conditions.length && node.conditions.length > 1) { node.conditions.splice(di, 1); _bpRefreshDetail(); }
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.nd-cond-add').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const node = getCondNode(); if (node) { node.conditions.push(createDefaultCondition()); _bpRefreshDetail(); }
+    });
+  });
+  // Condition field bindings
+  const bindCondField = (cls, updater) => {
+    controlFunctionsListEl.querySelectorAll(cls).forEach(el => {
+      el.addEventListener('change', () => {
+        const node = getCondNode(); if (!node) return;
+        const di = parseInt(el.dataset.condIndex, 10);
+        if (di >= 0 && di < node.conditions.length) updater(node.conditions[di], el);
+      });
+    });
+  };
+  const bindCondFieldRefresh = (cls, updater) => {
+    controlFunctionsListEl.querySelectorAll(cls).forEach(el => {
+      el.addEventListener('change', () => {
+        const node = getCondNode(); if (!node) return;
+        const di = parseInt(el.dataset.condIndex, 10);
+        if (di >= 0 && di < node.conditions.length) { updater(node.conditions[di], el); _bpRefreshDetail(); }
+      });
+    });
+  };
+  bindCondField('.nd-cond-ref', (c, el) => { c.ref = el.value.trim(); });
+  bindCondFieldRefresh('.nd-cond-touch-type', (c, el) => { c.touchRefType = el.value; });
+  bindCondField('.nd-cond-touch-ref', (c, el) => { c.touchRef = el.value.trim(); });
+  bindCondField('.nd-cond-pos-subj', (c, el) => { c.posSubject = el.value.trim(); });
+  bindCondField('.nd-cond-pos-axis', (c, el) => { c.posAxis = el.value; });
+  bindCondField('.nd-cond-pos-op', (c, el) => { c.posOp = el.value; });
+  bindCondFieldRefresh('.nd-cond-pos-type', (c, el) => { c.posValueType = el.value; });
+  bindCondField('.nd-cond-pos-val', (c, el) => { c.posValue = parseFloat(el.value) || 0; });
+  bindCondField('.nd-cond-pos-var', (c, el) => { c.posValueVar = el.value.trim(); });
+  bindCondField('.nd-cond-dist-target', (c, el) => { c.distTarget = el.value.trim(); });
+  bindCondField('.nd-cond-dist-op', (c, el) => { c.distOp = el.value; });
+  bindCondFieldRefresh('.nd-cond-dist-type', (c, el) => { c.distValueType = el.value; });
+  bindCondField('.nd-cond-dist-val', (c, el) => { c.distValue = parseFloat(el.value) || 0; });
+  bindCondField('.nd-cond-dist-var', (c, el) => { c.distValueVar = el.value.trim(); });
+  bindCondFieldRefresh('.nd-cond-timer-type', (c, el) => { c.timerType = el.value; });
+  bindCondField('.nd-cond-timer', (c, el) => { c.timerSeconds = parseFloat(el.value) || 0; });
+  bindCondField('.nd-cond-timer-var', (c, el) => { c.timerVar = el.value.trim(); });
+  bindCondField('.nd-cond-key', (c, el) => { c.keyCode = el.value; });
+  bindCondField('.nd-cond-var-name', (c, el) => { c.varCmpName = el.value.trim(); });
+  bindCondField('.nd-cond-var-op', (c, el) => { c.varCmpOp = el.value; });
+  bindCondFieldRefresh('.nd-cond-var-type', (c, el) => { c.varCmpValueType = el.value; });
+  bindCondField('.nd-cond-var-val', (c, el) => { c.varCmpValue = parseFloat(el.value) || 0; });
+  bindCondField('.nd-cond-var-ref', (c, el) => { c.varCmpValueVar = el.value.trim(); });
+  bindCondField('.nd-cond-bool-name', (c, el) => { c.boolName = el.value.trim(); });
+
+  // ── Action node bindings ──
+  const getActionNode = () => {
+    const node = fn?.nodes?.find(n => n.id === _bpGraph.selectedNodeId);
+    return (node && node.type === 'action') ? node : null;
+  };
+  const withNodeAction = (actIdx, updater) => {
+    const node = getActionNode();
+    if (!node) return;
+    while (node.actions.length <= actIdx) node.actions.push(createDefaultFunctionAction());
+    updater(node.actions[actIdx]);
+  };
+  controlFunctionsListEl.querySelectorAll('.nd-add-act').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const node = getActionNode(); if (node) { node.actions.push(createDefaultFunctionAction()); _bpRefreshDetail(); }
+    });
+  });
   controlFunctionsListEl.querySelectorAll('.cfn-del-act').forEach(btn => {
     btn.addEventListener('click', () => {
-      const fnIdx = parseInt(btn.dataset.fn, 10);
       const actIdx = parseInt(btn.dataset.act, 10);
-      const fn = controlFunctions[fnIdx];
-      if (fn && actIdx >= 0 && actIdx < fn.actions.length) fn.actions.splice(actIdx, 1);
-      if (fn && !fn.actions.length) fn.actions.push(createDefaultFunctionAction());
-      refreshControlFunctionsUI();
+      const node = getActionNode(); if (!node) return;
+      if (actIdx >= 0 && actIdx < node.actions.length) node.actions.splice(actIdx, 1);
+      if (!node.actions.length) node.actions.push(createDefaultFunctionAction());
+      _bpRefreshDetail();
     });
   });
-
   controlFunctionsListEl.querySelectorAll('.cfn-action-type').forEach(sel => {
     sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
       const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.actionType = CONTROL_ACTION_TYPES.includes(sel.value) ? sel.value : 'move'; });
-      refreshControlFunctionsUI();
+      withNodeAction(actIdx, a => { a.actionType = CONTROL_ACTION_TYPES.includes(sel.value) ? sel.value : 'move'; });
+      _bpRefreshDetail();
     });
   });
-
   controlFunctionsListEl.querySelectorAll('.cfn-ref-type').forEach(sel => {
     sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
       const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.refType = sel.value === 'name' ? 'name' : 'group'; });
-      refreshControlFunctionsUI();
+      withNodeAction(actIdx, a => { a.refType = sel.value === 'name' ? 'name' : 'group'; });
+      _bpRefreshDetail();
     });
   });
-
   controlFunctionsListEl.querySelectorAll('.cfn-ref-val').forEach(input => {
     input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
       const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.refValue = input.value.trim(); });
+      withNodeAction(actIdx, a => { a.refValue = input.value.trim(); });
     });
   });
 
-  const bindCfnNumber = (selector, updater) => {
-    controlFunctionsListEl.querySelectorAll(selector).forEach(input => {
+  const bindNum = (sel, updater) => {
+    controlFunctionsListEl.querySelectorAll(sel).forEach(input => {
       input.addEventListener('change', () => {
-        const fnIdx = parseInt(input.dataset.fn, 10);
         const actIdx = parseInt(input.dataset.act, 10);
         const val = parseFloat(input.value) || 0;
-        withFnAction(fnIdx, actIdx, a => updater(a, val));
+        withNodeAction(actIdx, a => updater(a, val));
+      });
+    });
+  };
+  bindNum('.cfn-ox', (a, v) => { a.offset[0] = v; });
+  bindNum('.cfn-oy', (a, v) => { a.offset[1] = v; });
+  bindNum('.cfn-oz', (a, v) => { a.offset[2] = v; });
+  bindNum('.cfn-sox', (a, v) => { a.startOffset[0] = v; });
+  bindNum('.cfn-soy', (a, v) => { a.startOffset[1] = v; });
+  bindNum('.cfn-soz', (a, v) => { a.startOffset[2] = v; });
+  bindNum('.cfn-rox', (a, v) => { a.rotateOffset[0] = v; });
+  bindNum('.cfn-roy', (a, v) => { a.rotateOffset[1] = v; });
+  bindNum('.cfn-roz', (a, v) => { a.rotateOffset[2] = v; });
+  bindNum('.cfn-rsox', (a, v) => { a.rotateStartOffset[0] = v; });
+  bindNum('.cfn-rsoy', (a, v) => { a.rotateStartOffset[1] = v; });
+  bindNum('.cfn-rsoz', (a, v) => { a.rotateStartOffset[2] = v; });
+  bindNum('.cfn-rrx', (a, v) => { a.rotateRpm[0] = v; });
+  bindNum('.cfn-rry', (a, v) => { a.rotateRpm[1] = v; });
+  bindNum('.cfn-rrz', (a, v) => { a.rotateRpm[2] = v; });
+  bindNum('.cfn-scx', (a, v) => { a.scaleOffset[0] = v; });
+  bindNum('.cfn-scy', (a, v) => { a.scaleOffset[1] = v; });
+  bindNum('.cfn-scz', (a, v) => { a.scaleOffset[2] = v; });
+  bindNum('.cfn-ssx', (a, v) => { a.scaleStartOffset[0] = v; });
+  bindNum('.cfn-ssy', (a, v) => { a.scaleStartOffset[1] = v; });
+  bindNum('.cfn-ssz', (a, v) => { a.scaleStartOffset[2] = v; });
+  bindNum('.cfn-light-val', (a, v) => { a.lightValue = v; });
+  bindNum('.cfn-dur', (a, v) => { a.duration = Math.max(0, v); });
+  bindNum('.cfn-set-var-value', (a, v) => { a.setVarValue = Math.trunc(v); });
+
+  const bindSel = (sel, updater) => {
+    controlFunctionsListEl.querySelectorAll(sel).forEach(el => {
+      el.addEventListener('change', () => {
+        const actIdx = parseInt(el.dataset.act, 10);
+        withNodeAction(actIdx, a => updater(a, el));
+      });
+    });
+  };
+  const bindSelRefresh = (sel, updater) => {
+    controlFunctionsListEl.querySelectorAll(sel).forEach(el => {
+      el.addEventListener('change', () => {
+        const actIdx = parseInt(el.dataset.act, 10);
+        withNodeAction(actIdx, a => updater(a, el));
+        _bpRefreshDetail();
+      });
+    });
+  };
+  const bindInput = (sel, updater) => {
+    controlFunctionsListEl.querySelectorAll(sel).forEach(input => {
+      input.addEventListener('change', () => {
+        const actIdx = parseInt(input.dataset.act, 10);
+        withNodeAction(actIdx, a => updater(a, input));
       });
     });
   };
 
-  bindCfnNumber('.cfn-ox', (a, v) => { a.offset[0] = v; });
-  bindCfnNumber('.cfn-oy', (a, v) => { a.offset[1] = v; });
-  bindCfnNumber('.cfn-oz', (a, v) => { a.offset[2] = v; });
-  bindCfnNumber('.cfn-sox', (a, v) => { a.startOffset[0] = v; });
-  bindCfnNumber('.cfn-soy', (a, v) => { a.startOffset[1] = v; });
-  bindCfnNumber('.cfn-soz', (a, v) => { a.startOffset[2] = v; });
-  bindCfnNumber('.cfn-rox', (a, v) => { a.rotateOffset[0] = v; });
-  bindCfnNumber('.cfn-roy', (a, v) => { a.rotateOffset[1] = v; });
-  bindCfnNumber('.cfn-roz', (a, v) => { a.rotateOffset[2] = v; });
-  bindCfnNumber('.cfn-rsox', (a, v) => { a.rotateStartOffset[0] = v; });
-  bindCfnNumber('.cfn-rsoy', (a, v) => { a.rotateStartOffset[1] = v; });
-  bindCfnNumber('.cfn-rsoz', (a, v) => { a.rotateStartOffset[2] = v; });
-  bindCfnNumber('.cfn-rrx', (a, v) => { a.rotateRpm[0] = v; });
-  bindCfnNumber('.cfn-rry', (a, v) => { a.rotateRpm[1] = v; });
-  bindCfnNumber('.cfn-rrz', (a, v) => { a.rotateRpm[2] = v; });
-  bindCfnNumber('.cfn-light-val', (a, v) => { a.lightValue = v; });
-  bindCfnNumber('.cfn-dur', (a, v) => { a.duration = Math.max(0, v); });
-  bindCfnNumber('.cfn-set-var-value', (a, v) => { a.setVarValue = Math.trunc(v); });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-pg-mode').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => {
-        a.playerGroupMode = CONTROL_PLAYER_GROUP_MODES.includes(sel.value) ? sel.value : 'set';
-      });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-pg-value').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.playerGroupValue = input.value.trim(); });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-light-op').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.lightOp = CONTROL_LIGHT_OPS.includes(sel.value) ? sel.value : 'toggle'; });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-audio-name').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.audioName = input.value.trim(); });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-audio-mode').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.audioMode = AUDIO_PLAY_MODES.includes(sel.value) ? sel.value : 'global'; });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-audio-dist').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.audioDistance = clampAudioDistance(input.value); });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-audio-until').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.audioUntil = AUDIO_UNTIL_EVENTS.includes(sel.value) ? sel.value : 'deactivate'; });
-      refreshControlFunctionsUI();
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-audio-until-fn').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.audioUntilFunction = input.value.trim(); });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-audio-loop').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.audioLoop = input.checked; });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-fc-cmd').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => {
-        a.functionControlCommand = FUNCTION_CONTROL_COMMANDS.includes(sel.value) ? sel.value : 'stop';
-      });
-    });
-  });
+  bindSel('.cfn-pg-mode', (a, el) => { a.playerGroupMode = CONTROL_PLAYER_GROUP_MODES.includes(el.value) ? el.value : 'set'; });
+  bindInput('.cfn-pg-value', (a, el) => { a.playerGroupValue = el.value.trim(); });
+  bindSel('.cfn-light-op', (a, el) => { a.lightOp = CONTROL_LIGHT_OPS.includes(el.value) ? el.value : 'toggle'; });
+  bindInput('.cfn-audio-name', (a, el) => { a.audioName = el.value.trim(); });
+  bindSel('.cfn-audio-mode', (a, el) => { a.audioMode = AUDIO_PLAY_MODES.includes(el.value) ? el.value : 'global'; });
+  bindNum('.cfn-audio-dist', (a, v) => { a.audioDistance = clampAudioDistance(v); });
+  bindSelRefresh('.cfn-audio-until', (a, el) => { a.audioUntil = AUDIO_UNTIL_EVENTS.includes(el.value) ? el.value : 'deactivate'; });
+  bindInput('.cfn-audio-until-fn', (a, el) => { a.audioUntilFunction = el.value.trim(); });
+  bindSel('.cfn-audio-loop', (a, el) => { a.audioLoop = el.checked; });
+  bindSel('.cfn-fc-cmd', (a, el) => { a.functionControlCommand = FUNCTION_CONTROL_COMMANDS.includes(el.value) ? el.value : 'stop'; });
 
   controlFunctionsListEl.querySelectorAll('.cfn-fc-target-entry').forEach(input => {
     input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
       const actIdx = parseInt(input.dataset.act, 10);
       const tgtIdx = parseInt(input.dataset.tgtIndex, 10);
-      withFnAction(fnIdx, actIdx, a => {
+      withNodeAction(actIdx, a => {
         const list = normalizeFunctionNameList(a.functionControlTarget || '');
         const name = input.value.trim();
-        if (tgtIdx >= 0 && tgtIdx < list.length) {
-          if (name) { list[tgtIdx] = name; }
-          else { list.splice(tgtIdx, 1); }
-        }
+        if (tgtIdx >= 0 && tgtIdx < list.length) { if (name) list[tgtIdx] = name; else list.splice(tgtIdx, 1); }
         a.functionControlTarget = list.join(', ');
       });
-      refreshControlFunctionsUI();
+      _bpRefreshDetail();
     });
   });
-
   controlFunctionsListEl.querySelectorAll('.cfn-fc-target-del').forEach(btn => {
     btn.addEventListener('click', () => {
-      const fnIdx = parseInt(btn.dataset.fn, 10);
       const actIdx = parseInt(btn.dataset.act, 10);
       const tgtIdx = parseInt(btn.dataset.tgtIndex, 10);
-      withFnAction(fnIdx, actIdx, a => {
+      withNodeAction(actIdx, a => {
         const list = normalizeFunctionNameList(a.functionControlTarget || '');
         if (tgtIdx >= 0 && tgtIdx < list.length) list.splice(tgtIdx, 1);
         a.functionControlTarget = list.join(', ');
       });
-      refreshControlFunctionsUI();
+      _bpRefreshDetail();
     });
   });
-
   controlFunctionsListEl.querySelectorAll('.cfn-fc-target-add').forEach(btn => {
     btn.addEventListener('click', () => {
-      const fnIdx = parseInt(btn.dataset.fn, 10);
       const actIdx = parseInt(btn.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => {
+      withNodeAction(actIdx, a => {
         const list = normalizeFunctionNameList(a.functionControlTarget || '');
         list.push('');
         a.functionControlTarget = list.join(', ');
       });
-      refreshControlFunctionsUI();
+      _bpRefreshDetail();
     });
   });
 
-  controlFunctionsListEl.querySelectorAll('.cfn-path-cmd').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => {
-        a.pathCommand = PATH_CONTROL_COMMANDS.includes(sel.value) ? sel.value : 'start';
-      });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-set-var-name').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.setVarName = input.value.trim(); });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-set-var-op').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.setVarOp = ['=', '+', '-', '*', '/'].includes(sel.value) ? sel.value : '='; });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-set-var-type').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.setVarValueType = sel.value === 'var' ? 'var' : 'digits'; });
-      refreshControlFunctionsUI();
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-set-var-var').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.setVarValueVar = input.value.trim(); });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-set-bool-name').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.setBoolName = input.value.trim(); });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-set-bool-value').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => {
-        a.setBoolValue = sel.value === 'toggle' ? 'toggle' : (sel.value === 'true');
-      });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-ps-target-type').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.playerStatTargetType = sel.value; });
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.cfn-ps-target').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.playerStatTarget = input.value.trim(); });
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.cfn-ps-key').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.playerStatKey = sel.value; });
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.cfn-ps-op').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.playerStatOp = sel.value; });
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.cfn-ps-value').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.playerStatValue = parseFloat(input.value) || 0; });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-teleport-mode').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.teleportMode = TELEPORT_MODES.includes(sel.value) ? sel.value : 'coords'; });
-      refreshControlFunctionsUI();
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.cfn-teleport-x').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.teleportCoords[0] = parseFloat(input.value) || 0; });
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.cfn-teleport-y').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.teleportCoords[1] = parseFloat(input.value) || 0; });
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.cfn-teleport-z').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.teleportCoords[2] = parseFloat(input.value) || 0; });
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.cfn-teleport-world').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.teleportWorldId = sel.value; });
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.cfn-teleport-target-ref').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.teleportTargetRef = input.value.trim(); });
-    });
-  });
-
-  // Skeleton action bindings
-  controlFunctionsListEl.querySelectorAll('.cfn-skel-cmd').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.skelAnimCommand = SKELETON_ANIM_COMMANDS.includes(sel.value) ? sel.value : 'play'; });
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.cfn-skel-clip').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.skelAnimClip = input.value.trim(); });
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.cfn-skel-speed').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.skelAnimSpeed = Math.max(0, parseFloat(input.value) || 1); });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-style').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.style = ['glide','strict','snap'].includes(sel.value) ? sel.value : 'glide'; });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-return').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.returnOnDeactivate = input.checked; });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-rotate-repeat').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.rotateRepeat = input.checked; });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-rotate-mode').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const fnIdx = parseInt(sel.dataset.fn, 10);
-      const actIdx = parseInt(sel.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.rotateGroupMode = sel.value === 'together' ? 'together' : 'separate'; });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-keep-upright').forEach(input => {
-    input.addEventListener('change', () => {
-      const fnIdx = parseInt(input.dataset.fn, 10);
-      const actIdx = parseInt(input.dataset.act, 10);
-      withFnAction(fnIdx, actIdx, a => { a.rotateKeepUpright = input.checked; });
-    });
-  });
-
-  controlFunctionsListEl.querySelectorAll('.cfn-group-add').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const groupId = String(btn.dataset.cfg || '').trim();
-      controlFunctions.push(createDefaultControlFunction(groupId));
-      refreshControlFunctionsUI();
-    });
-  });
+  bindSel('.cfn-path-cmd', (a, el) => { a.pathCommand = PATH_CONTROL_COMMANDS.includes(el.value) ? el.value : 'start'; });
+  bindInput('.cfn-set-var-name', (a, el) => { a.setVarName = el.value.trim(); });
+  bindSel('.cfn-set-var-op', (a, el) => { a.setVarOp = ['=', '+', '-', '*', '/'].includes(el.value) ? el.value : '='; });
+  bindSelRefresh('.cfn-set-var-type', (a, el) => { a.setVarValueType = el.value === 'var' ? 'var' : 'digits'; });
+  bindInput('.cfn-set-var-var', (a, el) => { a.setVarValueVar = el.value.trim(); });
+  bindInput('.cfn-set-bool-name', (a, el) => { a.setBoolName = el.value.trim(); });
+  bindSel('.cfn-set-bool-value', (a, el) => { a.setBoolValue = el.value === 'toggle' ? 'toggle' : (el.value === 'true'); });
+  bindSel('.cfn-ps-target-type', (a, el) => { a.playerStatTargetType = el.value; });
+  bindInput('.cfn-ps-target', (a, el) => { a.playerStatTarget = el.value.trim(); });
+  bindSel('.cfn-ps-key', (a, el) => { a.playerStatKey = el.value; });
+  bindSel('.cfn-ps-op', (a, el) => { a.playerStatOp = el.value; });
+  bindNum('.cfn-ps-value', (a, v) => { a.playerStatValue = v; });
+  bindSelRefresh('.cfn-teleport-mode', (a, el) => { a.teleportMode = TELEPORT_MODES.includes(el.value) ? el.value : 'coords'; });
+  bindNum('.cfn-teleport-x', (a, v) => { a.teleportCoords[0] = v; });
+  bindNum('.cfn-teleport-y', (a, v) => { a.teleportCoords[1] = v; });
+  bindNum('.cfn-teleport-z', (a, v) => { a.teleportCoords[2] = v; });
+  bindSel('.cfn-teleport-world', (a, el) => { a.teleportWorldId = el.value; });
+  bindInput('.cfn-teleport-target-ref', (a, el) => { a.teleportTargetRef = el.value.trim(); });
+  bindSel('.cfn-skel-cmd', (a, el) => { a.skelAnimCommand = SKELETON_ANIM_COMMANDS.includes(el.value) ? el.value : 'play'; });
+  bindInput('.cfn-skel-clip', (a, el) => { a.skelAnimClip = el.value.trim(); });
+  bindNum('.cfn-skel-speed', (a, v) => { a.skelAnimSpeed = Math.max(0, v || 1); });
+  bindSel('.cfn-style', (a, el) => { a.style = ['glide','strict','snap'].includes(el.value) ? el.value : 'glide'; });
+  bindSel('.cfn-return', (a, el) => { a.returnOnDeactivate = el.checked; });
+  bindSel('.cfn-rotate-repeat', (a, el) => { a.rotateRepeat = el.checked; });
+  bindSel('.cfn-rotate-mode', (a, el) => { a.rotateGroupMode = el.value === 'together' ? 'together' : 'separate'; });
+  bindSel('.cfn-keep-upright', (a, el) => { a.rotateKeepUpright = el.checked; });
 }
 
 if (btnAddControlFn) {
@@ -19826,6 +23321,116 @@ if (controlFnSearchInput) {
   controlFnSearchInput.addEventListener('input', () => refreshControlFunctionsUI());
 }
 
+// ── Blueprint overlay: toggle, toolbar wiring ────────────────────────────────
+if (_bpToggleBtn && _bpOverlayEl) {
+  _bpToggleBtn.addEventListener('click', () => {
+    const active = _bpOverlayEl.classList.toggle('active');
+    _bpOverlayEl.style.display = active ? 'flex' : 'none';
+    _bpToggleBtn.classList.toggle('bp-active', active);
+    if (active) {
+      _bpRefreshFnSelect();
+      refreshBpGraph();
+    }
+  });
+}
+
+// Function selector dropdown
+function _bpRefreshFnSelect() {
+  if (!_bpFnSelectEl) return;
+  let html = '<option value="-1">(select FN Group)</option>';
+  controlFunctions.forEach((fn, i) => {
+    const name = fn.name || `FN Group ${i + 1}`;
+    const sel = i === _bpGraph.selectedFnIdx ? ' selected' : '';
+    html += `<option value="${i}"${sel}>${escapeHtml(name)}</option>`;
+  });
+  _bpFnSelectEl.innerHTML = html;
+}
+if (_bpFnSelectEl) {
+  _bpFnSelectEl.addEventListener('change', () => {
+    _bpGraph.selectedFnIdx = parseInt(_bpFnSelectEl.value, 10);
+    _bpGraph.selectedNodeId = null;
+    _bpGraph.panX = 0;
+    _bpGraph.panY = 0;
+    _bpGraph.zoom = 1;
+    refreshBpGraph();
+    _bpRefreshDetail();
+  });
+}
+
+// Create new FN Group from graph toolbar
+if (_bpAddFnGroupBtn) {
+  _bpAddFnGroupBtn.addEventListener('click', () => {
+    ensureControlFunctionGroups();
+    const defaultGroupId = controlFunctionGroups[0]?.id || '';
+    controlFunctions.push(createDefaultControlFunction(defaultGroupId));
+    const newIdx = controlFunctions.length - 1;
+    _bpGraph.selectedFnIdx = newIdx;
+    _bpGraph.selectedNodeId = null;
+    refreshControlFunctionsUI();
+  });
+}
+
+// Add Target / Condition / Action nodes
+if (_bpAddTargetBtn) {
+  _bpAddTargetBtn.addEventListener('click', () => {
+    const fnIdx = _bpGraph.selectedFnIdx ?? -1;
+    const fn = controlFunctions[fnIdx];
+    if (!fn) return;
+    if (!Array.isArray(fn.nodes)) fn.nodes = [];
+    const n = createDefaultTargetNode();
+    n.graphX = 30 + fn.nodes.length * 220;
+    n.graphY = 30;
+    fn.nodes.push(n);
+    refreshBpGraph();
+  });
+}
+if (_bpAddConditionBtn) {
+  _bpAddConditionBtn.addEventListener('click', () => {
+    const fnIdx = _bpGraph.selectedFnIdx ?? -1;
+    const fn = controlFunctions[fnIdx];
+    if (!fn) return;
+    if (!Array.isArray(fn.nodes)) fn.nodes = [];
+    const n = createDefaultConditionNode();
+    n.graphX = 30 + fn.nodes.length * 220;
+    n.graphY = 30;
+    fn.nodes.push(n);
+    refreshBpGraph();
+  });
+}
+if (_bpAddActionBtn) {
+  _bpAddActionBtn.addEventListener('click', () => {
+    const fnIdx = _bpGraph.selectedFnIdx ?? -1;
+    const fn = controlFunctions[fnIdx];
+    if (!fn) return;
+    if (!Array.isArray(fn.nodes)) fn.nodes = [];
+    const n = createDefaultActionNode();
+    n.graphX = 30 + fn.nodes.length * 220;
+    n.graphY = 30;
+    fn.nodes.push(n);
+    refreshBpGraph();
+  });
+}
+
+if (_bpOverlayAddGroupBtn) {
+  _bpOverlayAddGroupBtn.addEventListener('click', () => {
+    const name = String(_bpOverlayNewGroupInput?.value ?? '').trim();
+    if (!name) return;
+    controlFunctionGroups.push(createDefaultControlFunctionGroup(name));
+    if (_bpOverlayNewGroupInput) _bpOverlayNewGroupInput.value = '';
+    refreshControlFunctionsUI();
+  });
+}
+if (_bpOverlayNewGroupInput) {
+  _bpOverlayNewGroupInput.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    _bpOverlayAddGroupBtn?.click();
+  });
+}
+if (_bpOverlaySearchInput) {
+  _bpOverlaySearchInput.addEventListener('input', () => refreshBpGraph());
+}
+
 // ─── Quality control helpers ─────────────────────────────────────────────────
 const _objPos = new THREE.Vector3();
 
@@ -19845,6 +23450,81 @@ function applyShadowQuality(level) {
   renderer.shadowMap.needsUpdate = true;
 }
 
+function applyShadowMapResolution(res) {
+  quality.shadowMapRes = res;
+  if (quality.shadows !== 'off') {
+    sunLight.shadow.mapSize.set(res, res);
+    if (sunLight.shadow.map) { sunLight.shadow.map.dispose(); sunLight.shadow.map = null; }
+    renderer.shadowMap.needsUpdate = true;
+  }
+}
+
+function applyResolutionScale(scale) {
+  quality.resolutionScale = scale;
+  renderer.setPixelRatio(scale);
+}
+
+function updatePerfStats(t, dt) {
+  const instantFps = dt > 0 ? (1 / dt) : 60;
+  _perfStats.emaFps = _perfStats.emaFps * 0.92 + instantFps * 0.08;
+  if (t - _perfStats.lastUpdate < 500) return; // update display at 2hz
+  _perfStats.lastUpdate = t;
+  _perfStats.fps = Math.round(_perfStats.emaFps);
+  _perfStats.calls = renderer.info.render.calls;
+  _perfStats.triangles = renderer.info.render.triangles;
+  _perfStats.objectCount = sceneObjects.length;
+  const el = document.getElementById('perf-stats');
+  if (el) {
+    el.style.display = quality.showStats ? '' : 'none';
+    if (quality.showStats) {
+      el.innerHTML = `FPS: ${_perfStats.fps} | Draw: ${_perfStats.calls} | Tri: ${(_perfStats.triangles / 1000).toFixed(1)}k | Obj: ${_perfStats.objectCount}`;
+    }
+  }
+  // Feed bottom-panel performance monitor
+  _pushPerfSample(_perfStats.fps, _perfStats.calls, _perfStats.triangles, _perfStats.objectCount);
+}
+
+// ─── Spatial hash for fast visibility queries ────────────────────────────────
+const _SPATIAL_CELL_SIZE = 50;
+const _spatialHash = new Map(); // "cx,cz" -> Set<mesh>
+let _spatialDirty = true;
+
+function _spatialKey(x, z) {
+  return ((x / _SPATIAL_CELL_SIZE) | 0) + ',' + ((z / _SPATIAL_CELL_SIZE) | 0);
+}
+
+function rebuildSpatialHash() {
+  _spatialHash.clear();
+  for (const m of sceneObjects) {
+    m.getWorldPosition(_objPos);
+    const key = _spatialKey(_objPos.x, _objPos.z);
+    if (!_spatialHash.has(key)) _spatialHash.set(key, new Set());
+    _spatialHash.get(key).add(m);
+  }
+  _spatialDirty = false;
+}
+
+function markSpatialDirty() {
+  _spatialDirty = true;
+}
+
+function _getNearbyObjects(x, z, radius) {
+  const results = [];
+  const cellRadius = Math.ceil(radius / _SPATIAL_CELL_SIZE);
+  const cx = (x / _SPATIAL_CELL_SIZE) | 0;
+  const cz = (z / _SPATIAL_CELL_SIZE) | 0;
+  for (let dx = -cellRadius; dx <= cellRadius; dx++) {
+    for (let dz = -cellRadius; dz <= cellRadius; dz++) {
+      const key = (cx + dx) + ',' + (cz + dz);
+      const set = _spatialHash.get(key);
+      if (set) {
+        for (const m of set) results.push(m);
+      }
+    }
+  }
+  return results;
+}
+
 function updateVisibility(cam) {
   cam.updateMatrixWorld();
   _projScreenMatrix.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
@@ -19854,8 +23534,28 @@ function updateVisibility(cam) {
   const rd2 = quality.renderDist * quality.renderDist;
   const ld2 = quality.lightDist * quality.lightDist;
   const shadowOff = quality.shadows === 'off';
+  const lodDist2 = (quality._lodAutoDist || LOD_AUTO_DISTANCE) * (quality._lodAutoDist || LOD_AUTO_DISTANCE);
+  const lodActive = quality.lodEnabled;
 
-  for (const m of sceneObjects) {
+  // Rebuild spatial hash if dirty
+  if (_spatialDirty) rebuildSpatialHash();
+
+  // Use spatial hash for large scenes (>500 objects) to skip far-away objects
+  const useHash = sceneObjects.length > 500;
+  const nearby = useHash ? _getNearbyObjects(camPos.x, camPos.z, quality.renderDist + _SPATIAL_CELL_SIZE) : null;
+  if (useHash) {
+    // Hide everything first, then only process nearby
+    for (const m of sceneObjects) {
+      if (m.userData._dead) continue;
+      m.visible = false;
+      if (m.userData.pointLight) m.userData.pointLight.visible = false;
+      m.castShadow = false;
+    }
+  }
+
+  const objectsToProcess = useHash ? nearby : sceneObjects;
+
+  for (const m of objectsToProcess) {
     // Dead targets stay fully hidden.
     if (m.userData._dead) continue;
 
@@ -19865,6 +23565,14 @@ function updateVisibility(cam) {
 
     m.getWorldPosition(_objPos);
     const dist2 = camPos.distanceToSquared(_objPos);
+
+    // Auto-LOD for imported models based on distance
+    if (lodActive && m.userData._isImportedModel && m.userData._lodOverride === 'auto') {
+      const shouldLOD = dist2 > lodDist2;
+      if (m.userData._lodActive !== shouldLOD) {
+        setImportedMeshLOD(m, shouldLOD);
+      }
+    }
 
     // Render distance: hide blocks too far away
     if (dist2 > rd2) {
@@ -19912,6 +23620,57 @@ function updateVisibility(cam) {
     }
   }
 }
+// Shadow map resolution
+const qualityShadowResSelect = document.getElementById('quality-shadow-res');
+if (qualityShadowResSelect) qualityShadowResSelect.addEventListener('change', () => {
+  applyShadowMapResolution(parseInt(qualityShadowResSelect.value, 10) || 4096);
+  saveEditorSettings();
+});
+
+// Resolution scale
+const qualityResolutionSelect = document.getElementById('quality-resolution');
+if (qualityResolutionSelect) qualityResolutionSelect.addEventListener('change', () => {
+  applyResolutionScale(parseFloat(qualityResolutionSelect.value) || Math.min(devicePixelRatio, 2));
+  saveEditorSettings();
+});
+
+// Stats overlay toggle
+const qualityShowStatsInput = document.getElementById('quality-show-stats');
+if (qualityShowStatsInput) qualityShowStatsInput.addEventListener('change', () => {
+  quality.showStats = qualityShowStatsInput.checked;
+  const el = document.getElementById('perf-stats');
+  if (el) el.style.display = quality.showStats ? '' : 'none';
+  saveEditorSettings();
+});
+
+// LOD toggle
+const qualityLodEnabledInput = document.getElementById('quality-lod-enabled');
+if (qualityLodEnabledInput) qualityLodEnabledInput.addEventListener('change', () => {
+  quality.lodEnabled = qualityLodEnabledInput.checked;
+  saveEditorSettings();
+});
+const qualityLodDistInput = document.getElementById('quality-lod-dist');
+if (qualityLodDistInput) qualityLodDistInput.addEventListener('change', () => {
+  // LOD_AUTO_DISTANCE is a const, but we can override it via a mutable alias
+  const val = THREE.MathUtils.clamp(parseInt(qualityLodDistInput.value, 10) || 80, 20, 500);
+  qualityLodDistInput.value = val;
+  // We need to dynamically update the distance — use a mutable property on quality
+  quality._lodAutoDist = val;
+  saveEditorSettings();
+});
+
+// Auto-batch button
+const btnAutoBatch = document.getElementById('btn-auto-batch');
+if (btnAutoBatch) btnAutoBatch.addEventListener('click', () => {
+  const count = autoBatchScene();
+  if (count > 0) {
+    btnAutoBatch.textContent = `✓ Batched ${count}`;
+    setTimeout(() => { btnAutoBatch.textContent = '⚡ Batch Now'; }, 2000);
+  } else {
+    btnAutoBatch.textContent = 'No duplicates';
+    setTimeout(() => { btnAutoBatch.textContent = '⚡ Batch Now'; }, 2000);
+  }
+});
 
 qualityRenderDistInput.addEventListener('change', () => {
   setRuntimeRenderDistance(qualityRenderDistInput.value);
@@ -19925,12 +23684,6 @@ qualityLightDistInput.addEventListener('change', () => {
   setRuntimeLightDistance(qualityLightDistInput.value);
   saveEditorSettings();
 });
-
-// Fog UI listeners
-if (fogEnabledInput) fogEnabledInput.addEventListener('change', readFogUI);
-if (fogColorInput) fogColorInput.addEventListener('input', readFogUI);
-if (fogDensityInput) fogDensityInput.addEventListener('change', readFogUI);
-if (fogBrightnessInput) fogBrightnessInput.addEventListener('change', readFogUI);
 
 // FOV UI listeners
 if (fovEditorInput) fovEditorInput.addEventListener('change', () => {
@@ -20012,18 +23765,15 @@ function updateRuntimeOptimizer(nowMs, dt) {
 // ─── Portal view rendering ────────────────────────────────────────────────────
 const _portalDiscGeo = new THREE.CircleGeometry(0.58, 32);
 const _portalTmpPos = new THREE.Vector3();
+const _portalRTs = [
+  new THREE.WebGLRenderTarget(256, 256),
+  new THREE.WebGLRenderTarget(256, 256)
+];
 const _portalCam = new THREE.PerspectiveCamera(75, 1, 0.1, 200);
 
-function _createPortalRenderTarget() {
-  const rt = new THREE.WebGLRenderTarget(256, 256);
-  rt.texture.colorSpace = THREE.SRGBColorSpace;
-  return rt;
-}
-
-function _ensurePortalDisc(mesh) {
+function _ensurePortalDisc(mesh, rtIndex) {
   if (mesh.userData._portalDisc) return mesh.userData._portalDisc;
-  if (!mesh.userData._portalRT) mesh.userData._portalRT = _createPortalRenderTarget();
-  const mat = new THREE.MeshBasicMaterial({ map: mesh.userData._portalRT.texture, side: THREE.DoubleSide, transparent: true });
+  const mat = new THREE.MeshBasicMaterial({ map: _portalRTs[rtIndex].texture, side: THREE.DoubleSide, transparent: true });
   const disc = new THREE.Mesh(_portalDiscGeo, mat);
   disc.userData._isPortalDisc = true;
   disc.renderOrder = 1;
@@ -20034,6 +23784,7 @@ function _ensurePortalDisc(mesh) {
 
 function _renderPortalViews() {
   if (!state.isPlaytest) return;
+  let rendered = 0;
   for (const m of sceneObjects) {
     if (m.userData.type !== 'teleport') continue;
     // Hide portal disc if not in playtest or no pair
@@ -20042,6 +23793,7 @@ function _renderPortalViews() {
     _portalTmpPos.setFromMatrixPosition(m.matrixWorld);
     const dist = _portalTmpPos.distanceTo(fpsPos);
     if (dist > PORTAL_MAX_DIST) continue;
+    if (rendered >= 2) continue; // max 2 active portal renders per frame
 
     const config = getMeshTeleportConfig(m);
     if (!config.pairLabel) continue;
@@ -20060,9 +23812,8 @@ function _renderPortalViews() {
     );
     if (!dest) continue;
 
-    const disc = _ensurePortalDisc(m);
+    const disc = _ensurePortalDisc(m, rendered);
     disc.visible = true;
-    if (!m.userData._portalRT) m.userData._portalRT = _createPortalRenderTarget();
 
     // Position portal camera at destination, facing the same direction as the player
     _portalCam.position.copy(dest.position);
@@ -20090,17 +23841,18 @@ function _renderPortalViews() {
       }
     }
 
-    renderer.setRenderTarget(m.userData._portalRT);
+    renderer.setRenderTarget(_portalRTs[rendered]);
     renderer.render(scene, _portalCam);
     renderer.setRenderTarget(null);
 
     // Restore visibility
     for (const o of _savedVis) o.visible = false;
 
-    disc.material.map = m.userData._portalRT.texture;
+    disc.material.map = _portalRTs[rendered].texture;
     disc.material.needsUpdate = true;
     disc.visible = true;
     if (destDisc) destDisc.visible = destDiscWasVisible;
+    rendered++;
   }
 }
 
@@ -20119,13 +23871,14 @@ function animate(t) {
   if (state.isPlaytest) {
     if (runtimeMode && runtimePauseActive) {
       syncFpsCamera();
+      _updateCloudWind(dt);
+      syncSkyToCamera(fpsCam);
       updateSunShadowCenter(fpsPos);
       updateGridChunks(fpsPos.x, fpsPos.z);
       updateGridLabels(fpsPos.x, fpsPos.z);
       updateCoordHud();
       updateVisibility(fpsCam);
       updateCheckpointIndicators(t / 1000);
-      syncSkyToCamera(fpsCam);
       renderer.render(scene, fpsCam);
       return;
     }
@@ -20138,18 +23891,6 @@ function animate(t) {
     updateNpcBehaviors(dt, t / 1000);
     _showNpcInteractHint();
     updateRuntimeAudioInstances();
-    const dayCycleEnabled = !!(sunDayCycleEnabledInput && sunDayCycleEnabledInput.checked);
-    const dayCycleDuration = clampSunDayDuration(parseFloat(sunDayDurationInput.value));
-    if (dayCycleEnabled && dayCycleDuration > 0) {
-      const curTime = clampSunTime(parseFloat(sunTimeInput.value));
-      const hoursPerSecond = 24 / dayCycleDuration;
-      const nextTime = (curTime + (hoursPerSecond * dt)) % 24;
-      sunTimeInput.value = nextTime.toFixed(3);
-      updateSunSky();
-    }
-
-    // ── Cloud wind animation ──
-    _updateCloudWind(dt);
 
     // ── Crouch transition ──
     {
@@ -20331,13 +24072,12 @@ function animate(t) {
     // Track first ground touch after spawn
     if (!fpsSpawnLanded && fpsGrounded) fpsSpawnLanded = true;
 
-    // Ground touch function trigger — only when touching the grid floor (y ≈ 0), not objects
+    // Ground touch function trigger
     if (gameRules.groundTouchFunction) {
-      const onGrid = fpsGrounded && fpsPos.y < 0.01;
-      if (onGrid && !_groundTouchFnActive) {
+      if (fpsGrounded && !_groundTouchFnActive) {
         _groundTouchFnActive = true;
         executeControlFunction(gameRules.groundTouchFunction, null, true);
-      } else if (!onGrid && _groundTouchFnActive) {
+      } else if (!fpsGrounded && _groundTouchFnActive) {
         _groundTouchFnActive = false;
         executeControlFunction(gameRules.groundTouchFunction, null, false);
       }
@@ -20363,6 +24103,25 @@ function animate(t) {
     clampPlayerToWorldBorder();
     syncFpsCamera();
 
+    // ── Day/night cycle ──
+    if (sunDayCycleInput?.checked) {
+      const dur = parseFloat(sunDayDurationInput?.value) || SUN_DAY_DURATION_DEFAULT;
+      let curTime = parseFloat(sunTimeInput?.value) ?? SUN_TIME_DEFAULT;
+      curTime += dt * (24 / dur);
+      if (curTime >= 24) curTime -= 24;
+      if (sunTimeInput) sunTimeInput.value = curTime;
+      updateSunSky();
+    }
+    _updateCloudWind(dt);
+    syncSkyToCamera(fpsCam);
+
+    // ── Star twinkle ──
+    if (_starsMesh && _starsPhases && _starsMaterial.opacity > 0) {
+      const time01 = (t / 1000) * 1.5;
+      // Modulate relative to the base alpha set by updateSunSky
+      _starsMaterial.opacity = _starsBaseOpacity * (0.92 + 0.08 * Math.sin(time01));
+    }
+
     updateSunShadowCenter(fpsPos);
     updateGridChunks(fpsPos.x, fpsPos.z);
     updateGridLabels(fpsPos.x, fpsPos.z);
@@ -20372,7 +24131,6 @@ function animate(t) {
     updateOrbitIndicator();
     updateSpawnDirectionIndicators();
     updateJointIndicators();
-    syncSkyToCamera(fpsCam);
     _renderPortalViews();
     renderer.render(scene, fpsCam);
     for (const m of sceneObjects) {
@@ -20385,10 +24143,16 @@ function animate(t) {
       updateSimAnimations(t / 1000);
       updateMovementPathAnimations(dt);
     }
-    _updateCloudWind(dt);
     moveEditorCamera(dt);
+    // Camera animation preview (overrides editor cam temporarily)
+    _updateCameraAnimationPreview();
     orbitControls.update();
     updateOrbitIndicator();
+    // Camera frustum helper update
+    _updateCameraFrustumHelper();
+    _updateCameraLookAtHelper();
+    _updateCloudWind(dt);
+    syncSkyToCamera(editorCam);
     updateSunShadowCenter(editorCam.position);
     updateGridChunks(editorCam.position.x, editorCam.position.z);
     updateGridLabels(editorCam.position.x, editorCam.position.z);
@@ -20397,9 +24161,13 @@ function animate(t) {
     updateCheckpointIndicators(t / 1000);
     updateSpawnDirectionIndicators();
     updateJointIndicators();
-    syncSkyToCamera(editorCam);
     renderer.render(scene, editorCam);
+    // Camera PiP preview (renders after main scene)
+    _renderCameraPip();
   }
+
+  // Update performance stats overlay (both modes)
+  updatePerfStats(t, dt);
 }
 
 // ─── Right-panel tab switching (Functions / Objects Library) ──────────────────
@@ -20413,6 +24181,827 @@ function setFnPane(name) {
   if (name === 'objlib') refreshObjLib();
 }
 _fnPaneTabs.forEach(t => t.addEventListener('click', () => setFnPane(t.dataset.fnPane)));
+
+// ─── Bottom-panel tab switching ──────────────────────────────────────────────
+const _bpTabs  = document.querySelectorAll('.bp-tab');
+const _bpPanes = document.querySelectorAll('.bp-pane');
+let _activeBpPane = 'console';
+function setBpPane(name) {
+  _activeBpPane = name;
+  _bpTabs.forEach(t => t.classList.toggle('active', t.dataset.bpPane === name));
+  _bpPanes.forEach(p => p.classList.toggle('active', p.id === 'bp-pane-' + name));
+}
+_bpTabs.forEach(t => t.addEventListener('click', () => setBpPane(t.dataset.bpPane)));
+
+// ─── Bottom-panel toggle ─────────────────────────────────────────────────────
+if (bottomToggleBtn) {
+  bottomToggleBtn.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    bottomPanelState.collapsed = !bottomPanelState.collapsed;
+    applyBottomPanelState();
+  });
+}
+
+// ─── Bottom-panel resize ─────────────────────────────────────────────────────
+if (bottomResizerEl) {
+  bottomResizerEl.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || bottomPanelState.collapsed || e.target === bottomToggleBtn) return;
+    bottomPanelState.resizing = true;
+    document.body.classList.add('bottom-resizing');
+    document.body.style.cursor = 'ns-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+}
+window.addEventListener('pointermove', e => {
+  if (!bottomPanelState.resizing) return;
+  const newHeight = window.innerHeight - e.clientY;
+  bottomPanelState.height = clampBottomHeight(newHeight);
+  applyBottomPanelState({ save: false, reflow: true });
+});
+window.addEventListener('pointerup', stopBottomResize);
+window.addEventListener('pointercancel', stopBottomResize);
+
+// ─── Console ─────────────────────────────────────────────────────────────────
+const _consoleLogEl = document.getElementById('console-log');
+const _consoleClearBtn = document.getElementById('console-clear');
+const _consoleFilterLog  = document.getElementById('console-filter-log');
+const _consoleFilterWarn = document.getElementById('console-filter-warn');
+const _consoleFilterErr  = document.getElementById('console-filter-error');
+const _consoleMaxEntries = 500;
+let _consoleEntries = [];
+
+function _formatConsoleArg(arg) {
+  if (arg === null) return 'null';
+  if (arg === undefined) return 'undefined';
+  if (typeof arg === 'object') {
+    try { return JSON.stringify(arg, null, 1); } catch { return String(arg); }
+  }
+  return String(arg);
+}
+
+function appendConsoleEntry(level, args) {
+  if (!_consoleLogEl) return;
+  const now = new Date();
+  const ts = now.toTimeString().slice(0, 8) + '.' + String(now.getMilliseconds()).padStart(3, '0');
+  const text = Array.from(args).map(_formatConsoleArg).join(' ');
+
+  const el = document.createElement('div');
+  el.className = 'console-entry ce-' + level;
+  el.dataset.level = level;
+
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'ce-time';
+  timeSpan.textContent = ts;
+  el.appendChild(timeSpan);
+  el.appendChild(document.createTextNode(text));
+
+  _consoleLogEl.appendChild(el);
+  _consoleEntries.push(el);
+
+  // Prune old entries
+  while (_consoleEntries.length > _consoleMaxEntries) {
+    const old = _consoleEntries.shift();
+    if (old.parentNode) old.parentNode.removeChild(old);
+  }
+
+  // Apply current filter visibility
+  _applyConsoleFilter(el);
+
+  // Auto-scroll
+  _consoleLogEl.scrollTop = _consoleLogEl.scrollHeight;
+}
+
+function _applyConsoleFilter(el) {
+  const lvl = el.dataset.level;
+  if (lvl === 'log' && _consoleFilterLog && !_consoleFilterLog.checked) el.style.display = 'none';
+  else if (lvl === 'warn' && _consoleFilterWarn && !_consoleFilterWarn.checked) el.style.display = 'none';
+  else if (lvl === 'error' && _consoleFilterErr && !_consoleFilterErr.checked) el.style.display = 'none';
+  else el.style.display = '';
+}
+
+function _applyAllConsoleFilters() {
+  for (const el of _consoleEntries) _applyConsoleFilter(el);
+}
+
+function clearConsole() {
+  if (!_consoleLogEl) return;
+  _consoleLogEl.innerHTML = '';
+  _consoleEntries = [];
+}
+
+// Wrap native console methods
+const _origConsoleLog = console.log.bind(console);
+const _origConsoleWarn = console.warn.bind(console);
+const _origConsoleError = console.error.bind(console);
+
+console.log = function() { _origConsoleLog.apply(console, arguments); appendConsoleEntry('log', arguments); };
+console.warn = function() { _origConsoleWarn.apply(console, arguments); appendConsoleEntry('warn', arguments); };
+console.error = function() { _origConsoleError.apply(console, arguments); appendConsoleEntry('error', arguments); };
+
+// Also capture unhandled errors
+window.addEventListener('error', e => {
+  appendConsoleEntry('error', ['Uncaught: ' + (e.message || e.error || 'Unknown error')]);
+});
+window.addEventListener('unhandledrejection', e => {
+  appendConsoleEntry('error', ['Unhandled Promise: ' + (e.reason || 'Unknown')]);
+});
+
+if (_consoleClearBtn) _consoleClearBtn.addEventListener('click', clearConsole);
+if (_consoleFilterLog) _consoleFilterLog.addEventListener('change', _applyAllConsoleFilters);
+if (_consoleFilterWarn) _consoleFilterWarn.addEventListener('change', _applyAllConsoleFilters);
+if (_consoleFilterErr) _consoleFilterErr.addEventListener('change', _applyAllConsoleFilters);
+
+// ─── Performance Monitor ─────────────────────────────────────────────────────
+const _perfBufSize = 120; // 60 seconds at 2 Hz
+const _perfBuf = {
+  fps:   new Float32Array(_perfBufSize),
+  draws: new Float32Array(_perfBufSize),
+  tris:  new Float32Array(_perfBufSize),
+  objs:  new Float32Array(_perfBufSize),
+};
+let _perfBufIdx = 0;
+let _perfBufFilled = 0;
+let _perfPaused = false;
+
+const _perfGraphFps   = document.getElementById('perf-graph-fps');
+const _perfGraphDraws = document.getElementById('perf-graph-draws');
+const _perfGraphTris  = document.getElementById('perf-graph-tris');
+const _perfGraphObjs  = document.getElementById('perf-graph-objs');
+const _perfValFps   = document.getElementById('perf-val-fps');
+const _perfValDraws = document.getElementById('perf-val-draws');
+const _perfValTris  = document.getElementById('perf-val-tris');
+const _perfValObjs  = document.getElementById('perf-val-objs');
+const _perfPauseBtn = document.getElementById('perf-pause');
+
+function _pushPerfSample(fps, draws, tris, objs) {
+  if (_perfPaused) return;
+  _perfBuf.fps[_perfBufIdx]   = fps;
+  _perfBuf.draws[_perfBufIdx] = draws;
+  _perfBuf.tris[_perfBufIdx]  = tris;
+  _perfBuf.objs[_perfBufIdx]  = objs;
+  _perfBufIdx = (_perfBufIdx + 1) % _perfBufSize;
+  if (_perfBufFilled < _perfBufSize) _perfBufFilled++;
+
+  // Update value labels
+  if (_perfValFps) _perfValFps.textContent = String(Math.round(fps));
+  if (_perfValDraws) _perfValDraws.textContent = String(Math.round(draws));
+  if (_perfValTris) _perfValTris.textContent = (tris / 1000).toFixed(1) + 'k';
+  if (_perfValObjs) _perfValObjs.textContent = String(Math.round(objs));
+
+  // Only redraw graphs when performance tab is visible
+  if (_activeBpPane === 'performance' && !bottomPanelState.collapsed) {
+    _drawPerfGraph(_perfGraphFps, _perfBuf.fps, _perfBufIdx, _perfBufFilled, [0, 120], _fpsColor);
+    _drawPerfGraph(_perfGraphDraws, _perfBuf.draws, _perfBufIdx, _perfBufFilled, null, '#58a6ff');
+    _drawPerfGraph(_perfGraphTris, _perfBuf.tris, _perfBufIdx, _perfBufFilled, null, '#bc8cff');
+    _drawPerfGraph(_perfGraphObjs, _perfBuf.objs, _perfBufIdx, _perfBufFilled, null, '#3fb950');
+  }
+}
+
+function _fpsColor(value) {
+  if (value >= 50) return '#3fb950';
+  if (value >= 30) return '#d29922';
+  return '#f85149';
+}
+
+function _drawPerfGraph(canvas, buf, idx, filled, range, colorOrFn) {
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  if (w === 0 || h === 0) return;
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  ctx.clearRect(0, 0, w, h);
+
+  if (filled === 0) return;
+
+  // Determine Y range
+  let yMin = 0, yMax = 1;
+  if (range) {
+    yMin = range[0]; yMax = range[1];
+  } else {
+    for (let i = 0; i < filled; i++) {
+      const v = buf[(idx - filled + i + _perfBufSize) % _perfBufSize];
+      if (v > yMax) yMax = v;
+    }
+    yMax = yMax * 1.15 || 1; // 15% headroom
+  }
+
+  const stepX = w / (_perfBufSize - 1);
+
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  for (let i = 0; i < filled; i++) {
+    const v = buf[(idx - filled + i + _perfBufSize) % _perfBufSize];
+    const x = (i / (filled - 1 || 1)) * w;
+    const y = h - ((v - yMin) / (yMax - yMin)) * h;
+    if (typeof colorOrFn === 'function') ctx.strokeStyle = colorOrFn(v);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  if (typeof colorOrFn === 'string') ctx.strokeStyle = colorOrFn;
+  ctx.stroke();
+
+  // Fill under the line
+  const lastX = w;
+  const lastY = h - ((buf[(idx - 1 + _perfBufSize) % _perfBufSize] - yMin) / (yMax - yMin)) * h;
+  ctx.lineTo(lastX, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  ctx.globalAlpha = 0.08;
+  ctx.fillStyle = typeof colorOrFn === 'function' ? '#3fb950' : colorOrFn;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+if (_perfPauseBtn) {
+  _perfPauseBtn.addEventListener('click', () => {
+    _perfPaused = !_perfPaused;
+    _perfPauseBtn.textContent = _perfPaused ? '▶ Resume' : '⏸ Pause';
+  });
+}
+
+// ─── Bottom Panel: Asset Browser ─────────────────────────────────────────────
+const _bpAssetGrid   = document.getElementById('bp-asset-grid');
+const _bpAssetSearch = document.getElementById('bp-asset-search');
+const _bpAssetCatPrev = document.getElementById('bp-asset-cat-prev');
+const _bpAssetCatNext = document.getElementById('bp-asset-cat-next');
+const _bpAssetCatLabel = document.getElementById('bp-asset-cat-label');
+const _bpAssetSort   = document.getElementById('bp-asset-sort');
+const _bpAssetTypeFilter = document.getElementById('bp-asset-type-filter');
+const _bpAssetView   = document.getElementById('bp-asset-view');
+
+const _BP_ASSET_CATEGORIES = [
+  { value: '',          label: 'All' },
+  { value: 'structure', label: 'Structure' },
+  { value: 'shapes',    label: 'Shapes' },
+  { value: 'flat',      label: 'Flat / 2D' },
+  { value: 'gameplay',  label: 'Gameplay' },
+  { value: 'media',     label: 'Media' },
+  { value: 'templates', label: 'Templates' },
+  { value: 'audio',     label: 'Audio' },
+  { value: 'imported',  label: 'Imported' },
+];
+let _bpAssetCatIdx = 0;
+
+const _BP_BUILTIN_ASSETS = [
+  { id: 'wall',       cat: 'structure', icon: '🧱', label: 'Wall' },
+  { id: 'floor',      cat: 'structure', icon: '⬜', label: 'Floor' },
+  { id: 'terrain',    cat: 'structure', icon: '🏔️', label: 'Terrain' },
+  { id: 'cube',       cat: 'shapes',    icon: '📦', label: 'Cube' },
+  { id: 'sphere',     cat: 'shapes',    icon: '🔮', label: 'Sphere' },
+  { id: 'cylinder',   cat: 'shapes',    icon: '🛢️', label: 'Cylinder' },
+  { id: 'cone',       cat: 'shapes',    icon: '🔺', label: 'Cone' },
+  { id: 'pyramid',    cat: 'shapes',    icon: '🔻', label: 'Pyramid' },
+  { id: 'prism',      cat: 'shapes',    icon: '⬡',  label: 'Prism' },
+  { id: 'torus',      cat: 'shapes',    icon: '⭕', label: 'Torus' },
+  { id: 'plane2d',    cat: 'flat',      icon: '▬',  label: 'Plane 2D' },
+  { id: 'triangle2d', cat: 'flat',      icon: '◺',  label: 'Triangle 2D' },
+  { id: 'circle2d',   cat: 'flat',      icon: '●',  label: 'Circle 2D' },
+  { id: 'polygon2d',  cat: 'flat',      icon: '⬠',  label: 'Polygon 2D' },
+  { id: 'light',      cat: 'gameplay',  icon: '💡', label: 'Light' },
+  { id: 'target',     cat: 'gameplay',  icon: '🎯', label: 'Target' },
+  { id: 'checkpoint', cat: 'gameplay',  icon: '🔵', label: 'Checkpoint' },
+  { id: 'spawn',      cat: 'gameplay',  icon: '🟢', label: 'Spawn' },
+  { id: 'joint',      cat: 'gameplay',  icon: '🔗', label: 'Joint' },
+  { id: 'pivot',      cat: 'gameplay',  icon: '🔶', label: 'Pivot' },
+  { id: 'teleport',   cat: 'gameplay',  icon: '🌀', label: 'Teleport' },
+  { id: 'trigger',    cat: 'gameplay',  icon: '⚡', label: 'Trigger' },
+  { id: 'keypad',     cat: 'gameplay',  icon: '🔢', label: 'Keypad' },
+  { id: 'npc',        cat: 'gameplay',  icon: '🧑', label: 'NPC' },
+  { id: 'text',       cat: 'media',     icon: '📝', label: 'Text' },
+  { id: 'text3d',     cat: 'media',     icon: '🔤', label: 'Text 3D' },
+  { id: 'screen',     cat: 'media',     icon: '🖥️', label: 'Screen' },
+  { id: 'camera',     cat: 'media',     icon: '🎥', label: 'Camera' },
+];
+
+function refreshBpAssets() {
+  if (!_bpAssetGrid) return;
+  const search = (_bpAssetSearch?.value || '').trim().toLowerCase();
+  const filter = _BP_ASSET_CATEGORIES[_bpAssetCatIdx]?.value || '';
+  if (_bpAssetCatLabel) _bpAssetCatLabel.textContent = _BP_ASSET_CATEGORIES[_bpAssetCatIdx]?.label || 'All';
+  const isListView = _bpAssetView?.value === 'list';
+  _bpAssetGrid.classList.toggle('list-view', isListView);
+
+  const items = [];
+
+  // Built-in types
+  if (!filter || (filter !== 'templates' && filter !== 'audio' && filter !== 'imported')) {
+    for (const a of _BP_BUILTIN_ASSETS) {
+      if (filter && a.cat !== filter) continue;
+      if (search && !a.label.toLowerCase().includes(search) && !a.id.includes(search)) continue;
+      items.push({ type: 'builtin', id: a.id, icon: a.icon, label: a.label, badge: a.cat });
+    }
+  }
+
+  // Custom templates
+  if (!filter || filter === 'templates') {
+    for (const t of customObjectTemplates) {
+      if (t._isImported) continue;
+      if (search && !t.name.toLowerCase().includes(search)) continue;
+      items.push({ type: 'template', id: t.id, icon: '📁', label: t.name, badge: 'template' });
+    }
+  }
+
+  // Imported models
+  if (!filter || filter === 'imported') {
+    for (const t of customObjectTemplates) {
+      if (!t._isImported) continue;
+      if (search && !t.name.toLowerCase().includes(search)) continue;
+      items.push({ type: 'imported', id: t.id, icon: '📦', label: t.name, badge: 'imported' });
+    }
+  }
+
+  // Audio files
+  if (!filter || filter === 'audio') {
+    for (const a of audioLibrary) {
+      if (search && !a.name.toLowerCase().includes(search)) continue;
+      items.push({ type: 'audio', id: a.id, icon: '🔊', label: a.name, badge: 'audio' });
+    }
+  }
+
+  // Apply type filter
+  const typeFilter = _bpAssetTypeFilter?.value || '';
+  const filtered = typeFilter ? items.filter(it => it.type === typeFilter) : items;
+
+  // Apply sort
+  const sortMode = _bpAssetSort?.value || 'default';
+  if (sortMode === 'name-asc') filtered.sort((a, b) => a.label.localeCompare(b.label));
+  else if (sortMode === 'name-desc') filtered.sort((a, b) => b.label.localeCompare(a.label));
+  else if (sortMode === 'category') filtered.sort((a, b) => a.badge.localeCompare(b.badge) || a.label.localeCompare(b.label));
+
+  if (!filtered.length) {
+    _bpAssetGrid.innerHTML = '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:11px">No assets match</div>';
+    return;
+  }
+
+  _bpAssetGrid.innerHTML = filtered.map(item =>
+    '<div class="bp-asset-card" data-asset-type="' + item.type + '" data-asset-id="' + escapeHtml(item.id) + '">' +
+      '<span class="asset-icon">' + item.icon + '</span>' +
+      '<span class="asset-label" title="' + escapeHtml(item.label) + '">' + escapeHtml(item.label) + '</span>' +
+      '<span class="asset-badge">' + escapeHtml(item.badge) + '</span>' +
+    '</div>'
+  ).join('');
+
+  // Click to place / select
+  _bpAssetGrid.querySelectorAll('.bp-asset-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const aType = card.dataset.assetType;
+      const aId = card.dataset.assetId;
+      if (aType === 'builtin') {
+        state.placingType = aId;
+        state.mode = 'place';
+        if (modeSelect) modeSelect.value = 'place';
+        refreshStatus();
+      } else if (aType === 'template') {
+        state._placingCustomTemplate = aId;
+        state.mode = 'place';
+        if (modeSelect) modeSelect.value = 'place';
+        refreshStatus();
+      } else if (aType === 'imported') {
+        const target = new THREE.Vector3(0, 0, -5)
+          .applyQuaternion(editorCam.quaternion)
+          .add(editorCam.position);
+        placeImportedTemplate(aId, target);
+      } else if (aType === 'audio') {
+        // Preview audio on click
+        const audio = audioLibrary.find(a => a.id === aId);
+        if (audio && audio.objectUrl) {
+          if (libraryPreviewAudioId === aId) {
+            stopLibraryPreviewAudio();
+          } else {
+            stopLibraryPreviewAudio();
+            const player = new Audio(audio.objectUrl);
+            player.volume = 0.3;
+            player.play().catch(() => {});
+            libraryPreviewAudio = player;
+            libraryPreviewAudioId = aId;
+          }
+        }
+      }
+    });
+  });
+}
+
+if (_bpAssetSearch) _bpAssetSearch.addEventListener('input', refreshBpAssets);
+if (_bpAssetCatPrev) _bpAssetCatPrev.addEventListener('click', () => {
+  _bpAssetCatIdx = (_bpAssetCatIdx - 1 + _BP_ASSET_CATEGORIES.length) % _BP_ASSET_CATEGORIES.length;
+  refreshBpAssets();
+});
+if (_bpAssetCatNext) _bpAssetCatNext.addEventListener('click', () => {
+  _bpAssetCatIdx = (_bpAssetCatIdx + 1) % _BP_ASSET_CATEGORIES.length;
+  refreshBpAssets();
+});
+if (_bpAssetSort) _bpAssetSort.addEventListener('change', refreshBpAssets);
+if (_bpAssetTypeFilter) _bpAssetTypeFilter.addEventListener('change', refreshBpAssets);
+if (_bpAssetView) _bpAssetView.addEventListener('change', refreshBpAssets);
+
+// ─── Bottom Panel: Script Editor ─────────────────────────────────────────────
+const _bpScriptSelect = document.getElementById('bp-script-select');
+const _bpScriptAdd    = document.getElementById('bp-script-add');
+const _bpScriptDel    = document.getElementById('bp-script-delete');
+const _bpScriptSim    = document.getElementById('bp-script-sim');
+const _bpScriptEmpty  = document.getElementById('bp-script-empty');
+const _bpScriptContent = document.getElementById('bp-script-content');
+let _bpScriptIdx = -1;
+
+function _refreshBpScriptSelect() {
+  if (!_bpScriptSelect) return;
+  const prev = _bpScriptSelect.value;
+  _bpScriptSelect.innerHTML = '<option value="">— Select FN Group —</option>' +
+    controlFunctions.map((fn, i) =>
+      '<option value="' + i + '">' + escapeHtml(fn.name || 'FN Group ' + (i + 1)) + '</option>'
+    ).join('');
+  if (prev !== '' && parseInt(prev, 10) < controlFunctions.length) {
+    _bpScriptSelect.value = prev;
+  }
+}
+
+function _renderBpScriptEditor(fnIdx) {
+  _bpScriptIdx = fnIdx;
+  if (!_bpScriptContent || !_bpScriptEmpty) return;
+
+  if (fnIdx < 0 || fnIdx >= controlFunctions.length) {
+    _bpScriptEmpty.style.display = 'flex';
+    _bpScriptContent.style.display = 'none';
+    return;
+  }
+
+  _bpScriptEmpty.style.display = 'none';
+  _bpScriptContent.style.display = 'flex';
+
+  const fn = controlFunctions[fnIdx];
+  const groupName = controlFunctionGroups.find(g => g.id === fn.groupId)?.name || 'No group';
+
+  let html = '<div style="padding:4px 0 6px 0;font-size:11px;color:var(--text);font-weight:600">' +
+    escapeHtml(fn.name || 'Unnamed') +
+    '<span style="font-size:9px;color:var(--muted);margin-left:8px">Group: ' + escapeHtml(groupName) + '</span>' +
+    (fn.alwaysActive ? '<span style="font-size:8px;color:var(--success);margin-left:6px">● Always Active</span>' : '') +
+    '</div>';
+
+  if (!fn.actions || !fn.actions.length) {
+    html += '<div style="font-size:10px;color:var(--muted);padding:8px 0">No actions defined. Add actions in the Functions panel →</div>';
+  } else {
+    fn.actions.forEach((action, actIdx) => {
+      const norm = normalizeFunctionAction(action);
+      const typeLabel = norm.actionType.charAt(0).toUpperCase() + norm.actionType.slice(1);
+      let details = '';
+      if (norm.actionType === 'move') {
+        details = 'Target: ' + (norm.refValue || '—') + ' | Offset: [' +
+          (norm.offset || [0,0,0]).map(v => v.toFixed(1)).join(', ') + '] | Duration: ' + norm.duration + 's | Style: ' + norm.style;
+      } else if (norm.actionType === 'rotate') {
+        details = 'Target: ' + (norm.refValue || '—') + ' | Angle: ' +
+          (norm.offset || [0,0,0]).map(v => v.toFixed(0) + '°').join(', ') + ' | Duration: ' + norm.duration + 's';
+      } else if (norm.actionType === 'light') {
+        details = 'Target: ' + (norm.refValue || '—') + ' | Intensity: ' + (norm.lightIntensity ?? '—') +
+          ' | Color: ' + (norm.lightColor || '—');
+      } else if (norm.actionType === 'audio') {
+        details = 'Sound: ' + (norm.audioName || '—') + ' | Volume: ' + (norm.audioVolume ?? 1) +
+          (norm.audioLoop ? ' | Loop' : '');
+      } else if (norm.actionType === 'functionControl') {
+        details = 'Command: ' + (norm.functionControlCommand || '—') + ' | Target: ' + (norm.functionControlTarget || '—');
+      } else if (norm.actionType === 'setVar') {
+        details = (norm.setVarName || '?') + ' ' + (norm.setVarOp || '=') + ' ' + (norm.setVarValue ?? '?');
+      } else if (norm.actionType === 'setBool') {
+        details = (norm.setBoolName || '?') + ' → ' + norm.setBoolValue;
+      } else if (norm.actionType === 'teleport') {
+        details = 'Target: ' + (norm.teleportTarget || '—') + ' | Dest: ' + (norm.teleportDestination || '—');
+      } else if (norm.actionType === 'path') {
+        details = 'Command: ' + (norm.pathCommand || '—');
+      } else if (norm.actionType === 'playerGroup') {
+        details = 'Mode: ' + (norm.playerGroupMode || '—') + ' | Groups: ' + (norm.playerGroupValue || '—');
+      } else if (norm.actionType === 'playerStats') {
+        details = (norm.playerStatKey || '?') + ' ' + (norm.playerStatOp || '=') + ' ' + (norm.playerStatValue ?? '?');
+      } else if (norm.actionType === 'skeleton') {
+        details = 'Target: ' + (norm.refValue || '—');
+      }
+
+      html += '<div class="bp-script-action">' +
+        '<div class="sa-header"><span class="sa-type-badge">' + escapeHtml(typeLabel) + '</span> Action ' + (actIdx + 1) + '</div>' +
+        '<div class="sa-details">' + escapeHtml(details) + '</div>' +
+      '</div>';
+    });
+  }
+
+  _bpScriptContent.innerHTML = html;
+}
+
+if (_bpScriptSelect) {
+  _bpScriptSelect.addEventListener('change', () => {
+    const idx = parseInt(_bpScriptSelect.value, 10);
+    _renderBpScriptEditor(isNaN(idx) ? -1 : idx);
+  });
+}
+
+if (_bpScriptAdd) {
+  _bpScriptAdd.addEventListener('click', () => {
+    const name = 'Function ' + (controlFunctions.length + 1);
+    controlFunctions.push({ name, groupId: '', alwaysActive: false, actions: [] });
+    _refreshBpScriptSelect();
+    refreshControlFunctionsUI();
+    _bpScriptSelect.value = String(controlFunctions.length - 1);
+    _renderBpScriptEditor(controlFunctions.length - 1);
+  });
+}
+
+if (_bpScriptDel) {
+  _bpScriptDel.addEventListener('click', () => {
+    if (_bpScriptIdx < 0 || _bpScriptIdx >= controlFunctions.length) return;
+    if (!confirm('Delete FN Group "' + (controlFunctions[_bpScriptIdx].name || 'Unnamed') + '"?')) return;
+    controlFunctions.splice(_bpScriptIdx, 1);
+    _bpScriptIdx = -1;
+    _refreshBpScriptSelect();
+    refreshControlFunctionsUI();
+    _renderBpScriptEditor(-1);
+  });
+}
+
+if (_bpScriptSim) {
+  _bpScriptSim.addEventListener('click', () => {
+    if (_bpScriptIdx < 0 || _bpScriptIdx >= controlFunctions.length) return;
+    simulateFunction(_bpScriptIdx);
+  });
+}
+
+// ─── Bottom Panel: Timeline ──────────────────────────────────────────────────
+const _tlCanvas   = document.getElementById('tl-canvas');
+const _tlCanvasWrap = document.getElementById('bp-timeline-canvas-wrap');
+const _tlObjSelect = document.getElementById('tl-object-select');
+const _tlPropSelect = document.getElementById('tl-prop-select');
+const _tlAddKfBtn  = document.getElementById('tl-add-kf');
+const _tlPlayBtn   = document.getElementById('tl-play');
+const _tlStopBtn   = document.getElementById('tl-stop');
+const _tlTimeEl    = document.getElementById('tl-time');
+const _tlKfList    = document.getElementById('tl-keyframe-list');
+
+let _tlKeyframes = []; // [{time, prop, value:[...], objectId}]
+let _tlPlaying = false;
+let _tlPlayStart = 0;
+let _tlCurrentTime = 0;
+let _tlDuration = 5; // default 5 seconds
+let _tlSelectedObj = null;
+let _tlAnimFrame = null;
+
+function _refreshTlObjectSelect() {
+  if (!_tlObjSelect) return;
+  const prev = _tlObjSelect.value;
+  let html = '<option value="">— Select —</option>';
+  for (const m of sceneObjects) {
+    const name = m.userData.name || m.userData.type || m.uuid.slice(0, 8);
+    html += '<option value="' + m.uuid + '">' + escapeHtml(name) + '</option>';
+  }
+  _tlObjSelect.innerHTML = html;
+  if (prev) _tlObjSelect.value = prev;
+}
+
+function _getTlObject() {
+  if (!_tlObjSelect) return null;
+  const uuid = _tlObjSelect.value;
+  if (!uuid) return null;
+  return sceneObjects.find(m => m.uuid === uuid) || null;
+}
+
+function _addTlKeyframe() {
+  const mesh = _getTlObject();
+  if (!mesh) return;
+  const prop = _tlPropSelect?.value || 'position';
+  let value;
+  if (prop === 'position') value = [mesh.position.x, mesh.position.y, mesh.position.z];
+  else if (prop === 'rotation') value = [
+    THREE.MathUtils.radToDeg(mesh.rotation.x),
+    THREE.MathUtils.radToDeg(mesh.rotation.y),
+    THREE.MathUtils.radToDeg(mesh.rotation.z)
+  ];
+  else if (prop === 'scale') value = [mesh.scale.x, mesh.scale.y, mesh.scale.z];
+  else if (prop === 'opacity') value = [mesh.material?.opacity ?? 1];
+  else if (prop === 'color') {
+    const c = mesh.material?.color;
+    value = c ? [c.r, c.g, c.b] : [1, 1, 1];
+  }
+  else return;
+
+  _tlKeyframes.push({
+    time: _tlCurrentTime,
+    prop,
+    value,
+    objectId: mesh.uuid,
+  });
+  _tlKeyframes.sort((a, b) => a.time - b.time);
+  const maxT = Math.max(..._tlKeyframes.map(k => k.time), 5);
+  _tlDuration = maxT + 1;
+  _renderTlCanvas();
+  _renderTlKeyframeList();
+}
+
+function _removeTlKeyframe(idx) {
+  _tlKeyframes.splice(idx, 1);
+  _renderTlCanvas();
+  _renderTlKeyframeList();
+}
+
+function _renderTlKeyframeList() {
+  if (!_tlKfList) return;
+  const mesh = _getTlObject();
+  const objId = mesh?.uuid;
+  const prop = _tlPropSelect?.value || 'position';
+  const relevant = _tlKeyframes
+    .map((kf, i) => ({ kf, i }))
+    .filter(({ kf }) => kf.objectId === objId && kf.prop === prop);
+
+  if (!relevant.length) {
+    _tlKfList.innerHTML = '<div style="padding:4px;color:var(--muted)">No keyframes. Select an object and click "+ Key".</div>';
+    return;
+  }
+
+  _tlKfList.innerHTML = relevant.map(({ kf, i }) =>
+    '<div class="tl-kf-row">' +
+      '<span class="kf-time">' + kf.time.toFixed(2) + 's</span>' +
+      '<span class="kf-val">' + kf.value.map(v => (typeof v === 'number' ? v.toFixed(2) : v)).join(', ') + '</span>' +
+      '<button data-kf-idx="' + i + '">✕</button>' +
+    '</div>'
+  ).join('');
+
+  _tlKfList.querySelectorAll('button[data-kf-idx]').forEach(btn => {
+    btn.addEventListener('click', () => _removeTlKeyframe(parseInt(btn.dataset.kfIdx, 10)));
+  });
+}
+
+function _renderTlCanvas() {
+  if (!_tlCanvas || !_tlCanvasWrap) return;
+  const ctx = _tlCanvas.getContext('2d');
+  const w = _tlCanvasWrap.clientWidth;
+  const h = _tlCanvasWrap.clientHeight;
+  if (w === 0 || h === 0) return;
+  if (_tlCanvas.width !== w || _tlCanvas.height !== h) { _tlCanvas.width = w; _tlCanvas.height = h; }
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Background grid
+  ctx.strokeStyle = 'rgba(255,255,255,.05)';
+  ctx.lineWidth = 1;
+  const secPx = w / _tlDuration;
+  for (let t = 0; t <= _tlDuration; t += 0.5) {
+    const x = t * secPx;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+    if (t === Math.floor(t)) {
+      ctx.fillStyle = 'rgba(255,255,255,.2)';
+      ctx.font = '9px sans-serif';
+      ctx.fillText(t + 's', x + 2, 10);
+    }
+  }
+
+  // Draw keyframe diamonds
+  const mesh = _getTlObject();
+  const objId = mesh?.uuid;
+  const prop = _tlPropSelect?.value || 'position';
+  const propColors = { position: '#58a6ff', rotation: '#d29922', scale: '#3fb950', opacity: '#bc8cff', color: '#f97583' };
+  const color = propColors[prop] || '#58a6ff';
+
+  const relevant = _tlKeyframes.filter(kf => kf.objectId === objId && kf.prop === prop);
+  for (const kf of relevant) {
+    const x = (kf.time / _tlDuration) * w;
+    const y = h / 2;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x, y - 6); ctx.lineTo(x + 5, y); ctx.lineTo(x, y + 6); ctx.lineTo(x - 5, y);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Connect keyframes with lines
+  if (relevant.length > 1) {
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.3;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < relevant.length; i++) {
+      const x = (relevant[i].time / _tlDuration) * w;
+      if (i === 0) ctx.moveTo(x, h / 2); else ctx.lineTo(x, h / 2);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Playhead
+  const phx = (_tlCurrentTime / _tlDuration) * w;
+  ctx.strokeStyle = '#f85149';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(phx, 0); ctx.lineTo(phx, h); ctx.stroke();
+
+  // Playhead triangle
+  ctx.fillStyle = '#f85149';
+  ctx.beginPath(); ctx.moveTo(phx - 5, 0); ctx.lineTo(phx + 5, 0); ctx.lineTo(phx, 7); ctx.closePath(); ctx.fill();
+}
+
+function _tlScrub(e) {
+  if (!_tlCanvasWrap || _tlPlaying) return;
+  const rect = _tlCanvasWrap.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  _tlCurrentTime = frac * _tlDuration;
+  if (_tlTimeEl) _tlTimeEl.textContent = _tlCurrentTime.toFixed(2) + 's';
+  _renderTlCanvas();
+}
+
+if (_tlCanvasWrap) {
+  let scrubbing = false;
+  _tlCanvasWrap.addEventListener('pointerdown', e => {
+    if (_tlPlaying) return;
+    scrubbing = true; _tlScrub(e);
+    _tlCanvasWrap.setPointerCapture(e.pointerId);
+  });
+  _tlCanvasWrap.addEventListener('pointermove', e => { if (scrubbing) _tlScrub(e); });
+  _tlCanvasWrap.addEventListener('pointerup', () => { scrubbing = false; });
+  _tlCanvasWrap.addEventListener('pointercancel', () => { scrubbing = false; });
+}
+
+function _lerpValue(a, b, t) {
+  return a.map((v, i) => v + (b[i] - v) * t);
+}
+
+function _applyTlKeyframeValue(mesh, prop, value) {
+  if (!mesh) return;
+  if (prop === 'position') mesh.position.set(value[0], value[1], value[2]);
+  else if (prop === 'rotation') mesh.rotation.set(
+    THREE.MathUtils.degToRad(value[0]), THREE.MathUtils.degToRad(value[1]), THREE.MathUtils.degToRad(value[2])
+  );
+  else if (prop === 'scale') mesh.scale.set(value[0], value[1], value[2]);
+  else if (prop === 'opacity' && mesh.material) {
+    mesh.material.opacity = value[0];
+    mesh.material.transparent = value[0] < 1;
+  }
+  else if (prop === 'color' && mesh.material?.color) {
+    mesh.material.color.setRGB(value[0], value[1], value[2]);
+  }
+}
+
+function _tlPlayFrame() {
+  if (!_tlPlaying) return;
+  const elapsed = (performance.now() - _tlPlayStart) / 1000;
+  _tlCurrentTime = elapsed % _tlDuration;
+  if (_tlTimeEl) _tlTimeEl.textContent = _tlCurrentTime.toFixed(2) + 's';
+
+  // Interpolate all keyframed properties for the selected object
+  const mesh = _getTlObject();
+  if (mesh) {
+    const props = [...new Set(_tlKeyframes.filter(kf => kf.objectId === mesh.uuid).map(kf => kf.prop))];
+    for (const prop of props) {
+      const kfs = _tlKeyframes.filter(kf => kf.objectId === mesh.uuid && kf.prop === prop);
+      if (!kfs.length) continue;
+      // Find surrounding keyframes
+      let before = null, after = null;
+      for (const kf of kfs) {
+        if (kf.time <= _tlCurrentTime) before = kf;
+        if (kf.time > _tlCurrentTime && !after) after = kf;
+      }
+      if (before && after) {
+        const t = (after.time - before.time) > 0 ? (_tlCurrentTime - before.time) / (after.time - before.time) : 0;
+        _applyTlKeyframeValue(mesh, prop, _lerpValue(before.value, after.value, t));
+      } else if (before) {
+        _applyTlKeyframeValue(mesh, prop, before.value);
+      } else if (after) {
+        _applyTlKeyframeValue(mesh, prop, after.value);
+      }
+    }
+  }
+
+  _renderTlCanvas();
+  _tlAnimFrame = requestAnimationFrame(_tlPlayFrame);
+}
+
+function _tlPlay() {
+  if (_tlPlaying) return;
+  _tlPlaying = true;
+  _tlPlayStart = performance.now() - _tlCurrentTime * 1000;
+  if (_tlPlayBtn) _tlPlayBtn.textContent = '⏸';
+  _tlAnimFrame = requestAnimationFrame(_tlPlayFrame);
+}
+
+function _tlStop() {
+  _tlPlaying = false;
+  if (_tlAnimFrame) cancelAnimationFrame(_tlAnimFrame);
+  _tlAnimFrame = null;
+  _tlCurrentTime = 0;
+  if (_tlTimeEl) _tlTimeEl.textContent = '0.00s';
+  if (_tlPlayBtn) _tlPlayBtn.textContent = '▶';
+  _renderTlCanvas();
+}
+
+if (_tlPlayBtn) _tlPlayBtn.addEventListener('click', () => { _tlPlaying ? _tlStop() : _tlPlay(); });
+if (_tlStopBtn) _tlStopBtn.addEventListener('click', _tlStop);
+if (_tlAddKfBtn) _tlAddKfBtn.addEventListener('click', _addTlKeyframe);
+if (_tlObjSelect) _tlObjSelect.addEventListener('change', () => { _renderTlCanvas(); _renderTlKeyframeList(); });
+if (_tlPropSelect) _tlPropSelect.addEventListener('change', () => { _renderTlCanvas(); _renderTlKeyframeList(); });
+
+// ─── Bottom Panel tab activation hooks ───────────────────────────────────────
+// Refresh data when tabs become visible
+const _origSetBpPane = setBpPane;
+setBpPane = function(name) {
+  _origSetBpPane(name);
+  if (name === 'assets') refreshBpAssets();
+  else if (name === 'script') { _refreshBpScriptSelect(); _renderBpScriptEditor(_bpScriptIdx); }
+  else if (name === 'timeline') { _refreshTlObjectSelect(); _renderTlCanvas(); _renderTlKeyframeList(); }
+};
 
 // ─── Objects Library ─────────────────────────────────────────────────────────
 const _objlibList      = document.getElementById('objlib-list');
@@ -20430,6 +25019,7 @@ const OBJLIB_CATEGORIES = {
   gameplay:  { label: 'Gameplay',  types: ['spawn', 'checkpoint', 'target', 'trigger', 'teleport', 'keypad', 'light', 'pivot', 'joint', 'skeleton'] },
   characters: { label: 'Characters', types: ['npc'] },
   media:     { label: 'Media',     types: ['text', 'text3d', 'screen', 'camera'] },
+  imported:  { label: 'Imported',  types: ['imported_model'] },
 };
 
 const OBJLIB_TYPE_ICONS = {
@@ -20438,6 +25028,7 @@ const OBJLIB_TYPE_ICONS = {
   pyramid: '🔻', prism: '⬡', torus: '⭕', plane2d: '▬', triangle2d: '◺', circle2d: '●',
   polygon2d: '⬠', pivot: '🔶', joint: '🔗', skeleton: '🦴', terrain: '🏔️',
   text: '📝', text3d: '🔤', screen: '🖥️', camera: '🎥', npc: '🧑',
+  imported_model: '📦',
 };
 
 function _objlibCategoryOf(type) {
@@ -20663,10 +25254,12 @@ _objlibPopulateTypeFilter();
 // ─── Init ─────────────────────────────────────────────────────────────────────
 new ResizeObserver(onResize).observe(canvasContainer);
 onResize();
-setTopMenu(topMenuSelect.value);
+setTopMenu(topMenuSelect ? topMenuSelect.value : 'block');
 loadEditorSettings();
 applySidebarState({ save: false, reflow: true });
 applyFunctionsPanelState({ save: false, reflow: true });
+applyBottomPanelState({ save: false, reflow: true });
+setBpPane(_activeBpPane);
 setLibraryPane(activeLibraryPane, { save: false });
 refreshAudioLibraryUI();
 setSnap(snapSelect.value);
@@ -20677,7 +25270,6 @@ setPlacementOpacity(state.placeOpacity);
 setBrushColor(colorHexToCss(state.brushColor));
 setEraserShape(state.eraserShape);
 setEraserSize(state.eraserSize);
-applySunUI();
 setChunkRange(chunkRangeSelect.value);
 refreshCondTriggerUI();
 ensureControlFunctionGroups();
@@ -20685,7 +25277,6 @@ refreshVarPanel();
 refreshBoolPanel();
 refreshPlayerProfileUI();
 refreshControlFunctionsUI();
-syncFogUI();
 syncFovUI();
 refreshWorldUI();
 refreshCustomObjectUI();
