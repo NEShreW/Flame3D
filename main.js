@@ -321,9 +321,7 @@ const paintModeInput   = document.getElementById('paint-mode');
 const pickColorBtn     = document.getElementById('btn-pick-color');
 const eraserShapeInput = document.getElementById('eraser-shape');
 const eraserSizeInput  = document.getElementById('eraser-size');
-const libraryPaneButtons = Array.from(document.querySelectorAll('[data-lib-pane]'));
-const libraryPaneObjectsEl = document.getElementById('library-pane-objects');
-const libraryPaneAudioEl = document.getElementById('library-pane-audio');
+/* library pane refs removed — library now lives in bottom panel */
 const audioImportBtn = document.getElementById('btn-audio-import');
 const audioImportInput = document.getElementById('audio-import-input');
 const audioLibListEl = document.getElementById('audio-lib-list');
@@ -412,18 +410,10 @@ const btnAddControlFn       = document.getElementById('btn-add-control-fn');
 const controlFnSearchInput  = document.getElementById('control-fn-search');
 const controlFnNewGroupInput = document.getElementById('control-fn-new-group');
 const btnAddControlGroup    = document.getElementById('btn-add-control-group');
-
-// Blueprint overlay controls
-const _bpOverlayEl          = document.getElementById('bp-graph-overlay');
-const _bpOverlaySearchInput = document.getElementById('bp-overlay-search');
-const _bpOverlayNewGroupInput = document.getElementById('bp-overlay-new-group');
-const _bpOverlayAddGroupBtn = document.getElementById('bp-overlay-add-group');
-const _bpToggleBtn          = document.getElementById('btn-toggle-blueprint');
-const _bpFnSelectEl         = document.getElementById('bp-fn-select');
-const _bpAddFnGroupBtn      = document.getElementById('bp-add-fn-group');
-const _bpAddTargetBtn       = document.getElementById('bp-add-target');
-const _bpAddConditionBtn    = document.getElementById('bp-add-condition');
-const _bpAddActionBtn       = document.getElementById('bp-add-action');
+const cfnActionFilterEl     = document.getElementById('cfn-action-filter');
+const cfnCollapseAllBtn     = document.getElementById('cfn-collapse-all');
+const cfnExpandAllBtn       = document.getElementById('cfn-expand-all');
+const cfnCompactToggle      = document.getElementById('cfn-compact-toggle');
 
 const modeSelect = document.getElementById('mode-select');     // removed – may be null
 const gizmoSelect = document.getElementById('gizmo-select');   // removed – may be null
@@ -641,7 +631,6 @@ const bottomPanelState = {
 
 const audioLibrary = [];
 const customFonts = [];
-let activeLibraryPane = 'objects';
 let libraryPreviewAudio = null;
 let libraryPreviewAudioId = null;
 
@@ -1713,7 +1702,8 @@ const DEFS = {
     defaultSides: 16,
     makeGeo: params => {
       const sides = clampShapeSides(params?.sides ?? 16);
-      return new THREE.TorusGeometry(0.85, 0.24, Math.max(6, Math.floor(sides * 0.75)), sides);
+      const tube = params?.tubeRadius ?? 0.24;
+      return new THREE.TorusGeometry(0.85, tube, Math.max(6, Math.floor(sides * 0.75)), sides);
     },
     makeMat: () => new THREE.MeshStandardMaterial({ color: 0x8673b8, roughness: 0.55, metalness: 0.2 }),
   },
@@ -1834,7 +1824,22 @@ const DEFS = {
     makeMat: () => new THREE.MeshStandardMaterial({ color: 0xf0c8a0, roughness: 0.85 }),
     placedY: 0.9,
   },
+  commandBlock: {
+    label: 'Command Block',
+    makeGeo: () => new THREE.BoxGeometry(1.2, 1.6, 0.3),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x1a1a2e, emissive: 0x00ccff, emissiveIntensity: 0.35, roughness: 0.3, metalness: 0.6, transparent: true, opacity: 0.85 }),
+    placedY: 0.8,
+  },
 };
+
+// @@SHAPE_EDITABLE@@
+
+function normalizeCommandBlockConfig(config = {}) {
+  const raw = Array.isArray(config.disabledCommands) ? config.disabledCommands : [];
+  return {
+    disabledCommands: raw.filter(c => typeof c === 'string').map(c => c.toLowerCase().trim()).filter(Boolean),
+  };
+}
 
 function normalizeSkinGridSize(gridSize = {}) {
   const parseDim = (value, fallback) => {
@@ -5473,6 +5478,208 @@ function tryOpenRuntimeScreenFromPointerEvent(e) {
   return false;
 }
 
+// ─── Runtime command block console overlay ────────────────────────────────────
+let _runtimeCmdBlockOverlay = null;
+let _runtimeCmdBlockMesh = null;
+const _runtimeCmdBlockHistory = [];
+let _runtimeCmdBlockHistIdx = -1;
+let _runtimeCmdBlockHistDraft = '';
+
+function closeRuntimeCommandBlockOverlay(options = {}) {
+  if (!_runtimeCmdBlockOverlay) return;
+  _runtimeCmdBlockOverlay.remove();
+  _runtimeCmdBlockOverlay = null;
+  _runtimeCmdBlockMesh = null;
+  if (options.restorePointerLock && state.isPlaytest && !runtimePauseActive && document.pointerLockElement !== renderer.domElement) {
+    renderer.domElement.requestPointerLock();
+  }
+}
+
+function _cmdBlockLog(logEl, text, cls) {
+  const div = document.createElement('div');
+  div.style.cssText = 'padding:1px 0;font-size:12px;font-family:monospace;word-break:break-all;';
+  if (cls === 'error') div.style.color = '#f85149';
+  else if (cls === 'echo') div.style.color = '#58a6ff';
+  else div.style.color = '#8be9a8';
+  div.textContent = text;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function openRuntimeCommandBlockOverlay(mesh) {
+  if (!mesh || !state.isPlaytest) return false;
+  closeRuntimeCommandBlockOverlay();
+  _runtimeCmdBlockMesh = mesh;
+
+  const cfg = normalizeCommandBlockConfig(mesh.userData.commandBlockConfig);
+  const disabledSet = new Set(cfg.disabledCommands);
+
+  // Get available commands
+  const allCmds = (window._flame3dConsole && window._flame3dConsole.commands) ? window._flame3dConsole.commands : {};
+  const availableCmdNames = Object.keys(allCmds).filter(c => !disabledSet.has(c)).sort();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'runtime-cmdblock-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:20010;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;';
+
+  const panel = document.createElement('div');
+  panel.style.cssText = 'width:520px;max-width:90vw;max-height:70vh;background:#0d1117;border:1px solid #00ccff;border-radius:8px;box-shadow:0 4px 24px rgba(0,204,255,0.3);display:flex;flex-direction:column;overflow:hidden;';
+
+  // Header
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #21262d;background:#161b22;';
+  header.innerHTML = '<span style="color:#00ccff;font-size:12px;font-weight:700;font-family:monospace">⌨ Command Console</span>';
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '✕';
+  closeBtn.style.cssText = 'background:none;border:none;color:#8b949e;font-size:14px;cursor:pointer;padding:2px 6px;';
+  closeBtn.addEventListener('click', () => closeRuntimeCommandBlockOverlay({ restorePointerLock: true }));
+  header.appendChild(closeBtn);
+  panel.appendChild(header);
+
+  // Log area
+  const logEl = document.createElement('div');
+  logEl.style.cssText = 'flex:1;overflow-y:auto;padding:8px 12px;min-height:200px;max-height:350px;background:#0d1117;';
+  _cmdBlockLog(logEl, 'Command console ready. Type "help" for available commands.', 'result');
+  if (cfg.disabledCommands.length) {
+    _cmdBlockLog(logEl, cfg.disabledCommands.length + ' command(s) disabled on this terminal.', 'result');
+  }
+  panel.appendChild(logEl);
+
+  // Input area
+  const inputRow = document.createElement('div');
+  inputRow.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 12px;border-top:1px solid #21262d;background:#161b22;';
+  const prompt = document.createElement('span');
+  prompt.textContent = '>';
+  prompt.style.cssText = 'color:#00ccff;font-size:14px;font-weight:700;font-family:monospace;';
+  inputRow.appendChild(prompt);
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'type a command...';
+  input.autocomplete = 'off';
+  input.style.cssText = 'flex:1;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:4px;padding:6px 8px;font-size:12px;font-family:monospace;outline:none;';
+  inputRow.appendChild(input);
+  panel.appendChild(inputRow);
+
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  _runtimeCmdBlockOverlay = overlay;
+
+  // Focus input
+  setTimeout(() => input.focus(), 50);
+
+  // Execute command within this overlay
+  const executeInOverlay = (text) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    _cmdBlockLog(logEl, '> ' + trimmed, 'echo');
+    const cmdName = trimmed.split(/\s+/)[0].toLowerCase();
+
+    // Check disabled
+    if (disabledSet.has(cmdName)) {
+      _cmdBlockLog(logEl, '[Error] Command "' + cmdName + '" is disabled on this terminal.', 'error');
+      return;
+    }
+
+    // Execute via the global console system
+    if (window._flame3dConsole && typeof window._flame3dConsole.execute === 'function') {
+      // Temporarily hook appendConsoleEntry to capture output for overlay display
+      const origAppend = window.appendConsoleEntry;
+      if (typeof origAppend === 'function') {
+        window.appendConsoleEntry = (level, parts) => {
+          origAppend(level, parts);
+          const msg = parts.join(' ');
+          if (level === 'error') _cmdBlockLog(logEl, msg, 'error');
+          else if (level === 'cmd') { /* already echoed */ }
+          else _cmdBlockLog(logEl, msg, 'result');
+        };
+      }
+      try {
+        window._flame3dConsole.execute(trimmed);
+      } finally {
+        if (typeof origAppend === 'function') window.appendConsoleEntry = origAppend;
+      }
+    } else {
+      _cmdBlockLog(logEl, '[Error] Console system unavailable.', 'error');
+    }
+  };
+
+  // Input event handlers
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const val = input.value;
+      if (val.trim()) {
+        _runtimeCmdBlockHistory.push(val);
+        if (_runtimeCmdBlockHistory.length > 100) _runtimeCmdBlockHistory.shift();
+        _runtimeCmdBlockHistIdx = -1;
+        _runtimeCmdBlockHistDraft = '';
+        executeInOverlay(val);
+        input.value = '';
+      }
+      e.preventDefault();
+    } else if (e.key === 'ArrowUp') {
+      if (_runtimeCmdBlockHistory.length) {
+        if (_runtimeCmdBlockHistIdx === -1) {
+          _runtimeCmdBlockHistDraft = input.value;
+          _runtimeCmdBlockHistIdx = _runtimeCmdBlockHistory.length - 1;
+        } else if (_runtimeCmdBlockHistIdx > 0) {
+          _runtimeCmdBlockHistIdx--;
+        }
+        input.value = _runtimeCmdBlockHistory[_runtimeCmdBlockHistIdx];
+      }
+      e.preventDefault();
+    } else if (e.key === 'ArrowDown') {
+      if (_runtimeCmdBlockHistIdx !== -1) {
+        _runtimeCmdBlockHistIdx++;
+        if (_runtimeCmdBlockHistIdx >= _runtimeCmdBlockHistory.length) {
+          _runtimeCmdBlockHistIdx = -1;
+          input.value = _runtimeCmdBlockHistDraft;
+        } else {
+          input.value = _runtimeCmdBlockHistory[_runtimeCmdBlockHistIdx];
+        }
+      }
+      e.preventDefault();
+    } else if (e.key === 'Tab') {
+      const partial = input.value.trim().toLowerCase();
+      if (partial) {
+        const matches = availableCmdNames.filter(n => n.startsWith(partial));
+        if (matches.length === 1) { input.value = matches[0] + ' '; }
+        else if (matches.length > 1) { _cmdBlockLog(logEl, 'Commands: ' + matches.join(', '), 'result'); }
+      }
+      e.preventDefault();
+    } else if (e.key === 'Escape') {
+      closeRuntimeCommandBlockOverlay({ restorePointerLock: true });
+      e.preventDefault();
+    }
+    e.stopPropagation();
+  });
+  input.addEventListener('keyup', e => e.stopPropagation());
+
+  // Click outside panel to close
+  overlay.addEventListener('pointerdown', e => {
+    if (!panel.contains(e.target)) closeRuntimeCommandBlockOverlay({ restorePointerLock: true });
+  });
+
+  return true;
+}
+
+function tryOpenRuntimeCommandBlockFromPointerEvent(e) {
+  if (!state.isPlaytest) return false;
+  const ndc = fpsLocked ? new THREE.Vector2(0, 0) : toNDC(e);
+  raycaster.setFromCamera(ndc, fpsCam);
+  const hits = raycaster.intersectObjects(sceneObjects, false);
+  for (const hit of hits) {
+    if (hit.object?.userData?.type === 'commandBlock') {
+      e?.preventDefault?.();
+      if (document.pointerLockElement === renderer.domElement) {
+        suppressPointerUnlockStop = true;
+        document.exitPointerLock();
+      }
+      return openRuntimeCommandBlockOverlay(hit.object);
+    }
+  }
+  return false;
+}
+
 function showKeypadContextMenu(mesh, x, y) {
   if (!mesh) return;
   closeKeypadContextMenu();
@@ -5544,6 +5751,7 @@ function normalizeShapeParams(type, params = {}) {
   const next = {};
   if (def.usesSides) next.sides = clampShapeSides(params.sides ?? def.defaultSides ?? state.placeSides);
   if (def.is2D) next.depth = clampShapeDepth(params.depth ?? state.place2DDepth);
+  if (type === 'torus') next.tubeRadius = typeof clampTubeRadius === 'function' ? clampTubeRadius(params.tubeRadius ?? 0.24) : Math.max(0.02, Math.min(2.0, parseFloat(params.tubeRadius) || 0.24));
   if (type === 'terrain') {
     next.segments = params.segments ?? 64;
     next.terrainSize = params.terrainSize ?? 20;
@@ -5551,12 +5759,21 @@ function normalizeShapeParams(type, params = {}) {
   return next;
 }
 
-function buildTypeGeometry(type, shapeParams = {}) {
-  const def = DEFS[type];
-  return def.makeGeo(normalizeShapeParams(type, shapeParams));
+function buildTypeGeometry(type, shapeParams = {}, overrideType) {
+  const effectiveType = overrideType && DEFS[overrideType] ? overrideType : type;
+  const def = DEFS[effectiveType];
+  return def.makeGeo(normalizeShapeParams(effectiveType, shapeParams));
 }
 
-const CONTROL_ACTION_TYPES = ['move', 'rotate', 'scale', 'light', 'audio', 'path', 'functionControl', 'playerGroup', 'setVar', 'setBool', 'playerStats', 'teleport', 'skeleton'];
+const CONTROL_ACTION_TYPES = ['move', 'rotate', 'scale', 'light', 'audio', 'path', 'functionControl', 'playerGroup', 'setVar', 'setBool', 'playerStats', 'teleport', 'skeleton', 'command', 'delay'];
+const ACTION_TYPE_META = {
+  move:{icon:'↔',color:'#58a6ff'}, rotate:{icon:'↻',color:'#d2a8ff'}, scale:{icon:'⇔',color:'#7ee787'},
+  light:{icon:'💡',color:'#e3b341'}, audio:{icon:'🔊',color:'#f0883e'}, path:{icon:'⤴',color:'#79c0ff'},
+  functionControl:{icon:'⚙',color:'#bc8cff'}, playerGroup:{icon:'👥',color:'#56d4dd'},
+  setVar:{icon:'#',color:'#ff7b72'}, setBool:{icon:'☑',color:'#ffa657'}, playerStats:{icon:'❤',color:'#ff7b72'},
+  teleport:{icon:'🌀',color:'#d2a8ff'}, skeleton:{icon:'🦴',color:'#8b949e'},
+  command:{icon:'>_',color:'#7ee787'}, delay:{icon:'⏱',color:'#8b949e'}
+};
 const SKELETON_ANIM_COMMANDS = ['play', 'stop', 'pause', 'resume'];
 const TELEPORT_MODES = ['coords', 'spawn', 'object'];
 const CONTROL_LIGHT_OPS = ['toggle', 'enable', 'disable', 'intensity', 'distance'];
@@ -5590,6 +5807,8 @@ const SWITCH_VAR_KEYS = [
 ];
 const SWITCH_RUN_MODES = ['oneShot', 'repeat'];
 const _controlFunctionStates = new Map();
+const _functionActionQueues = new Map(); // queueKey -> {functionName, callerMesh, context, actions[], currentIndex, startedIndices[]}
+const _activeDelayStates = new Map(); // queueKey -> {endsAt}
 
 const CONTROL_FUNCTION_STOP_MODES = ['none', 'momentary', 'permanent'];
 const CHECKPOINT_INTERACTIONS = ['touch', 'shoot', 'switch'];
@@ -5601,6 +5820,9 @@ let _nextControlFunctionGroupId = 1;
 const _activeTriggerCalls = new Map(); // meshUuid -> [{functionName, condition, started, activatedAt}]
 const _momentaryFunctionStopCounts = new Map();
 const _permanentFunctionStops = new Set();
+const _cfnCollapsed = new Set();
+let _cfnCompactMode = false;
+let _cfnActionTypeFilter = '';
 
 function normalizeFunctionNameList(value) {
   const source = Array.isArray(value) ? value : String(value ?? '').split(',');
@@ -6820,16 +7042,72 @@ function _applyTextTexture(mesh) {
   mesh.material.needsUpdate = true;
 }
 
+// ─── Custom Texture Config ───────────────────────────────────────────────────
+const TEXTURE_WRAP_MODES = ['repeat', 'clamp', 'mirror'];
+function normalizeTextureConfig(config) {
+  if (!config) return null;
+  const imageData = String(config.imageData ?? '').trim();
+  if (!imageData || !imageData.startsWith('data:image')) return null;
+  return {
+    imageData,
+    repeatX: Number.isFinite(config.repeatX) ? config.repeatX : 1,
+    repeatY: Number.isFinite(config.repeatY) ? config.repeatY : 1,
+    offsetX: Number.isFinite(config.offsetX) ? config.offsetX : 0,
+    offsetY: Number.isFinite(config.offsetY) ? config.offsetY : 0,
+    rotation: Number.isFinite(config.rotation) ? config.rotation : 0,
+    wrapS: TEXTURE_WRAP_MODES.includes(config.wrapS) ? config.wrapS : 'repeat',
+    wrapT: TEXTURE_WRAP_MODES.includes(config.wrapT) ? config.wrapT : 'repeat',
+    flipY: config.flipY !== undefined ? !!config.flipY : true,
+  };
+}
+
+function _texWrapToThree(mode) {
+  if (mode === 'clamp') return THREE.ClampToEdgeWrapping;
+  if (mode === 'mirror') return THREE.MirroredRepeatWrapping;
+  return THREE.RepeatWrapping;
+}
+
+function applyTextureConfig(mesh) {
+  if (!mesh?.material) return;
+  const cfg = normalizeTextureConfig(mesh.userData.textureConfig);
+  if (!cfg) {
+    if (mesh.material.map && mesh.userData.textureConfig !== undefined) {
+      mesh.material.map.dispose();
+      mesh.material.map = null;
+      mesh.material.needsUpdate = true;
+    }
+    mesh.userData.textureConfig = null;
+    return;
+  }
+  const loader = new THREE.TextureLoader();
+  loader.load(cfg.imageData, tex => {
+    tex.wrapS = _texWrapToThree(cfg.wrapS);
+    tex.wrapT = _texWrapToThree(cfg.wrapT);
+    tex.repeat.set(cfg.repeatX, cfg.repeatY);
+    tex.offset.set(cfg.offsetX, cfg.offsetY);
+    tex.rotation = (cfg.rotation || 0) * Math.PI / 180;
+    tex.center.set(0.5, 0.5);
+    tex.flipY = cfg.flipY;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    if (mesh.material.map) mesh.material.map.dispose();
+    mesh.material.map = tex;
+    mesh.material.needsUpdate = true;
+    mesh.userData._texturePattern = null;
+  });
+}
+
 // ─── Screen/Media Config ─────────────────────────────────────────────────────
 function normalizeScreenConfig(config = {}) {
   return {
-    mediaType: ['image', 'color', 'video', 'url', 'html'].includes(config.mediaType) ? config.mediaType : 'color',
+    mediaType: ['image', 'color', 'video', 'url', 'html', 'camera'].includes(config.mediaType) ? config.mediaType : 'color',
     imageData: config.imageData || null,
     videoData: config.videoData || null,
     url: String(config.url ?? ''),
     htmlContent: String(config.htmlContent ?? ''),
     screenColor: String(config.screenColor ?? '#222222'),
     interactive: !!config.interactive,
+    cameraLabel: String(config.cameraLabel ?? ''),
   };
 }
 
@@ -6885,6 +7163,26 @@ function _applyScreenTexture(mesh) {
       ctx.fillStyle = '#8888aa';
       ctx.fillText(sc.htmlContent.length + ' chars — Click to interact', 256, 160);
     }
+    const tex = new THREE.CanvasTexture(canvas);
+    if (mesh.material.map) mesh.material.map.dispose();
+    mesh.material.map = tex;
+    mesh.material.color.setHex(0xffffff);
+    mesh.material.needsUpdate = true;
+  } else if (sc.mediaType === 'camera') {
+    // Camera feed preview placeholder (live feed rendered during playtest)
+    const canvas = document.createElement('canvas');
+    canvas.width = 512; canvas.height = 288;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(0, 0, 512, 288);
+    ctx.fillStyle = '#58a6ff';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('📷 Camera Feed' + (sc.cameraLabel ? ': ' + sc.cameraLabel : ''), 256, 130);
+    ctx.font = '13px sans-serif';
+    ctx.fillStyle = '#8888aa';
+    ctx.fillText('Live during playtest', 256, 160);
     const tex = new THREE.CanvasTexture(canvas);
     if (mesh.material.map) mesh.material.map.dispose();
     mesh.material.map = tex;
@@ -8109,6 +8407,8 @@ async function renderCameraToVideo(mesh, options = {}) {
     }
     _movementPathStates.clear();
     _controlFunctionStates.clear();
+    _functionActionQueues.clear();
+    _activeDelayStates.clear();
   }
   if (_renderAnimateDaylight) {
     if (sunTimeInput) sunTimeInput.value = _renderSavedSunTime;
@@ -8892,15 +9192,7 @@ async function importAudioFiles(files) {
   refreshProps();
 }
 
-function setLibraryPane(name) {
-  const pane = name === 'audio' ? 'audio' : 'objects';
-  activeLibraryPane = pane;
-  if (libraryPaneObjectsEl) libraryPaneObjectsEl.classList.toggle('active', pane === 'objects');
-  if (libraryPaneAudioEl) libraryPaneAudioEl.classList.toggle('active', pane === 'audio');
-  for (const btn of libraryPaneButtons) {
-    btn.classList.toggle('active', btn.dataset.libPane === pane);
-  }
-}
+/* setLibraryPane removed — library now lives in bottom panel */
 
 function clampLightIntensity(value) {
   return THREE.MathUtils.clamp(Number.isFinite(value) ? value : state.defaultLightIntensity, 0, 100);
@@ -9013,18 +9305,19 @@ function setMeshOpacity(mesh, value) {
 function createMesh(type, ghost = false, options = {}) {
   const def = DEFS[type];
   const mat = def.makeMat();
-  const shapeParams = normalizeShapeParams(type, options.shapeParams ?? getPlacementShapeParams(type));
+  const effectiveType = options.shapeType && DEFS[options.shapeType] ? options.shapeType : type;
+  const shapeParams = normalizeShapeParams(effectiveType, options.shapeParams ?? getPlacementShapeParams(effectiveType));
   const defaultOpacity = clampMeshOpacity(
     mat.transparent ? (mat.opacity ?? 1) : (Number.isFinite(options.opacity) ? options.opacity : 1)
   );
   if (ghost) {
     mat.transparent = true; mat.opacity = GHOST_OPACITY; mat.depthWrite = false;
   }
-  const mesh = new THREE.Mesh(buildTypeGeometry(type, shapeParams), mat);
+  const mesh = new THREE.Mesh(buildTypeGeometry(effectiveType, shapeParams), mat);
   if (ghost) {
     // Add wireframe edge overlay for better visibility
     const wireMat = new THREE.MeshBasicMaterial({ color: 0x58a6ff, wireframe: true, transparent: true, opacity: 0.5, depthWrite: false });
-    const wire = new THREE.Mesh(buildTypeGeometry(type, shapeParams), wireMat);
+    const wire = new THREE.Mesh(buildTypeGeometry(effectiveType, shapeParams), wireMat);
     mesh.add(wire);
     mesh.userData._ghostWire = wire;
   }
@@ -9032,6 +9325,7 @@ function createMesh(type, ghost = false, options = {}) {
   mesh.receiveShadow = !ghost;
   mesh.userData.type = type;
   mesh.userData.shapeParams = shapeParams;
+  if (options.shapeType && DEFS[options.shapeType]) mesh.userData.shapeType = options.shapeType;
   mesh.userData.solid = isDefaultSolidType(type);
   mesh.userData.collisionMode = 'aabb';
   mesh.userData.hitboxConfig = createDefaultHitboxConfig();
@@ -9077,6 +9371,9 @@ function createMesh(type, ghost = false, options = {}) {
     mesh.userData.npcConfig = normalizeNpcConfig(options.npcConfig);
     mesh.userData.hitboxConfig = { mode: 'auto', offset: [0, 0.9, 0], size: [0.6, 1.8, 0.4] };
     if (!ghost) _applyNpcAppearance(mesh);
+  }
+  if (type === 'commandBlock') {
+    mesh.userData.commandBlockConfig = normalizeCommandBlockConfig(options.commandBlockConfig);
   }
   if (type === 'terrain') {
     const seg = shapeParams.segments ?? 64;
@@ -9272,9 +9569,15 @@ transformControls.addEventListener('objectChange', () => {
         entry.mesh.quaternion.copy(deltaQ).multiply(entry.trs.quat);
       }
     } else if (state.transformMode === 'scale') {
-      const sx = _helperScaleBefore.x !== 0 ? (_groupPivotHelper.scale.x / _helperScaleBefore.x) : 1;
-      const sy = _helperScaleBefore.y !== 0 ? (_groupPivotHelper.scale.y / _helperScaleBefore.y) : 1;
-      const sz = _helperScaleBefore.z !== 0 ? (_groupPivotHelper.scale.z / _helperScaleBefore.z) : 1;
+      let sx = _helperScaleBefore.x !== 0 ? (_groupPivotHelper.scale.x / _helperScaleBefore.x) : 1;
+      let sy = _helperScaleBefore.y !== 0 ? (_groupPivotHelper.scale.y / _helperScaleBefore.y) : 1;
+      let sz = _helperScaleBefore.z !== 0 ? (_groupPivotHelper.scale.z / _helperScaleBefore.z) : 1;
+      // Shift = uniform scale: use the axis with the largest change
+      if (editKeys.has('ShiftLeft') || editKeys.has('ShiftRight')) {
+        const u = [sx, sy, sz].reduce((a, b) => Math.abs(a - 1) >= Math.abs(b - 1) ? a : b, 1);
+        sx = sy = sz = u;
+        _groupPivotHelper.scale.set(_helperScaleBefore.x * u, _helperScaleBefore.y * u, _helperScaleBefore.z * u);
+      }
       for (const entry of _allTransformBefore) {
         entry.mesh.position.set(
           _helperPosBefore.x + (entry.trs.pos.x - _helperPosBefore.x) * sx,
@@ -9298,6 +9601,16 @@ transformControls.addEventListener('objectChange', () => {
 
   selBox.setFromObject(state.selectedObject);
 
+  // Single-object uniform scale (Shift) when no group/multi-select
+  if (state.transformMode === 'scale' && _primaryScaleBefore && (editKeys.has('ShiftLeft') || editKeys.has('ShiftRight'))) {
+    const sx = _primaryScaleBefore.x !== 0 ? (state.selectedObject.scale.x / _primaryScaleBefore.x) : 1;
+    const sy = _primaryScaleBefore.y !== 0 ? (state.selectedObject.scale.y / _primaryScaleBefore.y) : 1;
+    const sz = _primaryScaleBefore.z !== 0 ? (state.selectedObject.scale.z / _primaryScaleBefore.z) : 1;
+    const u = [sx, sy, sz].reduce((a, b) => Math.abs(a - 1) >= Math.abs(b - 1) ? a : b, 1);
+    state.selectedObject.scale.set(_primaryScaleBefore.x * u, _primaryScaleBefore.y * u, _primaryScaleBefore.z * u);
+    selBox.setFromObject(state.selectedObject);
+  }
+
   // Apply delta to extra selected objects (non-group-gizmo fallback)
   if (state.extraSelected.length > 0 && transformBefore) {
     if (state.transformMode === 'rotate') {
@@ -9318,9 +9631,15 @@ transformControls.addEventListener('objectChange', () => {
       }
     } else if (state.transformMode === 'scale') {
       // Scale the whole selection like one block using the rendered bounds.
-      const sx = _primaryScaleBefore.x !== 0 ? (state.selectedObject.scale.x / _primaryScaleBefore.x) : 1;
-      const sy = _primaryScaleBefore.y !== 0 ? (state.selectedObject.scale.y / _primaryScaleBefore.y) : 1;
-      const sz = _primaryScaleBefore.z !== 0 ? (state.selectedObject.scale.z / _primaryScaleBefore.z) : 1;
+      let sx = _primaryScaleBefore.x !== 0 ? (state.selectedObject.scale.x / _primaryScaleBefore.x) : 1;
+      let sy = _primaryScaleBefore.y !== 0 ? (state.selectedObject.scale.y / _primaryScaleBefore.y) : 1;
+      let sz = _primaryScaleBefore.z !== 0 ? (state.selectedObject.scale.z / _primaryScaleBefore.z) : 1;
+      // Shift = uniform scale: use the axis with the largest change
+      if (editKeys.has('ShiftLeft') || editKeys.has('ShiftRight')) {
+        const u = [sx, sy, sz].reduce((a, b) => Math.abs(a - 1) >= Math.abs(b - 1) ? a : b, 1);
+        sx = sy = sz = u;
+        state.selectedObject.scale.set(_primaryScaleBefore.x * u, _primaryScaleBefore.y * u, _primaryScaleBefore.z * u);
+      }
       const axis = transformControls.axis || 'XYZ';
       const pivot = _groupBoundsBefore.getCenter(new THREE.Vector3());
 
@@ -10008,8 +10327,19 @@ function applyAction(a) {
     if (state.selectedObject === a.mesh) refreshProps();
   }
   else if (a.type === 'shape') {
-    a.mesh.userData.shapeParams = normalizeShapeParams(a.mesh.userData.type, a.afterParams);
+    const eType = typeof getEffectiveShapeType === 'function' ? getEffectiveShapeType(a.mesh) : a.mesh.userData.type;
+    a.mesh.userData.shapeParams = normalizeShapeParams(eType, a.afterParams);
     setMeshGeometry(a.mesh, a.afterGeo.clone());
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'shapeTypeChange') {
+    if (a.afterShapeType) a.mesh.userData.shapeType = a.afterShapeType; else delete a.mesh.userData.shapeType;
+    a.mesh.userData.shapeParams = normalizeShapeParams(typeof getEffectiveShapeType === 'function' ? getEffectiveShapeType(a.mesh) : a.mesh.userData.type, a.afterParams);
+    setMeshGeometry(a.mesh, a.afterGeo.clone());
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'visibleInPlay') {
+    a.mesh.userData.visibleInPlay = a.after;
     if (state.selectedObject === a.mesh) refreshProps();
   }
   else if (a.type === 'traction') {
@@ -10091,8 +10421,19 @@ function applyInverse(a) {
     if (state.selectedObject === a.mesh) refreshProps();
   }
   else if (a.type === 'shape') {
-    a.mesh.userData.shapeParams = normalizeShapeParams(a.mesh.userData.type, a.beforeParams);
+    const eType = typeof getEffectiveShapeType === 'function' ? getEffectiveShapeType(a.mesh) : a.mesh.userData.type;
+    a.mesh.userData.shapeParams = normalizeShapeParams(eType, a.beforeParams);
     setMeshGeometry(a.mesh, a.beforeGeo.clone());
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'shapeTypeChange') {
+    if (a.beforeShapeType) a.mesh.userData.shapeType = a.beforeShapeType; else delete a.mesh.userData.shapeType;
+    a.mesh.userData.shapeParams = normalizeShapeParams(typeof getEffectiveShapeType === 'function' ? getEffectiveShapeType(a.mesh) : a.mesh.userData.type, a.beforeParams);
+    setMeshGeometry(a.mesh, a.beforeGeo.clone());
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'visibleInPlay') {
+    a.mesh.userData.visibleInPlay = a.before;
     if (state.selectedObject === a.mesh) refreshProps();
   }
   else if (a.type === 'traction') {
@@ -11455,6 +11796,7 @@ function applyTexturePaint(mesh, pattern, color1, color2, scale, customImg) {
   mesh.material.map = tex;
   mesh.material.needsUpdate = true;
   mesh.userData._texturePattern = { pattern, color1, color2, scale };
+  mesh.userData.textureConfig = null;
 }
 
 // ─── Save / load ─────────────────────────────────────────────────────────────
@@ -11722,6 +12064,8 @@ function serializeScene() {
       world:      m.userData.world || 'world_1',
     };
     if (m.userData.hiddenInGame) o.hiddenInGame = true;
+    if (m.userData.shapeType) o.shapeType = m.userData.shapeType;
+    if (m.userData.visibleInPlay !== undefined) o.visibleInPlay = m.userData.visibleInPlay;
     if (m.userData.collisionMode === 'geometry') o.collisionMode = 'geometry';
     const hitboxConfig = normalizeHitboxConfig(m.userData.hitboxConfig);
     if (hitboxConfig.mode !== 'auto' || hitboxConfig.offset.some(v => Math.abs(v) > 0.0001) || hitboxConfig.size.some((v, i) => Math.abs(v - createDefaultHitboxConfig().size[i]) > 0.0001)) {
@@ -11785,6 +12129,10 @@ function serializeScene() {
     if (m.userData._texturePattern) {
       o.texturePattern = { ...m.userData._texturePattern };
     }
+    if (m.userData.textureConfig) {
+      const tc = normalizeTextureConfig(m.userData.textureConfig);
+      if (tc) o.textureConfig = tc;
+    }
     if (m.userData.textConfig) {
       o.textConfig = normalizeTextConfig(m.userData.textConfig);
     }
@@ -11834,6 +12182,7 @@ function deserializeObject(d) {
   const mesh = createMesh(d.type, false, {
     lightIntensity: d.lightIntensity,
     shapeParams: d.shapeParams,
+    shapeType: d.shapeType,
     opacity: d.opacity,
   });
   if (Array.isArray(d.position))  mesh.position.fromArray(d.position);
@@ -11842,6 +12191,7 @@ function deserializeObject(d) {
   if (d.color !== undefined) mesh.material.color.setHex(d.color);
   if (d.solid !== undefined) mesh.userData.solid = d.solid;
   if (d.world) mesh.userData.world = d.world;
+  if (d.visibleInPlay !== undefined) mesh.userData.visibleInPlay = d.visibleInPlay;
   if (d.collisionMode === 'geometry') mesh.userData.collisionMode = 'geometry';
   if (d.hitboxConfig) mesh.userData.hitboxConfig = normalizeHitboxConfig(d.hitboxConfig);
   if (d.solidness !== undefined) mesh.userData.solidness = clampMeshSolidness(parseFloat(d.solidness));
@@ -11886,6 +12236,10 @@ function deserializeObject(d) {
   }
   if (d.texturePattern) {
     applyTexturePaint(mesh, d.texturePattern.pattern, d.texturePattern.color1, d.texturePattern.color2, d.texturePattern.scale);
+  }
+  if (d.textureConfig) {
+    mesh.userData.textureConfig = normalizeTextureConfig(d.textureConfig);
+    if (mesh.userData.textureConfig) applyTextureConfig(mesh);
   }
   if (d.textConfig && (d.type === 'text' || d.type === 'text3d')) {
     mesh.userData.textConfig = normalizeTextConfig(d.textConfig);
@@ -12094,7 +12448,6 @@ function saveEditorSettings() {
     sidebarCollapsed: sidebarState.collapsed,
     functionsPanelWidth: functionsPanelState.width,
     functionsPanelCollapsed: functionsPanelState.collapsed,
-    activeLibraryPane,
     customBlockSkins: serializeCustomBlockSkins(),
     customSculptSkins: serializeCustomSculptSkins(),
     customObjectTemplates: serializeCustomObjectTemplates(),
@@ -12155,7 +12508,7 @@ function loadEditorSettings() {
     if (s.sidebarCollapsed != null) sidebarState.collapsed = !!s.sidebarCollapsed;
     if (s.functionsPanelWidth != null) functionsPanelState.width = parseFloat(s.functionsPanelWidth) || functionsPanelState.width;
     if (s.functionsPanelCollapsed != null) functionsPanelState.collapsed = !!s.functionsPanelCollapsed;
-    if (s.activeLibraryPane) activeLibraryPane = s.activeLibraryPane === 'audio' ? 'audio' : 'objects';
+    /* activeLibraryPane removed — library now in bottom panel */
     if (s.customBlockSkins && typeof s.customBlockSkins === 'object') {
       setCustomBlockSkinsMap(s.customBlockSkins);
     }
@@ -12529,6 +12882,8 @@ function createDefaultFunctionAction() {
     skelAnimSpeed: 1,
     scaleOffset: [1, 1, 1],
     scaleStartOffset: [1, 1, 1],
+    commandText: '',
+    delayDuration: 1,
   };
 }
 
@@ -12589,6 +12944,8 @@ function normalizeFunctionAction(config = {}) {
     skelAnimSpeed: Math.max(0, Number.isFinite(parseFloat(config.skelAnimSpeed)) ? parseFloat(config.skelAnimSpeed) : 1),
     scaleOffset: normalizeVec(config.scaleOffset ?? [1, 1, 1]),
     scaleStartOffset: normalizeVec(config.scaleStartOffset ?? [1, 1, 1]),
+    commandText: String(config.commandText ?? '').trim(),
+    delayDuration: Math.max(0, parseFloat(config.delayDuration) || 1),
   };
 }
 
@@ -12598,10 +12955,6 @@ function createDefaultControlFunction(groupId = '') {
     groupId: String(groupId ?? '').trim(),
     alwaysActive: false,
     actions: [createDefaultFunctionAction()],
-    graphX: NaN,
-    graphY: NaN,
-    nodes: [],        // Phase 1: node-based assembly
-    connections: [],   // Phase 1: { from, to }
   };
 }
 
@@ -12614,54 +12967,19 @@ function normalizeControlFunction(fn = {}) {
     groupId: String(fn.groupId ?? '').trim(),
     alwaysActive: fn.alwaysActive === true,
     actions: actions.length ? actions : [createDefaultFunctionAction()],
-    graphX: Number.isFinite(fn.graphX) ? fn.graphX : NaN,
-    graphY: Number.isFinite(fn.graphY) ? fn.graphY : NaN,
-    nodes,
-    connections,
   };
-  // Auto-migrate old functions that have no nodes yet
-  if (!result.nodes.length && result.actions.length) {
-    migrateOldFunctionToNodes(result);
+  // One-time migration: if saved data has nodes, flatten them to actions then discard
+  if (nodes.length) {
+    _bpSyncFnActionsFromNodes({ nodes, connections, actions: result.actions });
+    // Copy synced actions back
+    result.actions = result.actions.length ? result.actions : [createDefaultFunctionAction()];
   }
-  _bpSyncFnActionsFromNodes(result);
   return result;
 }
 
-// ── Node-based assembly helpers (Phase 1) ────────────────────────────────────
+// ── Node-based assembly helpers (kept for migration of old saves) ────────────
 let _nodeIdCounter = 0;
 function _genNodeId() { return 'n' + Date.now().toString(36) + '_' + (++_nodeIdCounter); }
-
-function createDefaultTargetNode(refType = 'group', refValue = '') {
-  return {
-    id: _genNodeId(),
-    type: 'target',
-    refType,
-    refValue: String(refValue ?? '').trim(),
-    graphX: NaN,
-    graphY: NaN,
-  };
-}
-
-function createDefaultConditionNode(conditions = null) {
-  return {
-    id: _genNodeId(),
-    type: 'condition',
-    conditions: conditions || [createDefaultCondition()],
-    conditionLogic: 'and',
-    graphX: NaN,
-    graphY: NaN,
-  };
-}
-
-function createDefaultActionNode(actions = null) {
-  return {
-    id: _genNodeId(),
-    type: 'action',
-    actions: actions || [createDefaultFunctionAction()],
-    graphX: NaN,
-    graphY: NaN,
-  };
-}
 
 function normalizeGraphNode(node = {}) {
   const type = ['target', 'condition', 'action'].includes(node.type) ? node.type : 'action';
@@ -12686,38 +13004,6 @@ function normalizeGraphNode(node = {}) {
       : [createDefaultFunctionAction()];
   }
   return base;
-}
-
-// Migrate a legacy function (actions-only) into node-based assembly
-function migrateOldFunctionToNodes(fn) {
-  if (!fn) return;
-  const nodes = [];
-  const connections = [];
-  let x = 30;
-
-  // Create one action node with all the function's actions
-  const actionNode = createDefaultActionNode(fn.actions.map(a => normalizeFunctionAction(a)));
-  actionNode.graphX = x;
-  actionNode.graphY = 30;
-  nodes.push(actionNode);
-  x += 250;
-
-  // Check each action for target references — create target nodes
-  const seen = new Set();
-  fn.actions.forEach(a => {
-    const key = `${a.refType}:${a.refValue}`;
-    if (a.refValue && !seen.has(key)) {
-      seen.add(key);
-      const tn = createDefaultTargetNode(a.refType, a.refValue);
-      tn.graphX = x;
-      tn.graphY = 30 + (nodes.length - 1) * 120;
-      nodes.push(tn);
-      connections.push({ from: tn.id, to: actionNode.id });
-    }
-  });
-
-  fn.nodes = nodes;
-  fn.connections = connections;
 }
 
 // Sync fn.actions from action nodes — walks the connection graph to inherit
@@ -13681,6 +13967,8 @@ function resetSceneForNewProject() {
   // Clear project-scoped collections so nothing leaks between projects
   controlFunctions.length = 0;
   _controlFunctionStates.clear();
+  _functionActionQueues.clear();
+  _activeDelayStates.clear();
   conditionalTriggers.length = 0;
   gameVars.length = 0;
   gameBools.length = 0;
@@ -13911,9 +14199,15 @@ function updateMoveStateProgress(stateMap, nowSeconds, offsetsByMesh, options = 
     }
 
     if (rawT >= 1 && st.functionName && !st.functionMarked) {
-      markControlFunctionMet(st.functionName, st.callerUuid ? sceneObjects.find(m => m.uuid === st.callerUuid) ?? null : null);
-      st.functionMarked = true;
-      anyFunctionJustCompleted = true;
+      if (st._queueKey && _functionActionQueues.has(st._queueKey)) {
+        st.functionMarked = true;
+        _advanceFunctionQueue(st._queueKey);
+        anyFunctionJustCompleted = true;
+      } else {
+        markControlFunctionMet(st.functionName, st.callerUuid ? sceneObjects.find(m => m.uuid === st.callerUuid) ?? null : null);
+        st.functionMarked = true;
+        anyFunctionJustCompleted = true;
+      }
     }
   }
 
@@ -14034,9 +14328,15 @@ function applyAnimatedTransforms(basePositions, baseRotations, moveStateMap, rot
     }
 
     if (rawT >= 1 && st.functionName && !st.functionMarked) {
-      markControlFunctionMet(st.functionName, st.callerUuid ? sceneObjects.find(m => m.uuid === st.callerUuid) ?? null : null);
-      st.functionMarked = true;
-      anyFunctionJustCompleted = true;
+      if (st._queueKey && _functionActionQueues.has(st._queueKey)) {
+        st.functionMarked = true;
+        _advanceFunctionQueue(st._queueKey);
+        anyFunctionJustCompleted = true;
+      } else {
+        markControlFunctionMet(st.functionName, st.callerUuid ? sceneObjects.find(m => m.uuid === st.callerUuid) ?? null : null);
+        st.functionMarked = true;
+        anyFunctionJustCompleted = true;
+      }
     }
   }
 
@@ -14056,7 +14356,6 @@ function ensureSimLightState(mesh) {
 function simulateFunction(fnIdx) {
   const fn = controlFunctions[fnIdx];
   if (!fn || !fn.name) return;
-  _bpSyncFnActionsFromNodes(fn);
   _simActive = true;
   const nowSeconds = performance.now() / 1000;
 
@@ -15277,6 +15576,10 @@ function serializeSingleObject(m) {
   if (m.userData._texturePattern) {
     o.texturePattern = { ...m.userData._texturePattern };
   }
+  if (m.userData.textureConfig) {
+    const tc = normalizeTextureConfig(m.userData.textureConfig);
+    if (tc) o.textureConfig = tc;
+  }
   if (m.userData.textConfig) o.textConfig = normalizeTextConfig(m.userData.textConfig);
   if (m.userData.screenConfig) o.screenConfig = normalizeScreenConfig(m.userData.screenConfig);
   if (m.userData.cameraConfig) o.cameraConfig = normalizeCameraConfig(m.userData.cameraConfig);
@@ -16256,6 +16559,7 @@ function applyPlayerStatsAction(action) {
   else if (op === '/') next = val === 0 ? current : current / val;
 
   if (stat === 'health') {
+    if (window._flame3dConsole && window._flame3dConsole.godMode && next < fpsHealth) return;
     fpsHealth = Math.max(0, Math.min(gameRules.maxHealth, next));
     updateHealthHud();
     if (fpsHealth <= 0) respawnPlayer();
@@ -16442,6 +16746,10 @@ function stopFunctionRuntime(functionName, options = {}) {
   const key = normalizeControlFunctionKey(functionName);
   if (!key) return;
   _pausedFunctionKeys.delete(key);
+  // Clear any active action queues for this function
+  for (const [qk] of [..._functionActionQueues]) {
+    if (qk.startsWith(functionName + ':')) { _clearFunctionQueue(qk); }
+  }
   clearFunctionRuntimeStates(functionName);
   stopAudioByFunction(functionName);
   if (options.resetState) _controlFunctionStates.delete(key);
@@ -16478,97 +16786,210 @@ function applyFunctionControlAction(action, currentFunctionName, callerMesh, act
   }
 }
 
+function _executeActionImmediate(action, funcName, actionIndex, callerMesh, active, context, nowSeconds) {
+  // Dispatches a single action. Returns 'timed' if the action runs over time, 'instant' otherwise.
+  const needsTargetRef = ['move', 'rotate', 'light', 'path'].includes(action.actionType);
+  if (needsTargetRef && !action.refValue) return 'skip';
+
+  if (action.actionType === 'move') {
+    const callerKey = callerMesh?.uuid ?? 'global';
+    const stateKey = `${funcName}:${actionIndex}:${callerKey}`;
+    if (!active && !action.returnOnDeactivate) return 'skip';
+    const targetOffset = active ? action.offset : [0, 0, 0];
+    setControlMoveActionState(stateKey, funcName, action, targetOffset, callerMesh, active);
+    const st = _triggerMoveStates.get(stateKey);
+    if (st) { st.callerUuid = callerMesh?.uuid ?? null; st.startedAt = nowSeconds; }
+    return (active && action.duration > 0) ? 'timed' : 'instant';
+  } else if (action.actionType === 'rotate') {
+    const callerKey = callerMesh?.uuid ?? 'global';
+    const stateKey = `${funcName}:${actionIndex}:${callerKey}`;
+    if (!active && !action.returnOnDeactivate) return 'skip';
+    const targetRotation = active ? action.rotateOffset : [0, 0, 0];
+    setControlRotateActionState(stateKey, funcName, action, targetRotation, callerMesh, active);
+    const st = _triggerRotateStates.get(stateKey);
+    if (st) { st.callerUuid = callerMesh?.uuid ?? null; st.startedAt = nowSeconds; }
+    // Repeating rotations are fire-and-forget (don't block queue)
+    if (action.rotateRepeat) return 'instant';
+    return (active && action.duration > 0) ? 'timed' : 'instant';
+  } else if (action.actionType === 'light') {
+    const targets = triggerMoveTargets(action.refType, action.refValue);
+    for (const target of targets) applyLightActionToMesh(target, action.lightOp, action.lightValue);
+  } else if (action.actionType === 'audio') {
+    executeAudioAction(funcName, actionIndex, action, callerMesh, active);
+  } else if (action.actionType === 'path') {
+    applyPathAction(action, active);
+  } else if (action.actionType === 'functionControl') {
+    applyFunctionControlAction(action, funcName, callerMesh, active, context);
+  } else if (action.actionType === 'playerGroup') {
+    if (active) applyPlayerGroupAction(action);
+  } else if (action.actionType === 'setVar') {
+    if (active && action.setVarName) {
+      const amount = resolveValueSource(action.setVarValueType, action.setVarValue, action.setVarValueVar);
+      const current = getGameVar(action.setVarName);
+      let nextValue = amount;
+      if (action.setVarOp === '+') nextValue = current + amount;
+      else if (action.setVarOp === '-') nextValue = current - amount;
+      else if (action.setVarOp === '*') nextValue = current * amount;
+      else if (action.setVarOp === '/') nextValue = amount === 0 ? current : current / amount;
+      setGameVar(action.setVarName, nextValue);
+    }
+  } else if (action.actionType === 'setBool') {
+    if (active && action.setBoolName) {
+      if (action.setBoolValue === 'toggle') setGameBool(action.setBoolName, !getGameBool(action.setBoolName));
+      else setGameBool(action.setBoolName, !!action.setBoolValue);
+    }
+  } else if (action.actionType === 'playerStats') {
+    if (active) applyPlayerStatsAction(action);
+  } else if (action.actionType === 'teleport') {
+    if (active) executeTeleportAction(action, callerMesh);
+  } else if (action.actionType === 'skeleton') {
+    if (active) executeSkeletonAction(action);
+  } else if (action.actionType === 'command') {
+    if (active && action.commandText) {
+      if (window._flame3dConsole && typeof window._flame3dConsole.execute === 'function') {
+        window._flame3dConsole.execute(action.commandText);
+      }
+    }
+  } else if (action.actionType === 'delay') {
+    if (active) return 'delay';
+  }
+  return 'instant';
+}
+
+function _getQueueKey(funcName, callerMesh) {
+  return `${funcName}:${callerMesh?.uuid ?? 'global'}`;
+}
+
+function _startNextQueuedAction(queueKey) {
+  const q = _functionActionQueues.get(queueKey);
+  if (!q) return;
+
+  const nowSeconds = performance.now() / 1000;
+
+  while (q.currentIndex < q.actions.length) {
+    const i = q.currentIndex;
+    const action = q.actions[i];
+
+    const result = _executeActionImmediate(action, q.functionName, i, q.callerMesh, true, q.context, nowSeconds);
+
+    if (result === 'timed') {
+      // Store the queueKey on the move/rotate state so completion can advance the queue
+      const callerKey = q.callerMesh?.uuid ?? 'global';
+      const stateKey = `${q.functionName}:${i}:${callerKey}`;
+      const moveSt = _triggerMoveStates.get(stateKey);
+      if (moveSt) moveSt._queueKey = queueKey;
+      const rotSt = _triggerRotateStates.get(stateKey);
+      if (rotSt) rotSt._queueKey = queueKey;
+      q.startedIndices.push(i);
+      return; // Wait for animation to complete
+    } else if (result === 'delay') {
+      _activeDelayStates.set(queueKey, { endsAt: nowSeconds + action.delayDuration });
+      q.startedIndices.push(i);
+      return; // Wait for delay timer
+    } else {
+      // Instant or skip — advance immediately
+      q.startedIndices.push(i);
+      q.currentIndex++;
+    }
+  }
+
+  // All actions processed — mark function complete
+  _functionActionQueues.delete(queueKey);
+  markControlFunctionMet(q.functionName, q.callerMesh);
+}
+
+function _advanceFunctionQueue(queueKey) {
+  const q = _functionActionQueues.get(queueKey);
+  if (!q) return;
+  _activeDelayStates.delete(queueKey);
+  q.currentIndex++;
+  if (q.currentIndex >= q.actions.length) {
+    _functionActionQueues.delete(queueKey);
+    markControlFunctionMet(q.functionName, q.callerMesh);
+  } else {
+    _startNextQueuedAction(queueKey);
+  }
+}
+
+function _clearFunctionQueue(queueKey) {
+  _functionActionQueues.delete(queueKey);
+  _activeDelayStates.delete(queueKey);
+}
+
 function executeControlFunction(functionName, callerMesh, active, context = {}) {
   if ((context.depth ?? 0) > 6) return false;
   const func = getControlFunctionByName(functionName);
   if (!func) return false;
-  _bpSyncFnActionsFromNodes(func);
   if (active && isControlFunctionStopped(func.name)) return false;
   if (active && isFunctionPaused(func.name)) return false;
   const nowSeconds = performance.now() / 1000;
-  let hasTransformAction = false;
 
+  const queueKey = _getQueueKey(func.name, callerMesh);
+
+  if (!active) {
+    // Deactivation: clear queue and process returnOnDeactivate for all actions
+    _clearFunctionQueue(queueKey);
+    for (let i = 0; i < func.actions.length; i++) {
+      const action = normalizeFunctionAction(func.actions[i]);
+      const needsTargetRef = ['move', 'rotate', 'light', 'path'].includes(action.actionType);
+      if (needsTargetRef && !action.refValue) continue;
+      _executeActionImmediate(action, func.name, i, callerMesh, false, context, nowSeconds);
+    }
+    return true;
+  }
+
+  // Active: clear any existing queue for this function+caller and start fresh
+  _clearFunctionQueue(queueKey);
+
+  // Normalize all actions upfront
+  const normalizedActions = [];
   for (let i = 0; i < func.actions.length; i++) {
     const action = normalizeFunctionAction(func.actions[i]);
-    const needsTargetRef = ['move', 'rotate', 'light', 'path'].includes(action.actionType);
-    if (needsTargetRef && !action.refValue) continue;
-
-    // Evaluate chain conditions from upstream condition nodes in the graph
-    if (active && action._chainConditions && action._chainConditions.length) {
-      const chainMet = action._chainConditionLogic === 'or'
-        ? action._chainConditions.some(c => evaluateCondition(c, callerMesh, context.activatedAt))
-        : action._chainConditions.every(c => evaluateCondition(c, callerMesh, context.activatedAt));
-      if (!chainMet) continue;
-    }
-
-    if (action.actionType === 'move') {
-      hasTransformAction = true;
-      const callerKey = callerMesh?.uuid ?? 'global';
-      const stateKey = `${func.name}:${i}:${callerKey}`;
-      if (!active && !action.returnOnDeactivate) continue; // keep current state
-      const targetOffset = active ? action.offset : [0, 0, 0];
-      setControlMoveActionState(stateKey, func.name, action, targetOffset, callerMesh, active);
-      const st = _triggerMoveStates.get(stateKey);
-      if (st) { st.callerUuid = callerMesh?.uuid ?? null; st.startedAt = nowSeconds; }
-    } else if (action.actionType === 'rotate') {
-      hasTransformAction = true;
-      const callerKey = callerMesh?.uuid ?? 'global';
-      const stateKey = `${func.name}:${i}:${callerKey}`;
-      if (!active && !action.returnOnDeactivate) continue;
-      const targetRotation = active ? action.rotateOffset : [0, 0, 0];
-      setControlRotateActionState(stateKey, func.name, action, targetRotation, callerMesh, active);
-      const st = _triggerRotateStates.get(stateKey);
-      if (st) { st.callerUuid = callerMesh?.uuid ?? null; st.startedAt = nowSeconds; }
-    } else if (action.actionType === 'light') {
-      const targets = triggerMoveTargets(action.refType, action.refValue);
-      for (const target of targets) applyLightActionToMesh(target, action.lightOp, action.lightValue);
-    } else if (action.actionType === 'audio') {
-      executeAudioAction(func.name, i, action, callerMesh, active);
-    } else if (action.actionType === 'path') {
-      applyPathAction(action, active);
-    } else if (action.actionType === 'functionControl') {
-      applyFunctionControlAction(action, func.name, callerMesh, active, context);
-    } else if (action.actionType === 'playerGroup') {
-      if (active) applyPlayerGroupAction(action);
-    } else if (action.actionType === 'setVar') {
-      if (active && action.setVarName) {
-        const amount = resolveValueSource(action.setVarValueType, action.setVarValue, action.setVarValueVar);
-        const current = getGameVar(action.setVarName);
-        let nextValue = amount;
-        if (action.setVarOp === '+') nextValue = current + amount;
-        else if (action.setVarOp === '-') nextValue = current - amount;
-        else if (action.setVarOp === '*') nextValue = current * amount;
-        else if (action.setVarOp === '/') nextValue = amount === 0 ? current : current / amount;
-        setGameVar(action.setVarName, nextValue);
-      }
-    } else if (action.actionType === 'setBool') {
-      if (active && action.setBoolName) {
-        if (action.setBoolValue === 'toggle') setGameBool(action.setBoolName, !getGameBool(action.setBoolName));
-        else setGameBool(action.setBoolName, !!action.setBoolValue);
-      }
-    } else if (action.actionType === 'playerStats') {
-      if (active) applyPlayerStatsAction(action);
-    } else if (action.actionType === 'teleport') {
-      if (active) executeTeleportAction(action, callerMesh);
-    } else if (action.actionType === 'skeleton') {
-      if (active) executeSkeletonAction(action);
-    }
+    normalizedActions.push(action);
   }
 
-  // When a new function with transform actions starts, un-mark all OTHER functions
-  if (active && hasTransformAction) {
-    const thisKey = normalizeControlFunctionKey(func.name);
-    for (const [key, entry] of _controlFunctionStates) {
-      if (key !== thisKey && entry.met) {
-        entry.met = false;
-      }
+  // Check if function has any timed/delay actions that actually need sequencing
+  const hasTimedAction = normalizedActions.some(a =>
+    ((a.actionType === 'move' || a.actionType === 'rotate') && a.duration > 0 && !(a.actionType === 'rotate' && a.rotateRepeat))
+    || a.actionType === 'delay'
+  );
+
+  if (!hasTimedAction) {
+    // Fast path: no sequencing needed, fire all at once (original behavior)
+    let hasTransformAction = false;
+    for (let i = 0; i < normalizedActions.length; i++) {
+      const action = normalizedActions[i];
+      const result = _executeActionImmediate(action, func.name, i, callerMesh, true, context, nowSeconds);
+      if (action.actionType === 'move' || action.actionType === 'rotate') hasTransformAction = true;
     }
+    if (hasTransformAction) {
+      const thisKey = normalizeControlFunctionKey(func.name);
+      for (const [key, entry] of _controlFunctionStates) {
+        if (key !== thisKey && entry.met) entry.met = false;
+      }
+    } else {
+      markControlFunctionMet(func.name, callerMesh);
+    }
+    return true;
   }
 
-  // Light-only functions complete immediately
-  if (active && !hasTransformAction) {
-    markControlFunctionMet(func.name, callerMesh);
+  // Sequenced path: create a queue and execute one action at a time
+  _functionActionQueues.set(queueKey, {
+    functionName: func.name,
+    callerMesh,
+    context,
+    actions: normalizedActions,
+    currentIndex: 0,
+    startedIndices: [],
+  });
+
+  // Un-mark other functions
+  const thisKey = normalizeControlFunctionKey(func.name);
+  for (const [key, entry] of _controlFunctionStates) {
+    if (key !== thisKey && entry.met) entry.met = false;
   }
+
+  _startNextQueuedAction(queueKey);
   return true;
 }
 
@@ -16768,6 +17189,14 @@ function updateTriggerMoveAnimations(nowSeconds) {
     _triggerRotateStates,
     nowSeconds
   );
+
+  // Check active delay timers and advance queues whose delay has elapsed
+  for (const [queueKey, delay] of [..._activeDelayStates]) {
+    if (nowSeconds >= delay.endsAt) {
+      _activeDelayStates.delete(queueKey);
+      _advanceFunctionQueue(queueKey);
+    }
+  }
 
   // Re-evaluate pending calls when a function just completed
   if (anyFunctionJustCompleted) {
@@ -17023,6 +17452,7 @@ function updateMovementPathAnimations(dt) {
 }
 
 function applyFallDamage(fallDistance) {
+  if (window._flame3dConsole && window._flame3dConsole.godMode) return;
   if (!gameRules.fallDamage) return;
   // Spawn protect: untilLanded blocks fall damage until first ground touch
   if (gameRules.spawnProtectCondition === 'untilLanded' && !fpsSpawnLanded) return;
@@ -17542,6 +17972,7 @@ function applyCtAction(ruleKey, expr) {
   }
   const val = resolveCtValue(ruleKey, expr);
   if (ruleKey === 'health') {
+    if (window._flame3dConsole && window._flame3dConsole.godMode && val < fpsHealth) return;
     fpsHealth = Math.max(0, Math.min(gameRules.maxHealth, val));
     updateHealthHud();
     if (fpsHealth <= 0) respawnPlayer();
@@ -17635,6 +18066,8 @@ function startPlaytest() {
   clearSkeletonRuntimeStates();
   clearNpcRuntimeState();
   _activeTriggerCalls.clear();
+  _functionActionQueues.clear();
+  _activeDelayStates.clear();
   _teleportCooldowns.clear();
   _runtimeFovOverride = null;
   _playtestWorldId = activeWorldId;
@@ -17664,30 +18097,12 @@ function startPlaytest() {
     }
   }
 
-  // Hide dedicated light blocks (PointLight stays active); keep emitting walls/floors visible
+  // Hide objects that should not be visible during playtest
   for (const m of sceneObjects) {
-    if (m.userData.type === 'light' && m.userData.pointLight) {
+    if (typeof shouldHideInPlaytest === 'function' ? shouldHideInPlaytest(m) : (m.userData.hiddenInGame || (m.userData.type === 'light' && m.userData.pointLight) || m.userData.type === 'spawn' || m.userData.type === 'trigger' || m.userData.type === 'pivot')) {
       m.material.visible = false;
       if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = false;
-      m.castShadow = false;
-      m.userData._playtestHidden = true;
-    }
-  }
-
-  // Hide spawn and trigger blocks during playtest
-  for (const m of sceneObjects) {
-    if (m.userData.type === 'spawn' || m.userData.type === 'trigger' || m.userData.type === 'pivot') {
-      m.material.visible = false;
-      if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = false;
-      m.userData._playtestHidden = true;
-    }
-  }
-
-  // Hide objects marked as hidden in game
-  for (const m of sceneObjects) {
-    if (m.userData.hiddenInGame) {
-      m.material.visible = false;
-      if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = false;
+      if (m.userData.type === 'light') m.castShadow = false;
       m.userData._playtestHidden = true;
     }
   }
@@ -17718,6 +18133,10 @@ function startPlaytest() {
   if (sprintHud) sprintHud.style.display = gameRules.sprintDuration > 0 ? 'flex' : 'none';
   updateHealthHud();
 
+  // Shift perf-stats below health HUD so they don't overlap
+  const _perfEl = document.getElementById('perf-stats');
+  if (_perfEl) _perfEl.style.top = '60px';
+
   renderer.domElement.requestPointerLock();
   syncFpsCamera();
 
@@ -17734,6 +18153,7 @@ function startPlaytest() {
 function _cleanupPlaytest() {
   closeRuntimeKeypadOverlay();
   closeRuntimeScreenOverlay();
+  closeRuntimeCommandBlockOverlay();
   // Remove portal discs from teleport meshes
   for (const m of sceneObjects) {
     if (m.userData._portalDisc) {
@@ -17750,6 +18170,11 @@ function _cleanupPlaytest() {
       m.userData._screenVideo.pause();
       m.userData._screenVideo.src = '';
       m.userData._screenVideo = null;
+    }
+    // Restore camera screen textures to editor preview
+    if (m.userData._camScreenActive) {
+      delete m.userData._camScreenActive;
+      _applyScreenTexture(m);
     }
   }
   // Restore dedicated light block visibility
@@ -17772,7 +18197,15 @@ function _cleanupPlaytest() {
       m.userData._dead = false;
     }
   }
-  // Clear all playtest-hidden flags
+  // Restore all object visibility after playtest
+  for (const m of sceneObjects) {
+    if (m.userData._playtestHidden) {
+      m.material.visible = true;
+      if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = true;
+      if (m.userData.type === 'light' && m.userData.pointLight) m.castShadow = true;
+    }
+  }
+  // Clear all playtest-hidden flags and restore positions
   for (const m of sceneObjects) {
     const basePos = _playtestBasePositions.get(m);
     if (basePos) m.position.copy(basePos);
@@ -17794,6 +18227,8 @@ function _cleanupPlaytest() {
   clearSkeletonRuntimeStates();
   clearNpcRuntimeState();
   _activeTriggerCalls.clear();
+  _functionActionQueues.clear();
+  _activeDelayStates.clear();
   _teleportCooldowns.clear();
   _runtimeFovOverride = null;
   clearRuntimeFunctionStops();
@@ -17818,6 +18253,10 @@ function _cleanupPlaytest() {
   if (sprintHud) sprintHud.style.display = 'none';
   document.getElementById('btn-stop').style.display = 'none';
   document.getElementById('btn-playtest').style.display = 'inline-flex';
+
+  // Reset perf-stats position
+  const _perfEl = document.getElementById('perf-stats');
+  if (_perfEl) _perfEl.style.top = '10px';
   fpsDevView = false;
   updatePlayHint();
   setGridVisible(true);
@@ -17914,6 +18353,7 @@ renderer.domElement.addEventListener('pointerup', e => {
       if (runtimeMode && runtimePauseActive) return;
       if (tryOpenRuntimeKeypadFromPointerEvent(e)) return;
       if (tryOpenRuntimeScreenFromPointerEvent(e)) return;
+      if (tryOpenRuntimeCommandBlockFromPointerEvent(e)) return;
       if (!fpsLocked) renderer.domElement.requestPointerLock();
       else fpsShoot();
       return;
@@ -18342,9 +18782,12 @@ function setMode(mode) {
   // highlight sidebar mode button
   document.querySelectorAll('.tool-btn[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
   if (mode !== 'select') selectObject(null);
-  transformGroup.style.opacity       = mode === 'select' ? '1'    : '.4';
-  transformGroup.style.pointerEvents = mode === 'select' ? ''     : 'none';
   if (!['place', 'erase'].includes(mode)) removeGhost();
+  // context-sensitive settings panels
+  document.querySelectorAll('[data-settings-for]').forEach(el => {
+    const modes = el.dataset.settingsFor.split(',');
+    el.style.display = modes.includes(mode) ? '' : 'none';
+  });
   refreshStatus();
 }
 
@@ -18361,7 +18804,7 @@ function setPlacingType(type) {
   state.placingType = type;
   state.cloneScale = null;
   state.cloneShapeParams = null;
-  document.querySelectorAll('.lib-btn').forEach(b => b.classList.toggle('active', b.dataset.type === type));
+  document.querySelectorAll('.bp-asset-card').forEach(c => c.classList.toggle('active', c.dataset.assetId === type));
   refreshStatus();
 }
 
@@ -18502,9 +18945,14 @@ document.querySelectorAll('.tool-btn[data-transform]').forEach(b => {
 // ─── Menu-bar dropdown system ────────────────────────────────────────────────
 {
   let _activeMenu = null;  // currently open dropdown element
+  const _menuHandlers = new Map(); // btnEl → items-function, for hover-switch
 
   function closeActiveMenu() {
-    if (_activeMenu) { _activeMenu.remove(); _activeMenu = null; }
+    if (_activeMenu) {
+      _activeMenu._menuBtn.classList.remove('open');
+      _activeMenu.remove();
+      _activeMenu = null;
+    }
     document.removeEventListener('pointerdown', _menuOutsideHandler, true);
   }
 
@@ -18520,8 +18968,9 @@ document.querySelectorAll('.tool-btn[data-transform]').forEach(b => {
     closeActiveMenu();
 
     const dd = document.createElement('div');
-    dd.className = 'menu-dropdown';
+    dd.className = 'menu-dropdown open';
     dd._menuBtn = btnEl;
+    btnEl.classList.add('open');
 
     items.forEach(item => {
       if (item === '---') {
@@ -18532,7 +18981,15 @@ document.querySelectorAll('.tool-btn[data-transform]').forEach(b => {
       }
       const mi = document.createElement('div');
       mi.className = 'menu-item';
-      mi.textContent = item.label + (item.shortcut ? '    ' + item.shortcut : '');
+      const labelSpan = document.createElement('span');
+      labelSpan.textContent = item.label;
+      mi.appendChild(labelSpan);
+      if (item.shortcut) {
+        const scSpan = document.createElement('span');
+        scSpan.className = 'shortcut';
+        scSpan.textContent = item.shortcut;
+        mi.appendChild(scSpan);
+      }
       if (item.disabled) { mi.style.opacity = '.4'; mi.style.pointerEvents = 'none'; }
       mi.addEventListener('click', () => { closeActiveMenu(); if (item.action) item.action(); });
       dd.appendChild(mi);
@@ -18548,97 +19005,105 @@ document.querySelectorAll('.tool-btn[data-transform]').forEach(b => {
     setTimeout(() => document.addEventListener('pointerdown', _menuOutsideHandler, true), 0);
   }
 
+  function _registerMenu(id, itemsFn) {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    _menuHandlers.set(btn, itemsFn);
+    btn.addEventListener('click', () => openMenuDropdown(btn, itemsFn()));
+    // GIMP-style hover-switch: hovering another button while a menu is open switches instantly
+    btn.addEventListener('mouseenter', () => {
+      if (_activeMenu && _activeMenu._menuBtn !== btn) {
+        openMenuDropdown(btn, itemsFn());
+      }
+    });
+  }
+
   // ── File menu ──
-  const menuFileBtn = document.getElementById('menu-file');
-  if (menuFileBtn) menuFileBtn.addEventListener('click', () => openMenuDropdown(menuFileBtn, [
-    { label: '💾 Save Project',     shortcut: '',          action: () => saveProjectToLibrary() },
-    { label: '📤 Export JSON',      shortcut: '',          action: () => saveLevel() },
-    { label: '📂 Load JSON',        shortcut: '',          action: () => loadInput.click() },
+  _registerMenu('menu-file', () => [
+    { label: '💾 Save Project',       shortcut: '',              action: () => saveProjectToLibrary() },
+    { label: '📤 Export JSON',        shortcut: '',              action: () => saveLevel() },
+    { label: '📂 Load JSON',          shortcut: '',              action: () => loadInput.click() },
     '---',
-    { label: '🎮 Export Game HTML', shortcut: '',          action: () => exportStandaloneGameHtml() },
-    { label: '🧩 Export Loader HTML', shortcut: '',        action: () => exportRuntimeLoaderHtml() },
+    { label: '🎮 Export Game HTML',   shortcut: '',              action: () => exportStandaloneGameHtml() },
+    { label: '🧩 Export Loader HTML', shortcut: '',              action: () => exportRuntimeLoaderHtml() },
     '---',
-    { label: '🗑 Clear All',        shortcut: '',          action: () => clearAll() },
+    { label: '🗑 Clear All',          shortcut: '',              action: () => clearAll() },
     '---',
-    { label: '🏠 Back to Menu',     shortcut: '',          action: () => showMainMenu() },
-  ]));
+    { label: '🏠 Back to Menu',       shortcut: '',              action: () => showMainMenu() },
+  ]);
 
   // ── Edit menu ──
-  const menuEditBtn = document.getElementById('menu-edit');
-  if (menuEditBtn) menuEditBtn.addEventListener('click', () => openMenuDropdown(menuEditBtn, [
-    { label: '↩ Undo',             shortcut: 'Ctrl+Z',   action: () => undo() },
-    { label: '↪ Redo',             shortcut: 'Ctrl+Y',   action: () => redo() },
+  _registerMenu('menu-edit', () => [
+    { label: '↩ Undo',               shortcut: 'Ctrl+Z',       action: () => undo() },
+    { label: '↪ Redo',               shortcut: 'Ctrl+Y',       action: () => redo() },
     '---',
-    { label: '☷ Select All',       shortcut: 'Ctrl+A',   action: () => selectAllObjects() },
-    { label: '⊞ Group',            shortcut: 'Ctrl+G',   action: () => groupSelected() },
-    { label: '⊟ Ungroup',          shortcut: 'Ctrl+Shift+G', action: () => ungroupSelected() },
+    { label: '📋 Copy',              shortcut: 'Ctrl+C',       action: () => copySelectedObjects() },
+    { label: '📄 Paste',             shortcut: 'Ctrl+V',       action: () => pasteObjects() },
+    { label: '⧉ Duplicate',          shortcut: 'Ctrl+D',       action: () => duplicateSelectedObjects() },
     '---',
-    { label: '⊕ Merge',            shortcut: '',          action: () => mergeSelectedObjects() },
-    { label: '⊖ Unmerge',          shortcut: '',          action: () => unmergeSelectedObject() },
-  ]));
+    { label: '☷ Select All',         shortcut: 'Ctrl+A',       action: () => selectAllObjects() },
+    { label: '⊞ Group',              shortcut: 'Ctrl+G',       action: () => groupSelected() },
+    { label: '⊟ Ungroup',            shortcut: 'Ctrl+Shift+G', action: () => ungroupSelected() },
+    '---',
+    { label: '⊕ Merge',              shortcut: '',              action: () => mergeSelectedObjects() },
+    { label: '⊖ Unmerge',            shortcut: '',              action: () => unmergeSelectedObject() },
+  ]);
 
   // ── View menu ──
-  const menuViewBtn = document.getElementById('menu-view');
-  if (menuViewBtn) menuViewBtn.addEventListener('click', () => openMenuDropdown(menuViewBtn, [
-    { label: '🧱 Block / Library',  shortcut: '',         action: () => setTopMenu('block') },
-    { label: '💡 Light',             shortcut: '',         action: () => setTopMenu('light') },
-    { label: '⊞ Grid',              shortcut: '',         action: () => setTopMenu('grid') },
-    { label: '🏃 Player',            shortcut: '',         action: () => setTopMenu('player') },
+  _registerMenu('menu-view', () => [
+    { label: '🔧 Tools',             shortcut: '',              action: () => setTopMenu('block') },
+    { label: '💡 Light',             shortcut: '',              action: () => setTopMenu('light') },
+    { label: '⊞ Grid',              shortcut: '',              action: () => setTopMenu('grid') },
+    { label: '🏃 Player',            shortcut: '',              action: () => setTopMenu('player') },
     '---',
-    { label: '🔢 Vars',             shortcut: '',         action: () => setTopMenu('vars') },
-    { label: '☑ Bools',             shortcut: '',         action: () => setTopMenu('bools') },
-    { label: '🌍 Worlds',           shortcut: '',         action: () => setTopMenu('worlds') },
+    { label: '🔢 Vars',             shortcut: '',              action: () => setTopMenu('vars') },
+    { label: '☑ Bools',             shortcut: '',              action: () => setTopMenu('bools') },
+    { label: '🌍 Worlds',           shortcut: '',              action: () => setTopMenu('worlds') },
     '---',
-    { label: '📁 Files',            shortcut: '',         action: () => setTopMenu('files') },
-  ]));
+    { label: '📁 Files',            shortcut: '',              action: () => setTopMenu('files') },
+  ]);
+
+  // ── Tools menu ──
+  _registerMenu('menu-tools', () => [
+    { label: '⊕ Place',              shortcut: '',              action: () => setMode('place') },
+    { label: '↗ Select',             shortcut: '',              action: () => setMode('select') },
+    { label: '✕ Delete',             shortcut: '',              action: () => setMode('delete') },
+    { label: '🖌 Paint',             shortcut: '',              action: () => setMode('paint') },
+    { label: '◫ Erase',              shortcut: '',              action: () => setMode('erase') },
+    '---',
+    { label: '↔ Move',               shortcut: 'G',             action: () => { setMode('select'); setTransformMode('translate'); } },
+    { label: '↻ Rotate',             shortcut: 'R',             action: () => { setMode('select'); setTransformMode('rotate'); } },
+    { label: '⤡ Scale',              shortcut: 'S',             action: () => { setMode('select'); setTransformMode('scale'); } },
+  ]);
+
+  // ── Help menu ──
+  _registerMenu('menu-help', () => [
+    { label: '⌨ Keyboard Shortcuts', shortcut: '',              action: () => {
+      alert(
+        'Flame3D Keyboard Shortcuts\n' +
+        '─────────────────────────\n' +
+        'Ctrl+Z / Ctrl+Y — Undo / Redo\n' +
+        'Ctrl+C / Ctrl+V / Ctrl+D — Copy / Paste / Duplicate\n' +
+        'Ctrl+A — Select All\n' +
+        'Ctrl+G / Ctrl+Shift+G — Group / Ungroup\n' +
+        'Delete / Backspace — Delete selected\n' +
+        'G / R / S — Move / Rotate / Scale\n' +
+        'P — Toggle Playtest\n' +
+        'B — Toggle Blueprint\n' +
+        'F — Focus on selected\n' +
+        'Arrow Keys — Rotate placement ghost\n' +
+        'Shift+Click — Multi-select\n' +
+        'Ctrl+Click — Toggle selection'
+      );
+    }},
+    '---',
+    { label: 'ℹ About Flame3D',      shortcut: '',              action: () => {
+      alert('Flame3D — 3D Game Editor\nBuilt with Three.js v0.161.0');
+    }},
+  ]);
 }
 
-// ─── Library hover tooltips ──────────────────────────────────────────────────
-const _libTooltips = {
-  wall:       'Standard wall block (1×1×1)',
-  floor:      'Thin floor tile (1×0.1×1)',
-  terrain:    'Sculpt-able terrain chunk',
-  cube:       'Basic cube primitive',
-  sphere:     'Smooth sphere primitive',
-  cylinder:   'Cylinder primitive',
-  cone:       'Cone primitive',
-  pyramid:    'Pyramid (4-sided cone)',
-  prism:      'Triangular prism',
-  torus:      'Donut / torus shape',
-  plane2d:    'Flat 2D rectangle',
-  triangle2d: 'Flat 2D triangle',
-  circle2d:   'Flat 2D circle / disc',
-  polygon2d:  'Flat 2D regular polygon',
-  light:      'Point light source — illuminates nearby objects',
-  target:     'Blueprint target — attach actions via Blueprint',
-  checkpoint: 'Player respawn point',
-  spawn:      'World spawn position',
-  joint:      'Physics joint connecting two objects',
-  pivot:      'Pivot point for rotating objects',
-  teleport:   'Teleport destination marker',
-  trigger:    'Invisible trigger zone — fires actions on enter',
-  keypad:     'Interactive keypad / code panel',
-  npc:        'Non-player character',
-  text:       '2D text label overlay',
-  text3d:     '3D extruded text object',
-  screen:     'Interactive screen / display surface',
-  camera:     'Camera viewpoint for cinematic or fixed angles',
-};
-
-document.querySelectorAll('.lib-btn').forEach(b => {
-  const tip = _libTooltips[b.dataset.type];
-  if (tip) b.title = tip;
-  b.addEventListener('click', () => setPlacingType(b.dataset.type));
-  b.addEventListener('contextmenu', e => {
-    if (runtimeMode || state.isPlaytest) return;
-    e.preventDefault();
-    const type = b.dataset.type;
-    showLibraryContextMenu(type, e.clientX, e.clientY);
-  });
-});
-libraryPaneButtons.forEach(btn => {
-  btn.addEventListener('click', () => setLibraryPane(btn.dataset.libPane));
-});
+/* Library tooltips & sidebar .lib-btn handlers removed — library now lives in bottom panel */
 
 /* Collapsible .sf-sub headers */
 document.querySelectorAll('.sf-sub').forEach(sub => {
@@ -18652,36 +19117,9 @@ document.querySelectorAll('.sf-sub').forEach(sub => {
   });
 });
 
-/* Collapsible sidebar library categories */
-document.querySelectorAll('.lib-category-title').forEach(title => {
-  title.addEventListener('click', () => {
-    const body = title.nextElementSibling;
-    if (!body || !body.classList.contains('lib-category-body')) return;
-    const collapsed = title.classList.toggle('collapsed');
-    body.classList.toggle('collapsed', collapsed);
-  });
-});
+/* Sidebar library categories removed — library now lives in bottom panel */
 
-// --- Object library search filter ---
-const libSearchInput = document.getElementById('lib-search');
-if (libSearchInput) {
-  libSearchInput.addEventListener('input', () => {
-    const q = libSearchInput.value.trim().toLowerCase();
-    const cats = document.querySelectorAll('#library-pane-objects .lib-category');
-    for (const cat of cats) {
-      const btns = cat.querySelectorAll('.lib-btn');
-      let anyVisible = false;
-      for (const btn of btns) {
-        const text = (btn.textContent || '').toLowerCase();
-        const type = (btn.dataset.type || '').toLowerCase();
-        const match = !q || text.includes(q) || type.includes(q);
-        btn.style.display = match ? '' : 'none';
-        if (match) anyVisible = true;
-      }
-      cat.style.display = anyVisible ? '' : 'none';
-    }
-  });
-}
+/* Sidebar library search removed — search lives in bottom panel asset browser */
 
 document.addEventListener('pointerdown', e => {
   const target = e.target;
@@ -18853,6 +19291,31 @@ if (btnImportModel && importModelInput) {
     const file = importModelInput.files[0];
     if (file) await importGLTFModel(file);
     importModelInput.value = '';
+  });
+}
+
+// ── Bottom-panel asset import buttons ──
+const bpImportModelBtn   = document.getElementById('bp-import-model');
+const bpImportModelInput = document.getElementById('bp-import-model-input');
+if (bpImportModelBtn && bpImportModelInput) {
+  bpImportModelBtn.addEventListener('click', () => bpImportModelInput.click());
+  bpImportModelInput.addEventListener('change', async () => {
+    for (const file of bpImportModelInput.files) {
+      await importGLTFModel(file);
+    }
+    bpImportModelInput.value = '';
+    if (typeof refreshBpAssets === 'function') refreshBpAssets();
+  });
+}
+const bpImportAudioBtn   = document.getElementById('bp-import-audio');
+const bpImportAudioInput = document.getElementById('bp-import-audio-input');
+if (bpImportAudioBtn && bpImportAudioInput) {
+  bpImportAudioBtn.addEventListener('click', () => bpImportAudioInput.click());
+  bpImportAudioInput.addEventListener('change', async () => {
+    await importAudioFiles(bpImportAudioInput.files);
+    bpImportAudioInput.value = '';
+    if (typeof refreshBpAssets === 'function') refreshBpAssets();
+    saveEditorSettings();
   });
 }
 
@@ -19494,6 +19957,96 @@ function bindReflectProps(mesh) {
   bindMaterialProp('roughness', roughRange, roughNum, 'roughness');
 }
 
+function bindTextureProps(mesh) {
+  const uploadBtn = document.getElementById('prop-tex-upload');
+  const fileInput = document.getElementById('prop-tex-file');
+  const removeBtn = document.getElementById('prop-tex-remove');
+  if (!uploadBtn || !fileInput || state.selectedObject !== mesh) return;
+
+  const targets = getPropertyTargets(mesh).filter(t => t.material);
+  if (!targets.length) return;
+
+  uploadBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      if (!dataUrl || !String(dataUrl).startsWith('data:image')) return;
+      for (const t of targets) {
+        t.userData.textureConfig = normalizeTextureConfig({
+          ...(normalizeTextureConfig(t.userData.textureConfig) || {}),
+          imageData: dataUrl,
+        });
+        applyTextureConfig(t);
+      }
+      refreshProps();
+    };
+    reader.readAsDataURL(file);
+    fileInput.value = '';
+  });
+
+  if (removeBtn) {
+    removeBtn.addEventListener('click', () => {
+      for (const t of targets) {
+        if (t.material.map) { t.material.map.dispose(); t.material.map = null; t.material.needsUpdate = true; }
+        t.userData.textureConfig = null;
+      }
+      refreshProps();
+    });
+  }
+
+  const bindTexNum = (id, field) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', () => {
+      const v = parseFloat(el.value) || 0;
+      for (const t of targets) {
+        const cfg = normalizeTextureConfig(t.userData.textureConfig);
+        if (!cfg) continue;
+        cfg[field] = v;
+        t.userData.textureConfig = cfg;
+        applyTextureConfig(t);
+      }
+    });
+  };
+  bindTexNum('prop-tex-repeat-x', 'repeatX');
+  bindTexNum('prop-tex-repeat-y', 'repeatY');
+  bindTexNum('prop-tex-offset-x', 'offsetX');
+  bindTexNum('prop-tex-offset-y', 'offsetY');
+  bindTexNum('prop-tex-rotation', 'rotation');
+
+  const bindTexSel = (id, field) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', () => {
+      for (const t of targets) {
+        const cfg = normalizeTextureConfig(t.userData.textureConfig);
+        if (!cfg) continue;
+        cfg[field] = el.value;
+        t.userData.textureConfig = cfg;
+        applyTextureConfig(t);
+      }
+    });
+  };
+  bindTexSel('prop-tex-wrap-s', 'wrapS');
+  bindTexSel('prop-tex-wrap-t', 'wrapT');
+
+  const flipEl = document.getElementById('prop-tex-flip-y');
+  if (flipEl) {
+    flipEl.addEventListener('change', () => {
+      for (const t of targets) {
+        const cfg = normalizeTextureConfig(t.userData.textureConfig);
+        if (!cfg) continue;
+        cfg.flipY = flipEl.checked;
+        t.userData.textureConfig = cfg;
+        applyTextureConfig(t);
+      }
+    });
+  }
+}
+
 function buildCollisionConfigSnapshot(mesh) {
   return {
     collisionMode: getMeshCollisionMode(mesh),
@@ -19596,11 +20149,11 @@ function bindShapeParamProps(mesh) {
   const depthInput = document.getElementById('prop-shape-depth');
   if ((!sidesInput && !depthInput) || state.selectedObject !== mesh) return;
 
-  const type = mesh.userData.type;
+  const type = typeof getEffectiveShapeType === 'function' ? getEffectiveShapeType(mesh) : mesh.userData.type;
   const def = DEFS[type];
   if (!def) return;
 
-  const targets = getPropertyTargets(mesh).filter(t => t.userData.type === type);
+  const targets = getPropertyTargets(mesh).filter(t => (typeof getEffectiveShapeType === 'function' ? getEffectiveShapeType(t) : t.userData.type) === type);
   if (!targets.length) return;
 
   const applyShapeToTargets = patch => {
@@ -20331,6 +20884,17 @@ function bindScreenProps(mesh) {
       reader.readAsText(file);
     });
   }
+  // Camera label input
+  const cameraLabelInput = document.getElementById('prop-screen-camera-label');
+  if (cameraLabelInput) cameraLabelInput.addEventListener('change', () => {
+    for (const t of targets) {
+      const sc = normalizeScreenConfig(t.userData.screenConfig);
+      sc.cameraLabel = cameraLabelInput.value;
+      t.userData.screenConfig = sc;
+      _applyScreenTexture(t);
+    }
+    markRestoreDirty();
+  });
   // Interactive checkbox
   const interactiveCheck = document.getElementById('prop-screen-interactive');
   if (interactiveCheck) interactiveCheck.addEventListener('change', () => {
@@ -20340,6 +20904,27 @@ function bindScreenProps(mesh) {
       t.userData.screenConfig = sc;
     }
     markRestoreDirty();
+  });
+}
+
+function bindCommandBlockProps(mesh) {
+  if (state.selectedObject !== mesh) return;
+  const targets = getPropertyTargets(mesh).filter(t => t.userData.type === 'commandBlock');
+  document.querySelectorAll('.cmd-block-toggle').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const cmdName = cb.dataset.cmd;
+      for (const t of targets) {
+        const cfg = normalizeCommandBlockConfig(t.userData.commandBlockConfig);
+        if (cb.checked) {
+          cfg.disabledCommands = cfg.disabledCommands.filter(c => c !== cmdName);
+        } else {
+          if (!cfg.disabledCommands.includes(cmdName)) cfg.disabledCommands.push(cmdName);
+        }
+        t.userData.commandBlockConfig = cfg;
+      }
+      markRestoreDirty();
+      refreshProps();
+    });
   });
 }
 
@@ -21256,11 +21841,11 @@ function refreshProps() {
     ? `<div class="prop-row"><span class="prop-key">Color</span><div class="prop-controls"><input id="prop-surface-color" type="color" value="${colorHexToCss(m.material.color.getHex())}"/><span id="prop-surface-color-value" class="prop-code">${colorHexToCss(m.material.color.getHex()).toUpperCase()}</span></div></div>`
     : '';
 
-  const shapeParams = normalizeShapeParams(m.userData.type, m.userData.shapeParams || {});
-  const shapeControls = (def.usesSides || def.is2D)
-    ? `${def.usesSides ? `<div class="prop-row"><span class="prop-key">Sides</span><div class="prop-controls"><input id="prop-shape-sides" type="number" min="3" max="64" step="1" value="${shapeParams.sides ?? clampShapeSides(state.placeSides)}" style="width:64px"/></div></div>` : ''}
-       ${def.is2D ? `<div class="prop-row"><span class="prop-key">Depth</span><div class="prop-controls"><input id="prop-shape-depth" type="number" min="0.05" max="8" step="0.05" value="${r3(shapeParams.depth ?? clampShapeDepth(state.place2DDepth), 2)}" style="width:64px"/></div></div>` : ''}`
-    : '';
+  const shapeParams = normalizeShapeParams(typeof getEffectiveShapeType === 'function' ? getEffectiveShapeType(m) : m.userData.type, m.userData.shapeParams || {});
+  const shapeSelectHtml = typeof buildShapeSelectHTML === 'function' ? buildShapeSelectHTML(m) : '';
+  const effectiveShapeControlsHtml = typeof buildEffectiveShapeControls === 'function' ? buildEffectiveShapeControls(m) : '';
+  const visibleInPlayHtml = typeof buildVisibleInPlayHTML === 'function' ? buildVisibleInPlayHTML(m) : '';
+  const shapeControls = shapeSelectHtml + effectiveShapeControlsHtml;
 
   const solidToggle = `<div class="prop-row"><span class="prop-key">Solid</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-solid-toggle" type="checkbox" ${m.userData.solid ? 'checked' : ''}/> Block</label></div></div>`;
   const solidnessControls = `<div class="prop-row"><span class="prop-key" title="How much this object resists being pushed through (1 = fully solid, 0 = pass-through)">Density</span><div class="prop-controls"><input id="prop-solidness-range" type="range" min="0" max="1" step="0.01" value="${clampMeshSolidness(m.userData.solidness ?? 1)}"/><input id="prop-solidness-number" type="number" min="0" max="1" step="0.01" value="${r3(clampMeshSolidness(m.userData.solidness ?? 1), 2)}"/></div></div>`;
@@ -21268,6 +21853,25 @@ function refreshProps() {
   const curMetalness = m.material.metalness ?? 0;
   const curRoughness = m.material.roughness ?? 0.5;
   const reflectControls = `<div class="prop-row"><span class="prop-key">Metal</span><div class="prop-controls"><input id="prop-metalness-range" type="range" min="0" max="1" step="0.01" value="${r3(curMetalness, 2)}"/><input id="prop-metalness-number" type="number" min="0" max="1" step="0.01" value="${r3(curMetalness, 2)}"/></div></div><div class="prop-row"><span class="prop-key">Rough</span><div class="prop-controls"><input id="prop-roughness-range" type="range" min="0" max="1" step="0.01" value="${r3(curRoughness, 2)}"/><input id="prop-roughness-number" type="number" min="0" max="1" step="0.01" value="${r3(curRoughness, 2)}"/></div></div>`;
+
+  // Texture controls
+  const texCfg = normalizeTextureConfig(m.userData.textureConfig);
+  const hasTexture = !!texCfg;
+  const textureControls = isSurface ? `
+    <div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Texture</span></div>
+    <div class="prop-row"><span class="prop-key">Image</span><div class="prop-controls" style="gap:4px">
+      <button id="prop-tex-upload" type="button" style="font-size:10px;padding:2px 8px;cursor:pointer">📁 Upload</button>
+      <input id="prop-tex-file" type="file" accept="image/*" style="display:none"/>
+      ${hasTexture ? `<button id="prop-tex-remove" type="button" style="font-size:10px;padding:2px 8px;cursor:pointer;color:#f44">✕ Remove</button>` : ''}
+    </div></div>
+    ${hasTexture ? `<div class="prop-row"><span class="prop-key">Preview</span><div class="prop-controls"><img id="prop-tex-preview" src="${texCfg.imageData.substring(0, 100000)}" style="max-width:80px;max-height:60px;border-radius:3px;border:1px solid var(--border);image-rendering:auto"/></div></div>
+    <div class="prop-row"><span class="prop-key">Repeat</span><div class="prop-controls"><label style="font-size:9px;color:var(--muted)">X</label><input id="prop-tex-repeat-x" type="number" step="0.1" value="${r3(texCfg.repeatX, 2)}" style="width:52px"/><label style="font-size:9px;color:var(--muted)">Y</label><input id="prop-tex-repeat-y" type="number" step="0.1" value="${r3(texCfg.repeatY, 2)}" style="width:52px"/></div></div>
+    <div class="prop-row"><span class="prop-key">Offset</span><div class="prop-controls"><label style="font-size:9px;color:var(--muted)">X</label><input id="prop-tex-offset-x" type="number" step="0.01" value="${r3(texCfg.offsetX, 2)}" style="width:52px"/><label style="font-size:9px;color:var(--muted)">Y</label><input id="prop-tex-offset-y" type="number" step="0.01" value="${r3(texCfg.offsetY, 2)}" style="width:52px"/></div></div>
+    <div class="prop-row"><span class="prop-key">Rotate°</span><div class="prop-controls"><input id="prop-tex-rotation" type="number" step="1" value="${r3(texCfg.rotation, 1)}" style="width:64px"/></div></div>
+    <div class="prop-row"><span class="prop-key">Wrap</span><div class="prop-controls"><label style="font-size:9px;color:var(--muted)">S</label><select id="prop-tex-wrap-s" style="font-size:10px;padding:2px"><option value="repeat" ${texCfg.wrapS === 'repeat' ? 'selected' : ''}>Repeat</option><option value="clamp" ${texCfg.wrapS === 'clamp' ? 'selected' : ''}>Clamp</option><option value="mirror" ${texCfg.wrapS === 'mirror' ? 'selected' : ''}>Mirror</option></select><label style="font-size:9px;color:var(--muted)">T</label><select id="prop-tex-wrap-t" style="font-size:10px;padding:2px"><option value="repeat" ${texCfg.wrapT === 'repeat' ? 'selected' : ''}>Repeat</option><option value="clamp" ${texCfg.wrapT === 'clamp' ? 'selected' : ''}>Clamp</option><option value="mirror" ${texCfg.wrapT === 'mirror' ? 'selected' : ''}>Mirror</option></select></div></div>
+    <div class="prop-row"><span class="prop-key">Flip Y</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-tex-flip-y" type="checkbox" ${texCfg.flipY ? 'checked' : ''}/></label></div></div>` : ''}
+  ` : '';
+
   const tractionToggle = `<div class="prop-row"><span class="prop-key" title="When enabled, the player moves with this object (like standing on a moving platform)">Moving Platform</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-traction-toggle" type="checkbox" ${m.userData.traction ? 'checked' : ''}/> Carry player</label></div></div>`;
   const staticToggle = `<div class="prop-row"><span class="prop-key" title="Static objects skip per-frame matrix updates (better FPS for scenery)">Static</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-static-toggle" type="checkbox" ${m.userData._isStatic ? 'checked' : ''}/> Freeze transforms</label></div></div>`;
   const gameVisibleToggle = `<div class="prop-row"><span class="prop-key">In-Game</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-game-visible" type="checkbox" ${!m.userData.hiddenInGame ? 'checked' : ''}/> Visible</label></div></div>`;
@@ -21351,7 +21955,7 @@ function refreshProps() {
   // Screen/media controls
   const isScreen = m.userData.type === 'screen';
   const screenConfig = isScreen ? normalizeScreenConfig(m.userData.screenConfig) : null;
-  const _screenMediaOpts = [['color','Solid Color'],['image','Image'],['video','Video'],['url','Website URL'],['html','HTML']];
+  const _screenMediaOpts = [['color','Solid Color'],['image','Image'],['video','Video'],['url','Website URL'],['html','HTML'],['camera','Camera Feed']];
   const screenControls = isScreen
     ? `<div class="prop-row"><span class="prop-key">Media</span><div class="prop-controls"><select id="prop-screen-type" style="font-size:10px">${_screenMediaOpts.map(([v,l]) => `<option value="${v}" ${screenConfig.mediaType === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>` +
       `<div class="prop-row"><span class="prop-key">Interact</span><div class="prop-controls"><label style="font-size:10px;cursor:pointer"><input id="prop-screen-interactive" type="checkbox" ${screenConfig.interactive ? 'checked' : ''}/> Clickable in-game</label></div></div>` +
@@ -21359,7 +21963,8 @@ function refreshProps() {
       (screenConfig.mediaType === 'image' ? `<div class="prop-row"><span class="prop-key">Image</span><div class="prop-controls"><button id="prop-screen-upload" style="font-size:9px;padding:2px 6px">Upload Image</button><input id="prop-screen-file" type="file" accept="image/*" style="display:none"/></div></div>` : '') +
       (screenConfig.mediaType === 'video' ? `<div class="prop-row"><span class="prop-key">Video</span><div class="prop-controls"><button id="prop-screen-video-upload" style="font-size:9px;padding:2px 6px">Upload Video</button><input id="prop-screen-video-file" type="file" accept="video/*" style="display:none"/></div></div>` : '') +
       (screenConfig.mediaType === 'url' ? `<div class="prop-row"><span class="prop-key">URL</span><div class="prop-controls"><input id="prop-screen-url" type="text" value="${escapeHtml(screenConfig.url)}" placeholder="https://example.com" style="width:160px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px"/></div></div>` : '') +
-      (screenConfig.mediaType === 'html' ? `<div class="prop-row"><span class="prop-key">HTML</span><div class="prop-controls"><textarea id="prop-screen-html" rows="4" style="width:170px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:3px 5px;font-size:10px;font-family:monospace;resize:vertical" placeholder="&lt;h1&gt;Hello&lt;/h1&gt;">${escapeHtml(screenConfig.htmlContent)}</textarea></div></div><div class="prop-row"><div class="prop-controls"><button id="prop-screen-html-upload" style="font-size:9px;padding:2px 6px">Upload HTML File</button><input id="prop-screen-html-file" type="file" accept=".html,.htm" style="display:none"/></div></div>` : '')
+      (screenConfig.mediaType === 'html' ? `<div class="prop-row"><span class="prop-key">HTML</span><div class="prop-controls"><textarea id="prop-screen-html" rows="4" style="width:170px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:3px 5px;font-size:10px;font-family:monospace;resize:vertical" placeholder="&lt;h1&gt;Hello&lt;/h1&gt;">${escapeHtml(screenConfig.htmlContent)}</textarea></div></div><div class="prop-row"><div class="prop-controls"><button id="prop-screen-html-upload" style="font-size:9px;padding:2px 6px">Upload HTML File</button><input id="prop-screen-html-file" type="file" accept=".html,.htm" style="display:none"/></div></div>` : '') +
+      (screenConfig.mediaType === 'camera' ? `<div class="prop-row"><span class="prop-key">Camera</span><div class="prop-controls"><input id="prop-screen-camera-label" type="text" list="prop-screen-camera-list" value="${escapeHtml(screenConfig.cameraLabel)}" placeholder="camera label" style="width:118px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px;font-family:inherit"/><datalist id="prop-screen-camera-list">${sceneObjects.filter(o => o.userData.type === 'camera').map(o => `<option value="${escapeHtml(o.userData.label || o.name)}"/>`).join('')}</datalist><span style="color:var(--muted);font-size:9px">camera label</span></div></div>` : '')
     : '';
 
   // Camera controls
@@ -21457,6 +22062,20 @@ function refreshProps() {
       `<div class="prop-row"><span class="prop-key">Idle Anim</span><div class="prop-controls"><label style="font-size:10px;cursor:pointer"><input id="prop-npc-idle-anim" type="checkbox" ${npcConfig.idleAnimation ? 'checked' : ''}/> Breathing / sway</label></div></div>` +
       `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Dialogue</span><span style="font-size:9px;color:var(--muted);margin-left:auto">${npcConfig.dialogueLines.length} line${npcConfig.dialogueLines.length !== 1 ? 's' : ''}</span></div>` +
       `<div class="prop-row"><div class="prop-controls" style="width:100%"><textarea id="prop-npc-dialogue" rows="6" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:4px 6px;font-size:11px;font-family:inherit;resize:vertical;line-height:1.4" placeholder="One line per dialogue message&#10;Player presses E to advance&#10;Last line closes the dialogue">${escapeHtml(npcConfig.dialogueLines.join('\n'))}</textarea></div></div>`
+    : '';
+
+  // Command Block controls
+  const isCommandBlock = m.userData.type === 'commandBlock';
+  const commandBlockConfig = isCommandBlock ? normalizeCommandBlockConfig(m.userData.commandBlockConfig) : null;
+  const _allCmdNames = (isCommandBlock && window._flame3dConsole && window._flame3dConsole.commands) ? Object.keys(window._flame3dConsole.commands).sort() : [];
+  const commandBlockControls = isCommandBlock
+    ? `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">⌨ Available Commands</span></div>` +
+      `<div style="max-height:200px;overflow-y:auto;margin:0 11px 4px 11px">` +
+      _allCmdNames.map(cmd => {
+        const disabled = commandBlockConfig.disabledCommands.includes(cmd);
+        return `<div class="prop-row" style="padding:1px 0"><div class="prop-controls"><label style="font-size:10px;cursor:pointer;display:flex;align-items:center;gap:4px"><input class="cmd-block-toggle" type="checkbox" data-cmd="${escapeHtml(cmd)}" ${!disabled ? 'checked' : ''}/> <code style="font-size:10px;color:${disabled ? 'var(--muted)' : '#58a6ff'}">${escapeHtml(cmd)}</code></label></div></div>`;
+      }).join('') +
+      `</div>`
     : '';
 
   // Target health
@@ -21627,6 +22246,7 @@ function refreshProps() {
         ${shapeControls}
         ${opacityControls}
         ${reflectControls}
+        ${textureControls}
         ${emitToggle}
         ${lightControls}
       </div>
@@ -21640,9 +22260,10 @@ function refreshProps() {
         ${staticToggle}
         ${collisionControls}
         ${gameVisibleToggle}
+        ${visibleInPlayHtml}
       </div>
     </div>
-    ${(pathControls || switchControls || switchRangeControls || keypadControls || checkpointControls || targetControls || triggerRulesHtml || jointControls || skeletonControls || npcControls) ? `<div class="props-category">
+    ${(pathControls || switchControls || switchRangeControls || keypadControls || checkpointControls || targetControls || triggerRulesHtml || jointControls || skeletonControls || npcControls || commandBlockControls) ? `<div class="props-category">
       <div class="props-cat-hdr" data-cat="behavior">▾ Behavior</div>
       <div class="props-cat-body" data-cat="behavior">
         ${pathControls}
@@ -21656,6 +22277,7 @@ function refreshProps() {
         ${jointControls}
         ${skeletonControls}
         ${npcControls}
+        ${commandBlockControls}
       </div>
     </div>` : ''}
     ${(textControls || screenControls || cameraControls) ? `<div class="props-category">
@@ -21707,11 +22329,15 @@ function refreshProps() {
   });
 
   bindSurfaceProps(m);
+  if (typeof bindShapeSelectProps === 'function') bindShapeSelectProps(m);
+  if (typeof bindTubeRadiusProps === 'function') bindTubeRadiusProps(m);
+  if (typeof bindVisibleInPlayProps === 'function') bindVisibleInPlayProps(m);
   bindShapeParamProps(m);
   bindSolidToggle(m);
   bindSolidnessProps(m);
   bindOpacityProps(m);
   bindReflectProps(m);
+  if (isSurface) bindTextureProps(m);
   bindTractionToggle(m);
   bindStaticToggle(m);
   bindGameVisibleToggle(m);
@@ -21736,6 +22362,7 @@ function refreshProps() {
   if (isScreen) bindScreenProps(m);
   if (isCamera) bindCameraProps(m);
   if (isNpc) bindNpcProps(m);
+  if (isCommandBlock) bindCommandBlockProps(m);
   refreshSelectedPathPreview();
 }
 
@@ -22204,1095 +22831,857 @@ document.addEventListener('mousedown', (e) => {
   });
 }
 
-// ─── Blueprint Graph System ──────────────────────────────────────────────────
-const _bpGraph = {
-  panX: 0, panY: 0, zoom: 1,
-  selectedFnIdx: -1,   // which control function is being viewed
-  selectedNodeId: null, // which node within that function is selected
-  dragging: null,       // { nid, startX, startY, origGX, origGY }
-  panning: false,
-  panStart: null,
-  nodeW: 180,
-  wiring: null,         // { fromNodeId, fromPin, startX, startY, mx, my }
-  detailedMode: false,
-};
-const _bpGraphEl     = document.getElementById('bp-graph');
-const _bpGraphNodesEl = document.getElementById('bp-graph-nodes');
-const _bpGraphSvg    = document.getElementById('bp-graph-svg');
-const _bpDetailEl    = document.getElementById('bp-detail');
-const _bpDetailTitle = document.getElementById('bp-detail-title');
-const _bpDetailResizer = document.getElementById('bp-detail-resizer');
-const _bpGraphFitBtn = document.getElementById('bp-graph-fit');
-const _bpDetailToggleBtn = document.getElementById('bp-detail-toggle');
+// ─── Function Editor State ───────────────────────────────────────────────────
+// ─── Control functions UI (project-level function editor) ────────────────────
 
-// ── Auto-layout for nodes without saved positions ────────────────────────────
-function _bpAutoLayout(fn) {
-  if (!fn || !Array.isArray(fn.nodes)) return;
-  const cols = 3, padX = 220, padY = 120;
-  let idx = 0;
-  fn.nodes.forEach(n => {
-    if (!Number.isFinite(n.graphX) || !Number.isFinite(n.graphY)) {
-      n.graphX = 30 + (idx % cols) * padX;
-      n.graphY = 30 + Math.floor(idx / cols) * padY;
-    }
-    idx++;
-  });
-}
-
-// ── Action-type color map ────────────────────────────────────────────────────
-const _bpPinColors = {
-  move: '#3fb950', rotate: '#d29922', scale: '#58a6ff', light: '#f0e060', audio: '#a371f7',
-  path: '#79c0ff', functionControl: '#f78166', playerGroup: '#56d4dd',
-  setVar: '#ff7b72', setBool: '#d2a8ff', playerStats: '#ffa657',
-  teleport: '#7ee787', skeleton: '#e0e0e0',
-};
-
-// Node-type header colors
-const _bpNodeTypeColors = {
-  target:    { bg: 'linear-gradient(135deg, #0d4a3a, #0a3a2c)', icon: '🎯', label: 'Target' },
-  condition: { bg: 'linear-gradient(135deg, #5c4a0a, #44380a)', icon: '◆',  label: 'Condition' },
-  action:    { bg: 'linear-gradient(135deg, #1a3a5c, #162a44)', icon: '⚡', label: 'Action' },
-};
-
-// ── Lightweight transform update (perf: no innerHTML rebuild) ────────────────
-function _bpUpdateTransform() {
-  if (!_bpGraphEl || !_bpGraphNodesEl) return;
-  const z = _bpGraph.zoom;
-  const px = _bpGraph.panX;
-  const py = _bpGraph.panY;
-
-  // Update grid background to follow pan/zoom
-  const majorSz = 100 * z;
-  const minorSz = 20 * z;
-  _bpGraphEl.style.backgroundSize = `${majorSz}px ${majorSz}px, ${majorSz}px ${majorSz}px, ${minorSz}px ${minorSz}px, ${minorSz}px ${minorSz}px`;
-  _bpGraphEl.style.backgroundPosition = `${px - 1}px ${py - 1}px, ${px - 1}px ${py - 1}px, ${px - 1}px ${py - 1}px, ${px - 1}px ${py - 1}px`;
-
-  // Move each node div by updating left/top (positions are set per-node)
-  const fn = controlFunctions[_bpGraph.selectedFnIdx];
-  if (!fn || !Array.isArray(fn.nodes)) return;
-  const nodeEls = _bpGraphNodesEl.querySelectorAll('.bp-gnode');
-  nodeEls.forEach(el => {
-    const nid = el.dataset.nid;
-    const node = fn.nodes.find(n => n.id === nid);
-    if (!node) return;
-    const x = node.graphX * z + px;
-    const y = node.graphY * z + py;
-    const w = _bpGraph.nodeW * z;
-    el.style.left = x + 'px';
-    el.style.top = y + 'px';
-    el.style.width = w + 'px';
-  });
-
-  _bpDrawWires();
-}
-
-// ── Render graph nodes (full rebuild) ────────────────────────────────────────
-function refreshBpGraph() {
-  if (!_bpGraphNodesEl) return;
-
-  // Determine which function is being viewed
-  const fnIdx = _bpGraph.selectedFnIdx ?? -1;
-  const fn = controlFunctions[fnIdx];
-
-  if (!fn || !Array.isArray(fn.nodes)) {
-    _bpGraphNodesEl.innerHTML = '<div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:11px;color:#444d56;pointer-events:none;text-align:center">Select a function from the list<br>or add one with + Fn</div>';
-    if (_bpGraphSvg) _bpGraphSvg.innerHTML = '';
-    return;
+/* ── Badge helper ─── */
+function _cfnBadgePills(actions) {
+  const counts = {};
+  for (const a of actions) {
+    const t = a.actionType || 'move';
+    counts[t] = (counts[t] || 0) + 1;
   }
-
-  _bpAutoLayout(fn);
-  const z = _bpGraph.zoom;
-  const px = _bpGraph.panX;
-  const py = _bpGraph.panY;
-
-  let html = '';
-  fn.nodes.forEach(node => {
-    const x = node.graphX * z + px;
-    const y = node.graphY * z + py;
-    const w = _bpGraph.nodeW * z;
-    const sel = node.id === _bpGraph.selectedNodeId ? ' selected' : '';
-    const typeInfo = _bpNodeTypeColors[node.type] || _bpNodeTypeColors.action;
-
-    // Build node content based on type
-    let bodyHtml = '';
-    let headerTitle = '';
-    let headerClass = `bp-gnode-hdr bp-gnode-hdr-${node.type}`;
-    const dm = _bpGraph.detailedMode;
-    const detailStyle = 'padding:1px 6px;font-size:7px;color:rgba(255,255,255,0.45);line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-
-    if (node.type === 'target') {
-      headerTitle = `${node.refType === 'name' ? '📛' : '👥'} ${escapeHtml(node.refValue || '(no target)')}`;
-      let detailHtml = '';
-      if (dm) {
-        detailHtml = `<div style="${detailStyle};border-bottom:1px solid rgba(255,255,255,0.06)">Type: ${node.refType}</div>`;
-      }
-      bodyHtml = detailHtml + `<div class="bp-gnode-pin" style="justify-content:flex-end">
-        <span class="bp-gnode-pin-label">out</span>
-        <span class="bp-gnode-pin-dot bp-gnode-pin-out-dot" data-nid="${node.id}" data-pin="out" style="background:#58a6ff;border-color:#58a6ff;cursor:crosshair"></span>
-      </div>`;
-    } else if (node.type === 'condition') {
-      const condTypes = (node.conditions || []).map(c => c.type).filter(t => t !== 'none');
-      const condLabel = condTypes.length ? condTypes.join(` ${node.conditionLogic || 'and'} `) : 'always';
-      headerTitle = `◆ ${condLabel}`;
-      let detailHtml = '';
-      if (dm) {
-        const condLines = (node.conditions || []).map(c => {
-          if (c.type === 'none') return null;
-          if (c.type === 'timer') return `${c.negate ? '!' : ''}timer \u2265 ${c.timerSeconds ?? 0}s`;
-          if (c.type === 'key') return `${c.negate ? '!' : ''}key: ${c.keyCode || '?'}`;
-          if (c.type === 'fnDone') return `${c.negate ? '!' : ''}fn done: ${c.ref || '?'}`;
-          if (c.type === 'touching') return `${c.negate ? '!' : ''}touching: ${c.touchRef || '?'}`;
-          if (c.type === 'touchingPlayer') return `${c.negate ? '!' : ''}touching player`;
-          if (c.type === 'grounded') return `${c.negate ? '!' : ''}grounded`;
-          if (c.type === 'varCmp') return `${c.negate ? '!' : ''}${c.varCmpName || '?'} ${c.varCmpOp || '='} ${c.varCmpValue ?? 0}`;
-          if (c.type === 'bool') return `${c.negate ? '!' : ''}bool: ${c.boolName || '?'}`;
-          if (c.type === 'position') return `${c.negate ? '!' : ''}${c.posSubject || 'player'}.${c.posAxis || 'y'} ${c.posOp || '>'} ${c.posValue ?? 0}`;
-          if (c.type === 'distance') return `${c.negate ? '!' : ''}dist ${c.distTarget || '?'} ${c.distOp || '<'} ${c.distValue ?? 0}`;
-          return c.type;
-        }).filter(Boolean);
-        if (condLines.length) {
-          detailHtml = condLines.map(l => `<div style="${detailStyle}">\u2022 ${escapeHtml(l)}</div>`).join('');
-          if (condLines.length > 1) detailHtml += `<div style="${detailStyle}">logic: ${node.conditionLogic || 'and'}</div>`;
-          detailHtml += `<div style="border-bottom:1px solid rgba(255,255,255,0.06)"></div>`;
-        }
-      }
-      bodyHtml = `<div class="bp-gnode-pin">
-        <span class="bp-gnode-pin-dot bp-gnode-pin-in-dot" data-nid="${node.id}" data-pin="in" style="background:#d29922;border-color:#d29922;cursor:crosshair"></span>
-        <span class="bp-gnode-pin-label">in</span>
-      </div>` + detailHtml + `
-      <div class="bp-gnode-pin" style="justify-content:flex-end">
-        <span class="bp-gnode-pin-label">out</span>
-        <span class="bp-gnode-pin-dot bp-gnode-pin-out-dot" data-nid="${node.id}" data-pin="out" style="background:#d29922;border-color:#d29922;cursor:crosshair"></span>
-      </div>`;
-    } else if (node.type === 'action') {
-      const actions = node.actions || [];
-      const actionTypes = [...new Set(actions.map(a => a.actionType))];
-      headerTitle = `⚡ ${actionTypes.length ? actionTypes.join(', ') : 'empty'}`;
-
-      let pinsHtml = `<div class="bp-gnode-pin">
-        <span class="bp-gnode-pin-dot bp-gnode-pin-in-dot" data-nid="${node.id}" data-pin="in" style="background:#58a6ff;border-color:#58a6ff;cursor:crosshair"></span>
-        <span class="bp-gnode-pin-label">in</span>
-      </div>`;
-      // Show action type pins
-      actionTypes.forEach(at => {
-        const color = _bpPinColors[at] || '#888';
-        const label = at === 'functionControl' ? 'fn ctrl' : at === 'playerGroup' ? 'p.group' : at === 'playerStats' ? 'p.stats' : at === 'setBool' ? 'bool' : at === 'setVar' ? 'var' : at;
-        pinsHtml += `<div class="bp-gnode-pin"><span class="bp-gnode-pin-dot" style="background:${color};border-color:${color}"></span><span class="bp-gnode-pin-label">${label}</span></div>`;
-      });
-      if (dm) {
-        pinsHtml += `<div style="border-top:1px solid rgba(255,255,255,0.06)"></div>`;
-        actions.forEach(a => {
-          const target = a.refValue ? ` \u2192 ${escapeHtml(a.refValue)}` : '';
-          const dur = a.duration ? ` (${a.duration}s)` : '';
-          const color = _bpPinColors[a.actionType] || '#888';
-          pinsHtml += `<div style="${detailStyle}"><span style="color:${color}">\u2022</span> ${escapeHtml(a.actionType)}${target}${dur}</div>`;
-        });
-      }
-      pinsHtml += `<div class="bp-gnode-pin" style="justify-content:flex-end">
-        <span class="bp-gnode-pin-label">then</span>
-        <span class="bp-gnode-pin-dot bp-gnode-pin-out-dot" data-nid="${node.id}" data-pin="out" style="background:#58a6ff;border-color:#58a6ff;cursor:crosshair"></span>
-      </div>`;
-      bodyHtml = pinsHtml;
-    }
-
-    html += `<div class="bp-gnode${sel}" data-nid="${node.id}" data-type="${node.type}"
-      style="left:${x}px;top:${y}px;width:${w}px;transform-origin:0 0">
-      <div class="${headerClass}" data-nid="${node.id}">
-        <span class="bp-gnode-title">${headerTitle}</span>
-        ${node.label ? `<span style="font-size:7px;color:rgba(255,255,255,0.5);display:block;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(node.label)}</span>` : ''}
-      </div>
-      <div class="bp-gnode-body">${bodyHtml}</div>
-    </div>`;
-  });
-
-  _bpGraphNodesEl.innerHTML = html;
-  _bpUpdateTransform();
-}
-
-// ── Draw SVG wires between connected nodes ───────────────────────────────────
-function _bpDrawWires() {
-  if (!_bpGraphSvg) return;
-  const fnIdx = _bpGraph.selectedFnIdx ?? -1;
-  const fn = controlFunctions[fnIdx];
-  if (!fn || !Array.isArray(fn.connections)) { _bpGraphSvg.innerHTML = ''; return; }
-
-  let paths = '';
-  const z = _bpGraph.zoom;
-  const px = _bpGraph.panX;
-  const py = _bpGraph.panY;
-  const nw = _bpGraph.nodeW * z;
-
-  fn.connections.forEach(conn => {
-    const fromNode = fn.nodes.find(n => n.id === conn.from);
-    const toNode = fn.nodes.find(n => n.id === conn.to);
-    if (!fromNode || !toNode) return;
-
-    // Source: right edge of from-node, vertically at bottom area
-    const fromH = _bpEstimateNodeHeight(fromNode) * z;
-    const sx = fromNode.graphX * z + px + nw;
-    const sy = fromNode.graphY * z + py + fromH - 10 * z;
-    // Target: left edge of to-node, vertically at top pin area
-    const tx = toNode.graphX * z + px;
-    const ty = toNode.graphY * z + py + (toNode.type === 'target' ? 14 : 30) * z;
-    // Bezier control points
-    const dx = Math.max(40, Math.abs(tx - sx) * 0.4);
-    // Arrow color based on connection type
-    const color = toNode.type === 'condition' ? '#d29922' : '#58a6ff';
-    paths += `<path d="M${sx},${sy} C${sx + dx},${sy} ${tx - dx},${ty} ${tx},${ty}"
-      fill="none" stroke="${color}" stroke-width="${2 * z}" stroke-opacity="0.6"
-      data-from="${conn.from}" data-to="${conn.to}" class="bp-wire"/>`;
-    // Arrow head
-    const arrowSize = 5 * z;
-    paths += `<polygon points="${tx},${ty} ${tx - arrowSize},${ty - arrowSize * 0.6} ${tx - arrowSize},${ty + arrowSize * 0.6}"
-      fill="${color}" fill-opacity="0.6"/>`;
-  });
-
-  // Preview wire during drag-to-connect
-  if (_bpGraph.wiring && _bpGraph.wiring.mx != null) {
-    const w = _bpGraph.wiring;
-    const dx = Math.max(40, Math.abs(w.mx - w.startX) * 0.4);
-    paths += `<path d="M${w.startX},${w.startY} C${w.startX + dx},${w.startY} ${w.mx - dx},${w.my} ${w.mx},${w.my}"
-      fill="none" stroke="#fff" stroke-width="${2 * z}" stroke-opacity="0.4" stroke-dasharray="6,4"/>`;
-  }
-
-  _bpGraphSvg.innerHTML = paths;
-}
-
-// Estimate node height in unscaled pixels for wire endpoint calc
-function _bpEstimateNodeHeight(node) {
-  const dm = _bpGraph.detailedMode;
-  if (node.type === 'target') return dm ? 62 : 48;
-  if (node.type === 'condition') {
-    if (!dm) return 58;
-    const condCount = (node.conditions || []).filter(c => c.type !== 'none').length;
-    return 58 + condCount * 14 + (condCount > 1 ? 14 : 0);
-  }
-  const distinctTypes = [...new Set((node.actions || []).map(a => a.actionType))].length;
-  const base = 48 + Math.max(0, distinctTypes) * 18;
-  if (!dm) return base;
-  return base + (node.actions || []).length * 14;
-}
-
-// ── Graph interaction: pan, zoom, drag nodes, select, wire ───────────────────
-if (_bpGraphEl) {
-  _bpGraphEl.addEventListener('mousedown', e => {
-    // Check if clicking on a pin dot (drag-to-connect)
-    const pinDot = e.target.closest('.bp-gnode-pin-out-dot');
-    if (pinDot) {
-      const nid = pinDot.dataset.nid;
-      const rect = pinDot.getBoundingClientRect();
-      const graphRect = _bpGraphEl.getBoundingClientRect();
-      _bpGraph.wiring = {
-        fromNodeId: nid,
-        fromPin: 'out',
-        startX: rect.left - graphRect.left + rect.width / 2,
-        startY: rect.top - graphRect.top + rect.height / 2,
-        mx: null, my: null,
-      };
-      e.preventDefault();
-      e.stopPropagation();
-      return;
-    }
-
-    // Check if clicking on a node
-    const nodeEl = e.target.closest('.bp-gnode');
-    if (nodeEl) {
-      const nid = nodeEl.dataset.nid;
-      _bpGraph.selectedNodeId = nid;
-      refreshBpGraph();
-      _bpRefreshDetail();
-      // Start drag if on header
-      if (e.target.closest('.bp-gnode-hdr')) {
-        const fnIdx = _bpGraph.selectedFnIdx ?? -1;
-        const fn = controlFunctions[fnIdx];
-        const node = fn?.nodes?.find(n => n.id === nid);
-        if (node) {
-          _bpGraph.dragging = {
-            nid,
-            startX: e.clientX, startY: e.clientY,
-            origGX: node.graphX, origGY: node.graphY,
-          };
-        }
-      }
-      e.preventDefault();
-      return;
-    }
-    // Deselect on background click
-    _bpGraph.selectedNodeId = null;
-    _bpRefreshDetail();
-    // Start panning
-    _bpGraph.panning = true;
-    _bpGraph.panStart = { x: e.clientX, y: e.clientY, px: _bpGraph.panX, py: _bpGraph.panY };
-    e.preventDefault();
-  });
-
-  window.addEventListener('mousemove', e => {
-    // Drag-to-connect wire preview
-    if (_bpGraph.wiring) {
-      const graphRect = _bpGraphEl.getBoundingClientRect();
-      _bpGraph.wiring.mx = e.clientX - graphRect.left;
-      _bpGraph.wiring.my = e.clientY - graphRect.top;
-      _bpDrawWires();
-      return;
-    }
-    if (_bpGraph.dragging) {
-      const d = _bpGraph.dragging;
-      const dx = (e.clientX - d.startX) / _bpGraph.zoom;
-      const dy = (e.clientY - d.startY) / _bpGraph.zoom;
-      const fnIdx = _bpGraph.selectedFnIdx ?? -1;
-      const fn = controlFunctions[fnIdx];
-      const node = fn?.nodes?.find(n => n.id === d.nid);
-      if (node) {
-        node.graphX = d.origGX + dx;
-        node.graphY = d.origGY + dy;
-        _bpUpdateTransform(); // Perf: lightweight, no innerHTML rebuild
-      }
-    } else if (_bpGraph.panning && _bpGraph.panStart) {
-      const ps = _bpGraph.panStart;
-      _bpGraph.panX = ps.px + (e.clientX - ps.x);
-      _bpGraph.panY = ps.py + (e.clientY - ps.y);
-      _bpUpdateTransform(); // Perf: lightweight, no innerHTML rebuild
-    }
-  });
-
-  window.addEventListener('mouseup', e => {
-    // Complete drag-to-connect
-    if (_bpGraph.wiring) {
-      const pinDot = e.target.closest('.bp-gnode-pin-in-dot');
-      if (pinDot) {
-        const toNid = pinDot.dataset.nid;
-        const fromNid = _bpGraph.wiring.fromNodeId;
-        if (fromNid !== toNid) {
-          const fnIdx = _bpGraph.selectedFnIdx ?? -1;
-          const fn = controlFunctions[fnIdx];
-          if (fn && Array.isArray(fn.connections)) {
-            // Avoid duplicate connections
-            const exists = fn.connections.some(c => c.from === fromNid && c.to === toNid);
-            if (!exists) {
-              fn.connections.push({ from: fromNid, to: toNid });
-              refreshBpGraph();
-            }
-          }
-        }
-      }
-      _bpGraph.wiring = null;
-      _bpDrawWires();
-      return;
-    }
-    _bpGraph.dragging = null;
-    _bpGraph.panning = false;
-    _bpGraph.panStart = null;
-  });
-
-  // Zoom: mouse wheel
-  _bpGraphEl.addEventListener('wheel', e => {
-    e.preventDefault();
-    const rect = _bpGraphEl.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    const oldZoom = _bpGraph.zoom;
-    const factor = e.deltaY < 0 ? 1.1 : 0.9;
-    _bpGraph.zoom = Math.max(0.25, Math.min(3, oldZoom * factor));
-    _bpGraph.panX = mx - (_bpGraph.zoom / oldZoom) * (mx - _bpGraph.panX);
-    _bpGraph.panY = my - (_bpGraph.zoom / oldZoom) * (my - _bpGraph.panY);
-    _bpUpdateTransform(); // Perf: lightweight
-  }, { passive: false });
-
-  // Double-click node to open detail
-  _bpGraphEl.addEventListener('dblclick', e => {
-    const nodeEl = e.target.closest('.bp-gnode');
-    if (!nodeEl) return;
-    _bpGraph.selectedNodeId = nodeEl.dataset.nid;
-    refreshBpGraph();
-    _bpRefreshDetail();
-  });
-
-  // Delete key removes selected node
-  window.addEventListener('keydown', e => {
-    if (!_bpOverlayEl?.classList.contains('active')) return;
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
-    if (e.key === 'Delete' || e.key === 'Backspace') {
-      const nid = _bpGraph.selectedNodeId;
-      if (!nid) return;
-      const fnIdx = _bpGraph.selectedFnIdx ?? -1;
-      const fn = controlFunctions[fnIdx];
-      if (!fn || !Array.isArray(fn.nodes)) return;
-      const nodeIdx = fn.nodes.findIndex(n => n.id === nid);
-      if (nodeIdx < 0) return;
-      fn.nodes.splice(nodeIdx, 1);
-      fn.connections = fn.connections.filter(c => c.from !== nid && c.to !== nid);
-      _bpSyncFnActionsFromNodes(fn);
-      _bpGraph.selectedNodeId = null;
-      refreshBpGraph();
-      _bpRefreshDetail();
-      e.preventDefault();
-    }
-    // F key: fit all
-    if (e.key === 'f' || e.key === 'F') {
-      _bpGraphFitBtn?.click();
-      e.preventDefault();
-    }
-  });
-
-  // Right-click wire to delete connection
-  _bpGraphSvg?.addEventListener?.('contextmenu', e => {
-    e.preventDefault();
-    const wire = e.target.closest('path.bp-wire');
-    if (!wire) return;
-    const fromId = wire.dataset.from;
-    const toId = wire.dataset.to;
-    const fnIdx = _bpGraph.selectedFnIdx ?? -1;
-    const fn = controlFunctions[fnIdx];
-    if (!fn || !Array.isArray(fn.connections)) return;
-    const idx = fn.connections.findIndex(c => c.from === fromId && c.to === toId);
-    if (idx === -1) return;
-    fn.connections.splice(idx, 1);
-    _bpSyncFnActionsFromNodes(fn);
-    refreshBpGraph();
-    _bpRefreshDetail();
-  });
-  _bpGraphEl.addEventListener('contextmenu', e => {
-    e.preventDefault();
-  });
-}
-
-// ── Detail toggle ────────────────────────────────────────────────────────────
-if (_bpDetailToggleBtn) {
-  _bpDetailToggleBtn.addEventListener('click', () => {
-    _bpGraph.detailedMode = !_bpGraph.detailedMode;
-    _bpDetailToggleBtn.style.background = _bpGraph.detailedMode ? 'rgba(88,166,255,0.25)' : '';
-    refreshBpGraph();
-  });
-}
-
-// ── Fit all nodes ────────────────────────────────────────────────────────────
-if (_bpGraphFitBtn) {
-  _bpGraphFitBtn.addEventListener('click', () => {
-    const fnIdx = _bpGraph.selectedFnIdx ?? -1;
-    const fn = controlFunctions[fnIdx];
-    if (!fn || !Array.isArray(fn.nodes) || !fn.nodes.length || !_bpGraphEl) return;
-    _bpAutoLayout(fn);
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    fn.nodes.forEach(n => {
-      if (Number.isFinite(n.graphX) && Number.isFinite(n.graphY)) {
-        minX = Math.min(minX, n.graphX);
-        minY = Math.min(minY, n.graphY);
-        maxX = Math.max(maxX, n.graphX + _bpGraph.nodeW);
-        maxY = Math.max(maxY, n.graphY + 80);
-      }
-    });
-    if (!Number.isFinite(minX)) return;
-    const rect = _bpGraphEl.getBoundingClientRect();
-    const pad = 30;
-    const rangeX = maxX - minX + pad * 2;
-    const rangeY = maxY - minY + pad * 2;
-    _bpGraph.zoom = Math.min(1.5, Math.max(0.25, Math.min(rect.width / rangeX, rect.height / rangeY)));
-    _bpGraph.panX = (rect.width - rangeX * _bpGraph.zoom) / 2 - (minX - pad) * _bpGraph.zoom;
-    _bpGraph.panY = (rect.height - rangeY * _bpGraph.zoom) / 2 - (minY - pad) * _bpGraph.zoom;
-    refreshBpGraph();
-  });
-}
-
-// ── Detail panel resizer ─────────────────────────────────────────────────────
-if (_bpDetailResizer && _bpDetailEl) {
-  let _detailResizing = false;
-  _bpDetailResizer.addEventListener('mousedown', e => {
-    _detailResizing = true;
-    e.preventDefault();
-  });
-  window.addEventListener('mousemove', e => {
-    if (!_detailResizing) return;
-    const parentRect = _bpDetailEl.parentElement.getBoundingClientRect();
-    const newH = parentRect.bottom - e.clientY;
-    _bpDetailEl.style.height = Math.max(80, Math.min(parentRect.height * 0.7, newH)) + 'px';
-  });
-  window.addEventListener('mouseup', () => { _detailResizing = false; });
-}
-
-// ── Node detail helpers ──────────────────────────────────────────────────────
-function _bpRenderTargetNodeDetail(node) {
-  const moveOpts = getMoveTargetOptions(node.refType, node.refValue);
-  return `<div style="padding:8px">
-    <div style="font-size:10px;font-weight:700;color:#4fc3f7;margin-bottom:6px">🎯 Target Node</div>
-    <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px">
-      <span style="font-size:9px;color:var(--muted);min-width:42px">Type</span>
-      <select class="nd-target-reftype" style="font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px">
-        <option value="group" ${node.refType === 'group' ? 'selected' : ''}>group</option>
-        <option value="name" ${node.refType === 'name' ? 'selected' : ''}>name</option>
-      </select>
-    </div>
-    <div style="display:flex;align-items:center;gap:4px">
-      <span style="font-size:9px;color:var(--muted);min-width:42px">Value</span>
-      <input class="nd-target-refval" list="nd-target-opts" type="text" value="${escapeHtml(node.refValue)}" placeholder="${node.refType === 'name' ? 'object name' : 'group name'}" style="flex:1;font-size:9px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>
-      <datalist id="nd-target-opts">${moveOpts}</datalist>
-    </div>
-  </div>`;
-}
-
-function _bpRenderConditionNodeDetail(node) {
-  const conditions = node.conditions || [normalizeCondition({})];
-  const logic = node.conditionLogic || 'and';
-  const labelOpts = renderDatalistOptions(getKnownLabels());
-  const groupOpts = renderDatalistOptions(getKnownGroups());
-  const varOpts = renderDatalistOptions(getKnownVarNames());
-  const boolOpts = renderDatalistOptions(getKnownBoolNames());
-  const fnOpts = renderDatalistOptions(getKnownControlFunctionNames());
-  const logicToggle = conditions.length > 1
-    ? `<select class="nd-cond-logic" style="font-size:9px;padding:1px 3px;font-weight:700;color:var(--accentHi)"><option value="and" ${logic==='and'?'selected':''}>ALL (AND)</option><option value="or" ${logic==='or'?'selected':''}>ANY (OR)</option></select>`
-    : '';
-  const condRows = conditions.map((rawCond, di) => {
-    const cond = normalizeCondition(rawCond);
-    const condTypeOpts = CONDITION_TYPES.map(t => {
-      const labels = {none:'always',fnDone:'fn done',touching:'touch ref',touchingPlayer:'touching player',position:'position',distance:'distance',timer:'timer',key:'key held',grounded:'grounded',varCmp:'variable',bool:'boolean'};
-      return `<option value="${t}" ${cond.type === t ? 'selected' : ''}>${labels[t]}</option>`;
-    }).join('');
-    let condFields = '';
-    const dc = `data-cond-index="${di}"`;
-    switch (cond.type) {
-      case 'fnDone':
-        condFields = `<input class="nd-cond-ref" ${dc} list="nd-cond-fn-opts" type="text" value="${escapeHtml(cond.ref)}" placeholder="fn name" style="width:68px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>`;
-        break;
-      case 'touching':
-        condFields = `<select class="nd-cond-touch-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="group" ${cond.touchRefType==='group'?'selected':''}>grp</option><option value="name" ${cond.touchRefType==='name'?'selected':''}>name</option></select><input class="nd-cond-touch-ref" ${dc} list="nd-cond-${cond.touchRefType === 'name' ? 'label' : 'group'}-opts-${di}" type="text" value="${escapeHtml(cond.touchRef)}" placeholder="target" style="width:60px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="nd-cond-label-opts-${di}">${labelOpts}</datalist><datalist id="nd-cond-group-opts-${di}">${groupOpts}</datalist>`;
-        break;
-      case 'position':
-        condFields = `<input class="nd-cond-pos-subj" ${dc} list="nd-cond-pos-subj-opts" type="text" value="${escapeHtml(cond.posSubject)}" style="width:48px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="nd-cond-pos-subj-opts"><option value="player">${labelOpts}</datalist><select class="nd-cond-pos-axis" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_POS_AXES.map(a => `<option value="${a}" ${cond.posAxis===a?'selected':''}>.${a}</option>`).join('')}</select><select class="nd-cond-pos-op" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_OPS.map(o => `<option value="${o}" ${cond.posOp===o?'selected':''}>${escapeHtml(o)}</option>`).join('')}</select><select class="nd-cond-pos-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="digits" ${cond.posValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${cond.posValueType === 'var' ? 'selected' : ''}>var</option></select>${cond.posValueType === 'var' ? `<input class="nd-cond-pos-var" ${dc} list="nd-cond-var-opts" type="text" value="${escapeHtml(cond.posValueVar)}" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="nd-cond-pos-val" ${dc} type="number" step="0.1" value="${cond.posValue}" style="width:42px;font-size:9px;padding:1px 3px"/>`}`;
-        break;
-      case 'distance':
-        condFields = `<input class="nd-cond-dist-target" ${dc} list="nd-cond-dist-opts" type="text" value="${escapeHtml(cond.distTarget)}" placeholder="object" style="width:54px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="nd-cond-dist-opts">${labelOpts}</datalist><select class="nd-cond-dist-op" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_OPS.map(o => `<option value="${o}" ${cond.distOp===o?'selected':''}>${escapeHtml(o)}</option>`).join('')}</select><select class="nd-cond-dist-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="digits" ${cond.distValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${cond.distValueType === 'var' ? 'selected' : ''}>var</option></select>${cond.distValueType === 'var' ? `<input class="nd-cond-dist-var" ${dc} list="nd-cond-var-opts" type="text" value="${escapeHtml(cond.distValueVar)}" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="nd-cond-dist-val" ${dc} type="number" step="0.5" min="0" value="${cond.distValue}" style="width:38px;font-size:9px;padding:1px 3px"/>`}`;
-        break;
-      case 'timer':
-        condFields = `<select class="nd-cond-timer-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="digits" ${cond.timerType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${cond.timerType === 'var' ? 'selected' : ''}>var</option></select>${cond.timerType === 'var' ? `<input class="nd-cond-timer-var" ${dc} list="nd-cond-var-opts" type="text" value="${escapeHtml(cond.timerVar)}" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="nd-cond-timer" ${dc} type="number" step="0.1" min="0" value="${cond.timerSeconds}" style="width:42px;font-size:9px;padding:1px 3px"/>`}<span style="font-size:8px;color:var(--muted)">s</span>`;
-        break;
-      case 'key':
-        condFields = `<select class="nd-cond-key" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_KEY_CODES.map(k => `<option value="${k}" ${cond.keyCode===k?'selected':''}>${k.replace('Key','').replace('Digit','').replace('Left','')}</option>`).join('')}</select>`;
-        break;
-      case 'varCmp':
-        condFields = `<input class="nd-cond-var-name" ${dc} list="nd-cond-var-opts" type="text" value="${escapeHtml(cond.varCmpName)}" placeholder="var" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><select class="nd-cond-var-op" ${dc} style="font-size:9px;padding:1px 2px">${CONDITION_OPS.map(o => `<option value="${o}" ${cond.varCmpOp===o?'selected':''}>${escapeHtml(o)}</option>`).join('')}</select><select class="nd-cond-var-type" ${dc} style="font-size:9px;padding:1px 2px"><option value="digits" ${cond.varCmpValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${cond.varCmpValueType === 'var' ? 'selected' : ''}>var</option></select>${cond.varCmpValueType === 'var' ? `<input class="nd-cond-var-ref" ${dc} list="nd-cond-var-opts" type="text" value="${escapeHtml(cond.varCmpValueVar)}" placeholder="var" style="width:64px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="nd-cond-var-val" ${dc} type="number" step="1" value="${cond.varCmpValue}" style="width:42px;font-size:9px;padding:1px 3px"/>`}`;
-        break;
-      case 'bool':
-        condFields = `<input class="nd-cond-bool-name" ${dc} list="nd-cond-bool-opts" type="text" value="${escapeHtml(cond.boolName)}" placeholder="bool" style="width:68px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>`;
-        break;
-      default: condFields = '';
-    }
-    const negateCheck = cond.type !== 'none' ? `<label style="display:flex;align-items:center;gap:2px;font-size:8px;color:var(--muted);cursor:pointer" title="Negate (NOT)"><input class="nd-cond-negate" ${dc} type="checkbox" ${cond.negate ? 'checked' : ''} style="margin:0"/>!</label>` : '';
-    const delCond = conditions.length > 1 ? `<button class="ct-del nd-cond-del" ${dc} title="Remove condition" style="font-size:8px;padding:0 3px">✕</button>` : '';
-    const prefix = di === 0 ? '' : `<span style="color:var(--accentHi);font-size:7px;font-weight:700;min-width:22px;text-align:center">${logic === 'or' ? 'OR' : 'AND'}</span>`;
-    return `<div style="display:flex;align-items:center;gap:3px;flex-wrap:wrap;padding:2px 0">${prefix}<select class="nd-cond-type" ${dc} style="font-size:9px;padding:1px 2px">${condTypeOpts}</select>${condFields}${negateCheck}${delCond}</div>`;
+  return Object.entries(counts).map(([t, n]) => {
+    const m = ACTION_TYPE_META[t] || { icon: '?', color: '#8b949e' };
+    return `<span class="cfn-action-badge" style="background:${m.color}22;color:${m.color}" title="${t} ×${n}">${m.icon}${n > 1 ? '×' + n : ''}</span>`;
   }).join('');
-  return `<div style="padding:8px">
-    <div style="font-size:10px;font-weight:700;color:#ffb74d;margin-bottom:6px">⚡ Condition Node</div>
-    <datalist id="nd-cond-fn-opts">${fnOpts}</datalist>
-    <datalist id="nd-cond-var-opts">${varOpts}</datalist>
-    <datalist id="nd-cond-bool-opts">${boolOpts}</datalist>
-    <div style="margin-bottom:4px">${logicToggle}</div>
-    ${condRows}
-    <button class="nd-cond-add" style="font-size:8px;padding:2px 6px;margin-top:4px;color:var(--muted);cursor:pointer;background:var(--surface2);border:1px solid var(--border);border-radius:3px">+ Condition</button>
-  </div>`;
 }
 
-function _bpRenderActionNodeDetail(node, fnIdx) {
-  const actionsHtml = _bpRenderActionCards(node.actions, fnIdx);
-  return `<div style="padding:4px 8px">
-    <div style="font-size:10px;font-weight:700;color:#81c784;margin-bottom:4px">⚙ Action Node</div>
-    <div class="bp-node-body">${actionsHtml}</div>
-    <div style="padding:4px 0"><button class="nd-add-act bp-add-action" data-fn="${fnIdx}">+ Action</button></div>
-  </div>`;
-}
-
-// ── Render selected function detail ──────────────────────────────────────────
-function _bpRefreshDetail() {
-  if (!controlFunctionsListEl || !_bpDetailTitle) return;
-  const fnIdx = _bpGraph.selectedFnIdx;
+/* ── Jump-to-function helper ─── */
+function _cfnJumpToFunction(name) {
+  const targetName = String(name ?? '').trim().toLowerCase();
+  if (!targetName) return;
+  const fnIdx = controlFunctions.findIndex(fn => String(fn.name ?? '').trim().toLowerCase() === targetName);
+  if (fnIdx < 0) return;
+  _cfnCollapsed.delete(fnIdx);
   const fn = controlFunctions[fnIdx];
-  if (!fn) {
-    _bpDetailTitle.textContent = 'No FN Group selected';
-    controlFunctionsListEl.innerHTML = '<div style="font-size:10px;color:var(--muted);padding:8px">Select an FN Group to view its graph.</div>';
-    return;
+  if (fn) {
+    const grp = controlFunctionGroups.find(g => g.id === fn.groupId);
+    if (grp && grp.collapsed) grp.collapsed = false;
   }
-  const nodeId = _bpGraph.selectedNodeId;
-  const node = nodeId ? fn.nodes?.find(n => n.id === nodeId) : null;
-  _bpDetailTitle.textContent = 'ƒ ' + (fn.name || '(unnamed)');
+  refreshControlFunctionsUI();
+  requestAnimationFrame(() => {
+    const el = controlFunctionsListEl?.querySelector(`.ct-entry[data-fn-index="${fnIdx}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('cfn-highlight');
+      setTimeout(() => el.classList.remove('cfn-highlight'), 1600);
+    }
+  });
+}
+
+function refreshControlFunctionsUI() {
+  if (!controlFunctionsListEl) return;
   ensureControlFunctionGroups();
+  const search = String(controlFnSearchInput?.value ?? '').trim().toLowerCase();
+  let visible = controlFunctions
+    .map((fn, fnIdx) => ({ fn, fnIdx }))
+    .filter(({ fn }) => !search || String(fn.name ?? '').toLowerCase().includes(search));
+  if (_cfnActionTypeFilter) {
+    visible = visible.filter(({ fn }) => fn.actions.some(a => a.actionType === _cfnActionTypeFilter));
+  }
+
   const groupOptionsHtml = controlFunctionGroups
     .map(group => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)}</option>`)
     .join('');
-  let html = `<div style="display:flex;align-items:center;gap:6px;padding:4px 8px;border-bottom:1px solid var(--border)">
-    <input class="cfn-name" data-fn="${fnIdx}" type="text" value="${escapeHtml(fn.name)}" placeholder="FN Group name" style="flex:1;font-size:10px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>
-    <select class="cfn-group" data-fn="${fnIdx}" style="font-size:9px;padding:1px 3px">${groupOptionsHtml}</select>
-    <label style="font-size:8px;color:var(--muted);display:flex;align-items:center;gap:2px;cursor:pointer" title="Auto-execute on playtest"><input class="cfn-always-active" data-fn="${fnIdx}" type="checkbox" ${fn.alwaysActive ? 'checked' : ''}/> Always</label>
-    <button class="cfn-sim" data-fn="${fnIdx}" title="Simulate" style="font-size:10px;padding:1px 5px;cursor:pointer">▶</button>
-    <button class="cfn-sim-reset" data-fn="${fnIdx}" title="Reset" style="font-size:10px;padding:1px 5px;cursor:pointer">■</button>
-    <button class="ct-del cfn-del-fn" data-fn="${fnIdx}" title="Delete FN Group" style="font-size:9px;cursor:pointer">✕</button>
-  </div>`;
-  if (!node) {
-    html += '<div style="font-size:10px;color:var(--muted);padding:12px 8px">Click a node in the graph to edit it.</div>';
-  } else if (node.type === 'target') {
-    html += _bpRenderTargetNodeDetail(node);
-  } else if (node.type === 'condition') {
-    html += _bpRenderConditionNodeDetail(node);
-  } else if (node.type === 'action') {
-    html += _bpRenderActionNodeDetail(node, fnIdx);
-  }
-  if (node) {
-    // Label input
-    html += `<div style="display:flex;align-items:center;gap:4px;padding:4px 8px;border-top:1px solid var(--border)">
-      <span style="font-size:9px;color:var(--muted);min-width:36px">Label</span>
-      <input class="nd-label" type="text" value="${escapeHtml(node.label || '')}" placeholder="optional label" style="flex:1;font-size:9px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>
+
+  const renderActionRow = (action, fnIdx, actIdx, totalActions) => {
+    const isLight = action.actionType === 'light';
+    const isRotate = action.actionType === 'rotate';
+    const isAudio = action.actionType === 'audio';
+    const isPath = action.actionType === 'path';
+    const isFunctionControl = action.actionType === 'functionControl';
+    const isPlayerGroup = action.actionType === 'playerGroup';
+    const isSetVar = action.actionType === 'setVar';
+    const isSetBool = action.actionType === 'setBool';
+    const isPlayerStats = action.actionType === 'playerStats';
+    const isTeleport = action.actionType === 'teleport';
+    const isSkeletonAct = action.actionType === 'skeleton';
+    const isScale = action.actionType === 'scale';
+    const isCommand = action.actionType === 'command';
+    const isDelay = action.actionType === 'delay';
+    const moveOpts = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool || isPlayerStats || isTeleport || isSkeletonAct || isCommand || isDelay) ? '' : getMoveTargetOptions(action.refType, action.refValue);
+    const moveListId = `cfn-target-opts-${fnIdx}-${actIdx}`;
+    const fnListId = `cfn-fn-opts-${fnIdx}-${actIdx}`;
+    const audioListId = `cfn-audio-opts-${fnIdx}-${actIdx}`;
+    const varListId = `cfn-var-opts-${fnIdx}-${actIdx}`;
+    const boolListId = `cfn-bool-opts-${fnIdx}-${actIdx}`;
+    const knownFnNames = renderDatalistOptions(getKnownControlFunctionNames([action.audioUntilFunction, action.functionControlTarget]));
+    const knownAudioNames = renderDatalistOptions(getKnownAudioNames([action.audioName]));
+    const knownVarNames = renderDatalistOptions(getKnownVarNames([action.setVarName, action.setVarValueVar]));
+    const knownBoolNames = renderDatalistOptions(getKnownBoolNames([action.setBoolName]));
+    const meta = ACTION_TYPE_META[action.actionType] || { icon:'?', color:'#8b949e' };
+    const primaryHtml = isDelay
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Wait</span><input class="cfn-delay-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.delayDuration}" style="width:64px;font-size:9px" title="Delay (seconds)"/><span style="font-size:8px;color:var(--muted)">seconds</span></div><div style="font-size:8px;color:#444d56;margin-left:42px">Pauses before running the next action</div>`
+      : isCommand
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Command</span><input class="cfn-cmd-text" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.commandText || '')}" placeholder="tp 0 10 0" style="flex:1;min-width:120px;font-size:10px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;font-family:monospace"/></div><div style="font-size:8px;color:#444d56;margin-left:42px">Runs this console command when the function activates</div>`
+      : isPlayerGroup
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Groups</span><select class="cfn-pg-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${CONTROL_PLAYER_GROUP_MODES.map(mode => `<option value="${mode}" ${action.playerGroupMode === mode ? 'selected' : ''}>${mode}</option>`).join('')}</select><input class="cfn-pg-value" data-fn="${fnIdx}" data-act="${actIdx}" list="cfn-pg-groups-${fnIdx}-${actIdx}" type="text" value="${escapeHtml(action.playerGroupValue || '')}" placeholder="default, red, blue" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="cfn-pg-groups-${fnIdx}-${actIdx}">${renderDatalistOptions(getKnownGroups())}</datalist></div>`
+      : isFunctionControl
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Cmd</span><select class="cfn-fc-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${FUNCTION_CONTROL_COMMANDS.map(cmd => `<option value="${cmd}" ${action.functionControlCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select></div>${normalizeFunctionNameList(action.functionControlTarget || '').map((tgt, ti) => `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">${ti === 0 ? 'Targets' : ''}</span><input class="cfn-fc-target-entry" data-fn="${fnIdx}" data-act="${actIdx}" data-tgt-index="${ti}" list="${fnListId}" type="text" value="${escapeHtml(tgt)}" placeholder="functionName" style="flex:1;min-width:80px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><button class="cfn-jump-btn" data-jump-name="${escapeHtml(tgt)}" title="Jump to ${escapeHtml(tgt)}">↗</button><button class="ct-del cfn-fc-target-del" data-fn="${fnIdx}" data-act="${actIdx}" data-tgt-index="${ti}" title="Remove">✕</button></div>`).join('')}<div class="sf-row" style="gap:4px"><span style="font-size:8px;min-width:42px"></span><button class="cfn-fc-target-add" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:8px;padding:1px 5px;color:var(--muted);cursor:pointer">+ Target</button></div><datalist id="${fnListId}">${knownFnNames}</datalist>`
+      : isPath
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Path</span><select class="cfn-path-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PATH_CONTROL_COMMANDS.map(cmd => `<option value="${cmd}" ${action.pathCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select><span style="font-size:8px;color:var(--muted)">target path</span></div>`
+      : isSetVar
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Var</span><input class="cfn-set-var-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${varListId}" type="text" value="${escapeHtml(action.setVarName || '')}" placeholder="score" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${varListId}">${knownVarNames}</datalist><select class="cfn-set-var-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${['=','+','-','*','/'].map(op => `<option value="${op}" ${action.setVarOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Value</span><select class="cfn-set-var-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="digits" ${action.setVarValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${action.setVarValueType === 'var' ? 'selected' : ''}>var</option></select>${action.setVarValueType === 'var' ? `<input class="cfn-set-var-var" data-fn="${fnIdx}" data-act="${actIdx}" list="${varListId}" type="text" value="${escapeHtml(action.setVarValueVar || '')}" placeholder="var name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="cfn-set-var-value" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="1" value="${action.setVarValue}" style="width:72px;font-size:9px"/>`}</div>`
+      : isSetBool
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Bool</span><input class="cfn-set-bool-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${boolListId}" type="text" value="${escapeHtml(action.setBoolName || '')}" placeholder="doorOpen" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${boolListId}">${knownBoolNames}</datalist><select class="cfn-set-bool-value" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="true" ${action.setBoolValue === true ? 'selected' : ''}>true</option><option value="false" ${action.setBoolValue === false ? 'selected' : ''}>false</option><option value="toggle" ${action.setBoolValue === 'toggle' ? 'selected' : ''}>toggle</option></select></div>`
+      : isPlayerStats
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Target</span><select class="cfn-ps-target-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="name" ${action.playerStatTargetType === 'name' ? 'selected' : ''}>name</option><option value="group" ${action.playerStatTargetType === 'group' ? 'selected' : ''}>group</option></select><input class="cfn-ps-target" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.playerStatTarget || '')}" placeholder="Player" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Stat</span><select class="cfn-ps-key" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PLAYER_STAT_KEYS.map(k => `<option value="${k}" ${action.playerStatKey === k ? 'selected' : ''}>${k}</option>`).join('')}</select><select class="cfn-ps-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PLAYER_STAT_OPS.map(op => `<option value="${op}" ${action.playerStatOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select><input class="cfn-ps-value" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="1" value="${action.playerStatValue}" style="width:64px;font-size:9px"/></div>`
+      : isSkeletonAct
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Skeleton</span><select class="cfn-ref-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="group" ${action.refType === 'group' ? 'selected' : ''}>group</option><option value="name" ${action.refType === 'name' ? 'selected' : ''}>name</option></select><input class="cfn-ref-val" data-fn="${fnIdx}" data-act="${actIdx}" list="${moveListId}" type="text" value="${escapeHtml(action.refValue)}" placeholder="skeleton name" style="flex:1;min-width:70px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${moveListId}">${getMoveTargetOptions(action.refType, action.refValue)}</datalist></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Cmd</span><select class="cfn-skel-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${SKELETON_ANIM_COMMANDS.map(cmd => `<option value="${cmd}" ${action.skelAnimCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Clip</span><input class="cfn-skel-clip" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.skelAnimClip || '')}" placeholder="animation clip name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Speed</span><input class="cfn-skel-speed" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" min="0" value="${action.skelAnimSpeed ?? 1}" style="width:52px;font-size:9px"/></div>`
+      : isTeleport
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Mode</span><select class="cfn-teleport-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${TELEPORT_MODES.map(m => `<option value="${m}" ${action.teleportMode === m ? 'selected' : ''}>${m}</option>`).join('')}</select></div>${action.teleportMode === 'coords' ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Coords</span><input class="cfn-teleport-x" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[0]}" style="width:52px;font-size:9px"/><input class="cfn-teleport-y" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[1]}" style="width:52px;font-size:9px"/><input class="cfn-teleport-z" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[2]}" style="width:52px;font-size:9px"/></div>` : ''}${action.teleportMode === 'object' ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Object</span><input class="cfn-teleport-target-ref" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.teleportTargetRef || '')}" placeholder="object name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div>` : ''}<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">World</span><select class="cfn-teleport-world" data-fn="${fnIdx}" data-act="${actIdx}" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"><option value="" ${!action.teleportWorldId ? 'selected' : ''}>(current world)</option>${worlds.map(w => `<option value="${w.id}" ${action.teleportWorldId === w.id ? 'selected' : ''}>${escapeHtml(w.name || w.id)}</option>`).join('')}</select></div>`
+      : isAudio
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Audio</span><input class="cfn-audio-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${audioListId}" type="text" value="${escapeHtml(action.audioName || '')}" placeholder="audio name" style="flex:1;min-width:94px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${audioListId}">${knownAudioNames}</datalist></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Mode</span><select class="cfn-audio-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${AUDIO_PLAY_MODES.map(mode => `<option value="${mode}" ${action.audioMode === mode ? 'selected' : ''}>${mode}</option>`).join('')}</select><span style="font-size:8px;color:var(--muted)">Range</span><input class="cfn-audio-dist" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="1" max="800" step="1" value="${action.audioDistance}" style="width:52px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Until</span><select class="cfn-audio-until" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${AUDIO_UNTIL_EVENTS.map(ev => `<option value="${ev}" ${action.audioUntil === ev ? 'selected' : ''}>${ev}</option>`).join('')}</select><input class="cfn-audio-until-fn" data-fn="${fnIdx}" data-act="${actIdx}" list="${fnListId}" type="text" value="${escapeHtml(action.audioUntilFunction || '')}" placeholder="fn name" style="width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-audio-loop" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.audioLoop ? 'checked' : ''}/> Loop</label></div><datalist id="${fnListId}">${knownFnNames}</datalist>`
+      : isLight
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Light</span><select class="cfn-light-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${CONTROL_LIGHT_OPS.map(op => `<option value="${op}" ${action.lightOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select><input class="cfn-light-val" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.lightValue}" style="width:46px;font-size:9px"/></div>`
+      : isScale
+        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To Scale</span><input class="cfn-scx" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-scy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-scz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleOffset[2]}" style="width:42px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From Scale</span><input class="cfn-ssx" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleStartOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-ssy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleStartOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-ssz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleStartOffset[2]}" style="width:42px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`
+      : isRotate
+        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To Rot°</span><input class="cfn-rox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-roy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-roz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[2]}" style="width:42px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From Rot°</span><input class="cfn-rsox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-rsoy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-rsoz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[2]}" style="width:42px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">Spin RPM</span><input class="cfn-rrx" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[0]}" style="width:42px;font-size:9px"/><input class="cfn-rry" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[1]}" style="width:42px;font-size:9px"/><input class="cfn-rrz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[2]}" style="width:42px;font-size:9px"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-rotate-repeat" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.rotateRepeat ? 'checked' : ''}/> Loop</label></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">Pivot</span><select class="cfn-rotate-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="separate" ${action.rotateGroupMode === 'separate' ? 'selected' : ''}>self</option><option value="together" ${action.rotateGroupMode === 'together' ? 'selected' : ''}>group center</option></select><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-keep-upright" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.rotateKeepUpright ? 'checked' : ''}/> Keep upright</label></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`
+        : `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To (orig)</span><input class="cfn-ox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[0]}" style="width:42px;font-size:9px"/><input class="cfn-oy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[1]}" style="width:42px;font-size:9px"/><input class="cfn-oz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[2]}" style="width:42px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From (orig)</span><input class="cfn-sox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-soy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-soz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[2]}" style="width:42px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`;
+    const posReadout = (!isLight && !isPlayerGroup && !isFunctionControl && !isAudio && !isPath && !isSetVar && !isSetBool && !isPlayerStats && !isTeleport && !isSkeletonAct && !isCommand && !isDelay) ? `<div class="cfn-pos-readout" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:8px;color:var(--accentHi);margin-left:34px;min-height:12px;font-family:monospace;opacity:0.8"></div>` : '';
+    const targetRefHtml = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool || isPlayerStats || isTeleport || isSkeletonAct || isCommand || isDelay)
+      ? `<span style="font-size:8px;color:var(--muted);min-width:56px">player</span>`
+      : `<select class="cfn-ref-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="group" ${action.refType === 'group' ? 'selected' : ''}>group</option><option value="name" ${action.refType === 'name' ? 'selected' : ''}>name</option></select><input class="cfn-ref-val" data-fn="${fnIdx}" data-act="${actIdx}" list="${moveListId}" type="text" value="${escapeHtml(action.refValue)}" style="width:70px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${moveListId}">${moveOpts}</datalist>`;
+    const upDisabled = actIdx === 0 ? ' disabled style="opacity:.3"' : '';
+    const downDisabled = actIdx === totalActions - 1 ? ' disabled style="opacity:.3"' : '';
+    return `<div class="cfn-act-row" data-fn="${fnIdx}" data-act="${actIdx}" style="border-left:2px solid ${meta.color}44;margin-left:4px;padding-left:6px;margin-bottom:4px">
+      <div class="sf-row" style="gap:4px"><span class="cfn-drag-handle cfn-act-drag" draggable="true" data-fn="${fnIdx}" data-act="${actIdx}" title="Drag to reorder">⣿</span><button class="cfn-reorder-btn cfn-act-up" data-fn="${fnIdx}" data-act="${actIdx}"${upDisabled} title="Move up">▲</button><button class="cfn-reorder-btn cfn-act-down" data-fn="${fnIdx}" data-act="${actIdx}"${downDisabled} title="Move down">▼</button><span class="cfn-action-badge" style="background:${meta.color}22;color:${meta.color}">${meta.icon}</span>${targetRefHtml}<select class="cfn-action-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="move" ${action.actionType === 'move' ? 'selected' : ''}>move</option><option value="rotate" ${action.actionType === 'rotate' ? 'selected' : ''}>rotate</option><option value="scale" ${action.actionType === 'scale' ? 'selected' : ''}>scale</option><option value="light" ${action.actionType === 'light' ? 'selected' : ''}>light</option><option value="audio" ${action.actionType === 'audio' ? 'selected' : ''}>audio</option><option value="path" ${action.actionType === 'path' ? 'selected' : ''}>path</option><option value="functionControl" ${action.actionType === 'functionControl' ? 'selected' : ''}>function ctrl</option><option value="playerGroup" ${action.actionType === 'playerGroup' ? 'selected' : ''}>player group</option><option value="setVar" ${action.actionType === 'setVar' ? 'selected' : ''}>set var</option><option value="setBool" ${action.actionType === 'setBool' ? 'selected' : ''}>set bool</option><option value="playerStats" ${action.actionType === 'playerStats' ? 'selected' : ''}>player stats</option><option value="teleport" ${action.actionType === 'teleport' ? 'selected' : ''}>teleport</option><option value="skeleton" ${action.actionType === 'skeleton' ? 'selected' : ''}>skeleton</option><option value="command" ${action.actionType === 'command' ? 'selected' : ''}>command</option><option value="delay" ${action.actionType === 'delay' ? 'selected' : ''}>delay</option></select><button class="ct-del cfn-del-act" data-fn="${fnIdx}" data-act="${actIdx}" title="Remove action">✕</button></div>
+      ${primaryHtml}${posReadout}
     </div>`;
-    // Connections list
-    const incoming = (fn.connections || []).filter(c => c.to === node.id);
-    const outgoing = (fn.connections || []).filter(c => c.from === node.id);
-    if (incoming.length || outgoing.length) {
-      let connHtml = '<div style="padding:4px 8px;border-top:1px solid var(--border)"><div style="font-size:9px;font-weight:700;color:var(--muted);margin-bottom:3px">Connections</div>';
-      incoming.forEach(c => {
-        const src = fn.nodes?.find(n => n.id === c.from);
-        const srcLabel = src ? (src.label || src.type + ' ' + src.id.slice(-4)) : c.from;
-        connHtml += `<div style="display:flex;align-items:center;gap:4px;padding:1px 0"><span style="font-size:8px;color:#58a6ff">← in</span><span style="font-size:8px;color:var(--text);flex:1">${escapeHtml(srcLabel)}</span><button class="nd-conn-del" data-conn-from="${escapeHtml(c.from)}" data-conn-to="${escapeHtml(c.to)}" style="font-size:7px;padding:0 3px;cursor:pointer;color:var(--muted)" title="Remove connection">✕</button></div>`;
-      });
-      outgoing.forEach(c => {
-        const tgt = fn.nodes?.find(n => n.id === c.to);
-        const tgtLabel = tgt ? (tgt.label || tgt.type + ' ' + tgt.id.slice(-4)) : c.to;
-        connHtml += `<div style="display:flex;align-items:center;gap:4px;padding:1px 0"><span style="font-size:8px;color:#81c784">→ out</span><span style="font-size:8px;color:var(--text);flex:1">${escapeHtml(tgtLabel)}</span><button class="nd-conn-del" data-conn-from="${escapeHtml(c.from)}" data-conn-to="${escapeHtml(c.to)}" style="font-size:7px;padding:0 3px;cursor:pointer;color:var(--muted)" title="Remove connection">✕</button></div>`;
-      });
-      connHtml += '</div>';
-      html += connHtml;
-    }
-  }
-  controlFunctionsListEl.innerHTML = html;
-  controlFunctionsListEl.querySelectorAll('.cfn-group').forEach(select => {
-    select.value = fn.groupId;
-  });
-  _bpBindNodeDetailUI();
-}
+  };
 
-// ─── Control functions UI (project-level function editor) ────────────────────
-function refreshControlFunctionsUI() {
-  if (!controlFunctionsListEl) return;
-  _bpRefreshFnSelect();
-  refreshBpGraph();
-  _bpRefreshDetail();
-}
+  const renderFunctionCard = (fn, fnIdx, groupFnIndices) => {
+    const isCollapsed = _cfnCollapsed.has(fnIdx);
+    const badges = _cfnBadgePills(fn.actions);
+    const caret = isCollapsed ? '▸' : '▾';
+    const posInGroup = groupFnIndices.indexOf(fnIdx);
+    const fnUpDisabled = posInGroup <= 0 ? ' disabled style="opacity:.3"' : '';
+    const fnDownDisabled = posInGroup >= groupFnIndices.length - 1 ? ' disabled style="opacity:.3"' : '';
 
-function _bpRenderActionCards(actions, fnIdx) {
-  return actions.map((action, actIdx) => {
-      const isLight = action.actionType === 'light';
-      const isRotate = action.actionType === 'rotate';
-      const isAudio = action.actionType === 'audio';
-      const isPath = action.actionType === 'path';
-      const isFunctionControl = action.actionType === 'functionControl';
-      const isPlayerGroup = action.actionType === 'playerGroup';
-      const isSetVar = action.actionType === 'setVar';
-      const isSetBool = action.actionType === 'setBool';
-      const isPlayerStats = action.actionType === 'playerStats';
-      const isTeleport = action.actionType === 'teleport';
-      const isScale = action.actionType === 'scale';
-      const isSkeletonAct = action.actionType === 'skeleton';
-      const moveOpts = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool || isPlayerStats || isTeleport || isSkeletonAct) ? '' : getMoveTargetOptions(action.refType, action.refValue);
-      const moveListId = `cfn-target-opts-${fnIdx}-${actIdx}`;
-      const fnListId = `cfn-fn-opts-${fnIdx}-${actIdx}`;
-      const audioListId = `cfn-audio-opts-${fnIdx}-${actIdx}`;
-      const varListId = `cfn-var-opts-${fnIdx}-${actIdx}`;
-      const boolListId = `cfn-bool-opts-${fnIdx}-${actIdx}`;
-      const knownFnNames = renderDatalistOptions(getKnownControlFunctionNames([action.audioUntilFunction, action.functionControlTarget]));
-      const knownAudioNames = renderDatalistOptions(getKnownAudioNames([action.audioName]));
-      const knownVarNames = renderDatalistOptions(getKnownVarNames([action.setVarName, action.setVarValueVar]));
-      const knownBoolNames = renderDatalistOptions(getKnownBoolNames([action.setBoolName]));
-      const primaryHtml = isPlayerGroup
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Groups</span><select class="cfn-pg-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${CONTROL_PLAYER_GROUP_MODES.map(mode => `<option value="${mode}" ${action.playerGroupMode === mode ? 'selected' : ''}>${mode}</option>`).join('')}</select><input class="cfn-pg-value" data-fn="${fnIdx}" data-act="${actIdx}" list="cfn-pg-groups-${fnIdx}-${actIdx}" type="text" value="${escapeHtml(action.playerGroupValue || '')}" placeholder="default, red, blue" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="cfn-pg-groups-${fnIdx}-${actIdx}">${renderDatalistOptions(getKnownGroups())}</datalist></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Random</span><span style="font-size:8px;color:var(--muted)">Use comma list above when mode=random</span></div>`
-        : isFunctionControl
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Cmd</span><select class="cfn-fc-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${FUNCTION_CONTROL_COMMANDS.map(cmd => `<option value="${cmd}" ${action.functionControlCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select></div>${normalizeFunctionNameList(action.functionControlTarget || '').map((tgt, ti) => `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">${ti === 0 ? 'Targets' : ''}</span><input class="cfn-fc-target-entry" data-fn="${fnIdx}" data-act="${actIdx}" data-tgt-index="${ti}" list="${fnListId}" type="text" value="${escapeHtml(tgt)}" placeholder="functionName" style="flex:1;min-width:80px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><button class="ct-del cfn-fc-target-del" data-fn="${fnIdx}" data-act="${actIdx}" data-tgt-index="${ti}" title="Remove">✕</button></div>`).join('')}<div class="sf-row" style="gap:4px"><span style="font-size:8px;min-width:42px"></span><button class="cfn-fc-target-add" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:8px;padding:1px 5px;color:var(--muted);cursor:pointer">+ Target</button></div><datalist id="${fnListId}">${knownFnNames}</datalist>`
-        : isPath
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Path</span><select class="cfn-path-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PATH_CONTROL_COMMANDS.map(cmd => `<option value="${cmd}" ${action.pathCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select><span style="font-size:8px;color:var(--muted)">target path</span></div>`
-        : isSetVar
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Var</span><input class="cfn-set-var-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${varListId}" type="text" value="${escapeHtml(action.setVarName || '')}" placeholder="score" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${varListId}">${knownVarNames}</datalist><select class="cfn-set-var-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${['=','+','-','*','/'].map(op => `<option value="${op}" ${action.setVarOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Value</span><select class="cfn-set-var-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="digits" ${action.setVarValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${action.setVarValueType === 'var' ? 'selected' : ''}>var</option></select>${action.setVarValueType === 'var' ? `<input class="cfn-set-var-var" data-fn="${fnIdx}" data-act="${actIdx}" list="${varListId}" type="text" value="${escapeHtml(action.setVarValueVar || '')}" placeholder="var name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="cfn-set-var-value" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="1" value="${action.setVarValue}" style="width:72px;font-size:9px"/>`}</div>`
-        : isSetBool
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Bool</span><input class="cfn-set-bool-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${boolListId}" type="text" value="${escapeHtml(action.setBoolName || '')}" placeholder="doorOpen" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${boolListId}">${knownBoolNames}</datalist><select class="cfn-set-bool-value" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="true" ${action.setBoolValue === true ? 'selected' : ''}>true</option><option value="false" ${action.setBoolValue === false ? 'selected' : ''}>false</option><option value="toggle" ${action.setBoolValue === 'toggle' ? 'selected' : ''}>toggle</option></select></div>`
-        : isPlayerStats
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Target</span><select class="cfn-ps-target-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="name" ${action.playerStatTargetType === 'name' ? 'selected' : ''}>name</option><option value="group" ${action.playerStatTargetType === 'group' ? 'selected' : ''}>group</option></select><input class="cfn-ps-target" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.playerStatTarget || '')}" placeholder="Player" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Stat</span><select class="cfn-ps-key" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PLAYER_STAT_KEYS.map(k => `<option value="${k}" ${action.playerStatKey === k ? 'selected' : ''}>${k}</option>`).join('')}</select><select class="cfn-ps-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PLAYER_STAT_OPS.map(op => `<option value="${op}" ${action.playerStatOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select><input class="cfn-ps-value" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="1" value="${action.playerStatValue}" style="width:64px;font-size:9px"/></div><div style="font-size:8px;color:#444d56;margin-left:42px">Only affects players matching the target. Non-player objects are ignored.</div>`
-        : isSkeletonAct
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Skeleton</span><select class="cfn-ref-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="group" ${action.refType === 'group' ? 'selected' : ''}>group</option><option value="name" ${action.refType === 'name' ? 'selected' : ''}>name</option></select><input class="cfn-ref-val" data-fn="${fnIdx}" data-act="${actIdx}" list="${moveListId}" type="text" value="${escapeHtml(action.refValue)}" placeholder="skeleton name" style="flex:1;min-width:70px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${moveListId}">${getMoveTargetOptions(action.refType, action.refValue)}</datalist></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Cmd</span><select class="cfn-skel-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${SKELETON_ANIM_COMMANDS.map(cmd => `<option value="${cmd}" ${action.skelAnimCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Clip</span><input class="cfn-skel-clip" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.skelAnimClip || '')}" placeholder="animation clip name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Speed</span><input class="cfn-skel-speed" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" min="0" value="${action.skelAnimSpeed ?? 1}" style="width:52px;font-size:9px"/></div>`
-        : isTeleport
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Mode</span><select class="cfn-teleport-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${TELEPORT_MODES.map(m => `<option value="${m}" ${action.teleportMode === m ? 'selected' : ''}>${m}</option>`).join('')}</select></div>${action.teleportMode === 'coords' ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Coords</span><input class="cfn-teleport-x" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[0]}" style="width:52px;font-size:9px"/><input class="cfn-teleport-y" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[1]}" style="width:52px;font-size:9px"/><input class="cfn-teleport-z" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[2]}" style="width:52px;font-size:9px"/></div>` : ''}${action.teleportMode === 'object' ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Object</span><input class="cfn-teleport-target-ref" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.teleportTargetRef || '')}" placeholder="object name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div>` : ''}<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">World</span><select class="cfn-teleport-world" data-fn="${fnIdx}" data-act="${actIdx}" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"><option value="" ${!action.teleportWorldId ? 'selected' : ''}>(current world)</option>${worlds.map(w => `<option value="${w.id}" ${action.teleportWorldId === w.id ? 'selected' : ''}>${escapeHtml(w.name || w.id)}</option>`).join('')}</select></div>`
-        : isAudio
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Audio</span><input class="cfn-audio-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${audioListId}" type="text" value="${escapeHtml(action.audioName || '')}" placeholder="audio name" style="flex:1;min-width:94px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${audioListId}">${knownAudioNames}</datalist></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Mode</span><select class="cfn-audio-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${AUDIO_PLAY_MODES.map(mode => `<option value="${mode}" ${action.audioMode === mode ? 'selected' : ''}>${mode}</option>`).join('')}</select><span style="font-size:8px;color:var(--muted)">Range</span><input class="cfn-audio-dist" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="1" max="800" step="1" value="${action.audioDistance}" style="width:52px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Until</span><select class="cfn-audio-until" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${AUDIO_UNTIL_EVENTS.map(ev => `<option value="${ev}" ${action.audioUntil === ev ? 'selected' : ''}>${ev}</option>`).join('')}</select><input class="cfn-audio-until-fn" data-fn="${fnIdx}" data-act="${actIdx}" list="${fnListId}" type="text" value="${escapeHtml(action.audioUntilFunction || '')}" placeholder="fn name" style="width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-audio-loop" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.audioLoop ? 'checked' : ''}/> Loop</label></div><datalist id="${fnListId}">${knownFnNames}</datalist>`
-        : isLight
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Light</span><select class="cfn-light-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${CONTROL_LIGHT_OPS.map(op => `<option value="${op}" ${action.lightOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select><input class="cfn-light-val" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.lightValue}" style="width:46px;font-size:9px"/></div>`
-        : isScale
-          ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To Scale</span><input class="cfn-scx" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-scy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-scz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleOffset[2]}" style="width:42px;font-size:9px"/></div>
-          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From Scale</span><input class="cfn-ssx" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleStartOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-ssy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleStartOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-ssz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleStartOffset[2]}" style="width:42px;font-size:9px"/></div>
-          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`
-        : isRotate
-          ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To Rot°</span><input class="cfn-rox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-roy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-roz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[2]}" style="width:42px;font-size:9px"/></div>
-          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From Rot°</span><input class="cfn-rsox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-rsoy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-rsoz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[2]}" style="width:42px;font-size:9px"/></div>
-          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">Spin RPM</span><input class="cfn-rrx" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[0]}" style="width:42px;font-size:9px"/><input class="cfn-rry" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[1]}" style="width:42px;font-size:9px"/><input class="cfn-rrz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[2]}" style="width:42px;font-size:9px"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-rotate-repeat" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.rotateRepeat ? 'checked' : ''}/> Loop</label></div>
-          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">Pivot</span><select class="cfn-rotate-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="separate" ${action.rotateGroupMode === 'separate' ? 'selected' : ''}>self</option><option value="together" ${action.rotateGroupMode === 'together' ? 'selected' : ''}>group center</option></select><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-keep-upright" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.rotateKeepUpright ? 'checked' : ''}/> Keep upright</label></div>
-          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`
-          : `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To (orig)</span><input class="cfn-ox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[0]}" style="width:42px;font-size:9px"/><input class="cfn-oy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[1]}" style="width:42px;font-size:9px"/><input class="cfn-oz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[2]}" style="width:42px;font-size:9px"/></div>
-          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From (orig)</span><input class="cfn-sox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-soy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-soz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[2]}" style="width:42px;font-size:9px"/></div>
-          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`;
-      const posReadout = (!isLight && !isPlayerGroup && !isFunctionControl && !isAudio && !isPath && !isSetVar && !isSetBool && !isPlayerStats && !isTeleport && !isSkeletonAct) ? `<div class="cfn-pos-readout" data-fn="${fnIdx}" data-act="${actIdx}"></div>` : '';
-      const targetRefHtml = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool || isPlayerStats || isTeleport || isSkeletonAct)
-        ? `<span class="bp-act-num">player</span>`
-        : `<select class="cfn-ref-type" data-fn="${fnIdx}" data-act="${actIdx}"><option value="group" ${action.refType === 'group' ? 'selected' : ''}>group</option><option value="name" ${action.refType === 'name' ? 'selected' : ''}>name</option></select><input class="cfn-ref-val" data-fn="${fnIdx}" data-act="${actIdx}" list="${moveListId}" type="text" value="${escapeHtml(action.refValue)}" placeholder="target"/><datalist id="${moveListId}">${moveOpts}</datalist>`;
-      return `<div class="bp-action">
-        <div class="bp-action-hdr">
-          <span class="bp-pin bp-pin-${action.actionType}"></span>
-          <span class="bp-act-num">#${actIdx+1}</span>
-          ${targetRefHtml}
-          <select class="cfn-action-type" data-fn="${fnIdx}" data-act="${actIdx}"><option value="move" ${action.actionType === 'move' ? 'selected' : ''}>move</option><option value="rotate" ${action.actionType === 'rotate' ? 'selected' : ''}>rotate</option><option value="scale" ${action.actionType === 'scale' ? 'selected' : ''}>scale</option><option value="light" ${action.actionType === 'light' ? 'selected' : ''}>light</option><option value="audio" ${action.actionType === 'audio' ? 'selected' : ''}>audio</option><option value="path" ${action.actionType === 'path' ? 'selected' : ''}>path</option><option value="functionControl" ${action.actionType === 'functionControl' ? 'selected' : ''}>function ctrl</option><option value="playerGroup" ${action.actionType === 'playerGroup' ? 'selected' : ''}>player group</option><option value="setVar" ${action.actionType === 'setVar' ? 'selected' : ''}>set var</option><option value="setBool" ${action.actionType === 'setBool' ? 'selected' : ''}>set bool</option><option value="playerStats" ${action.actionType === 'playerStats' ? 'selected' : ''}>player stats</option><option value="teleport" ${action.actionType === 'teleport' ? 'selected' : ''}>teleport</option><option value="skeleton" ${action.actionType === 'skeleton' ? 'selected' : ''}>skeleton</option></select>
-          <button class="ct-del cfn-del-act" data-fn="${fnIdx}" data-act="${actIdx}" title="Remove action">✕</button>
-        </div>
-        <div class="bp-action-fields">
-          ${primaryHtml}
-        </div>
-        ${posReadout}
+    if (_cfnCompactMode) {
+      return `<div class="cfn-compact-row ct-entry" data-fn-index="${fnIdx}">
+        <span class="cfn-drag-handle cfn-fn-drag" draggable="true" data-fn="${fnIdx}" title="Drag to reorder">⣿</span>
+        <button class="cfn-reorder-btn cfn-fn-up" data-fn="${fnIdx}"${fnUpDisabled}>▲</button>
+        <button class="cfn-reorder-btn cfn-fn-down" data-fn="${fnIdx}"${fnDownDisabled}>▼</button>
+        <span style="color:var(--accentHi);font-weight:700;font-size:9px">ƒ</span>
+        <span class="cfn-compact-name" title="${escapeHtml(fn.name)}">${escapeHtml(fn.name || '(unnamed)')}</span>
+        <span class="cfn-badges-row">${badges}</span>
+        <span style="font-size:8px;color:var(--muted)">${fn.actions.length}act</span>
+        ${fn.alwaysActive ? '<span style="font-size:7px;color:#7ee787" title="Always Active">●</span>' : ''}
+        <button class="cfn-sim" data-fn="${fnIdx}" title="Simulate" style="background:none;border:none;color:var(--accentHi);cursor:pointer;font-size:10px;padding:0 2px">▶</button>
+        <button class="cfn-sim-reset" data-fn="${fnIdx}" title="Reset" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:9px;padding:0 2px">■</button>
+        <button class="ct-del cfn-del-fn" data-fn="${fnIdx}" title="Delete function">✕</button>
+        <button class="cfn-toggle-card" data-fn="${fnIdx}" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:9px;padding:0 3px" title="Expand">${caret}</button>
       </div>`;
-    }).join('');
+    }
+
+    const actionsHtml = fn.actions.map((action, actIdx) => renderActionRow(action, fnIdx, actIdx, fn.actions.length)).join('');
+    return `<div class="ct-entry" style="flex-wrap:wrap;flex-direction:column" data-fn-index="${fnIdx}">
+      <div class="cfn-card-header" data-fn="${fnIdx}">
+        <span class="cfn-drag-handle cfn-fn-drag" draggable="true" data-fn="${fnIdx}" title="Drag to reorder">⣿</span>
+        <button class="cfn-reorder-btn cfn-fn-up" data-fn="${fnIdx}"${fnUpDisabled}>▲</button>
+        <button class="cfn-reorder-btn cfn-fn-down" data-fn="${fnIdx}"${fnDownDisabled}>▼</button>
+        <span style="font-size:9px;color:var(--accentHi);font-weight:700">ƒ</span>
+        <input class="cfn-name" data-fn="${fnIdx}" type="text" value="${escapeHtml(fn.name)}" placeholder="name" style="flex:1;min-width:60px;font-size:10px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px" onclick="event.stopPropagation()"/>
+        <select class="cfn-group" data-fn="${fnIdx}" style="font-size:9px;padding:1px 3px" onclick="event.stopPropagation()">${groupOptionsHtml}</select>
+        <label style="display:flex;align-items:center;gap:2px;cursor:pointer;font-size:9px;color:var(--muted)" title="Auto-execute when playtest starts" onclick="event.stopPropagation()"><input class="cfn-always-active" data-fn="${fnIdx}" type="checkbox" ${fn.alwaysActive ? 'checked' : ''}/> AA</label>
+        <span class="cfn-badges-row">${badges}</span>
+        <button class="cfn-sim" data-fn="${fnIdx}" title="Simulate" style="background:none;border:none;color:var(--accentHi);cursor:pointer;font-size:11px;padding:0 2px" onclick="event.stopPropagation()">▶</button>
+        <button class="cfn-sim-reset" data-fn="${fnIdx}" title="Reset" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:10px;padding:0 2px" onclick="event.stopPropagation()">■</button>
+        <button class="ct-del cfn-del-fn" data-fn="${fnIdx}" title="Delete function" onclick="event.stopPropagation()">✕</button>
+        <span class="cfn-caret">${caret}</span>
+      </div>
+      <div class="cfn-card-body${isCollapsed ? ' cfn-collapsed' : ''}" data-fn="${fnIdx}">
+        ${actionsHtml}
+        <button class="cfn-add-act" data-fn="${fnIdx}" style="font-size:8px;padding:1px 5px;margin-left:12px">+ Action</button>
+      </div>
+    </div>`;
+  };
+
+  const groupedHtml = controlFunctionGroups.map(group => {
+    const rows = visible.filter(({ fn }) => fn.groupId === group.id);
+    if (!rows.length && search) return '';
+    const groupFnIndices = rows.map(r => r.fnIdx);
+    const body = rows.map(({ fn, fnIdx }) => renderFunctionCard(fn, fnIdx, groupFnIndices)).join('') || '<div style="font-size:9px;color:var(--muted);padding:5px 2px">No functions in this group.</div>';
+    const caret = group.collapsed ? '▸' : '▾';
+    return `<div class="cfn-group-wrap" data-cfg="${escapeHtml(group.id)}"><button class="cfn-group-toggle" data-cfg="${escapeHtml(group.id)}"><span>${caret} ${escapeHtml(group.name)}</span><span style="opacity:.7">${rows.length}</span></button><div class="cfn-group-body" style="${group.collapsed ? 'display:none' : ''}">${body}</div><button class="cfn-group-add" data-cfg="${escapeHtml(group.id)}">+ Add Function</button></div>`;
+  }).join('');
+
+  controlFunctionsListEl.innerHTML = groupedHtml || '<div style="font-size:10px;color:var(--muted);padding:5px 1px">No matching functions.</div>';
+
+  controlFunctionsListEl.querySelectorAll('.cfn-group').forEach(select => {
+    const fnIdx = parseInt(select.dataset.fn, 10);
+    if (Number.isFinite(fnIdx) && controlFunctions[fnIdx]) {
+      select.value = controlFunctions[fnIdx].groupId;
+    }
+  });
+
+  bindControlFunctionsUI();
 }
 
-// ── Node-specific detail bindings ────────────────────────────────────────────
-function _bpBindNodeDetailUI() {
+function bindControlFunctionsUI() {
   if (!controlFunctionsListEl) return;
-  const fnIdx = _bpGraph.selectedFnIdx;
-  const fn = controlFunctions[fnIdx];
 
-  // ── Function-level bindings ──
-  controlFunctionsListEl.querySelectorAll('.cfn-name').forEach(input => {
-    input.addEventListener('change', () => {
-      if (fn) {
-        fn.name = input.value.trim();
-        if (_bpDetailTitle) _bpDetailTitle.textContent = 'ƒ ' + (fn.name || '(unnamed)');
-        refreshBpGraph();
-        _bpRefreshFnSelect();
-      }
+  const withFnAction = (fnIdx, actIdx, updater) => {
+    const fn = controlFunctions[fnIdx];
+    if (!fn) return;
+    while (fn.actions.length <= actIdx) fn.actions.push(createDefaultFunctionAction());
+    updater(fn.actions[actIdx]);
+  };
+
+  /* ── Card collapse/expand ── */
+  controlFunctionsListEl.querySelectorAll('.cfn-card-header').forEach(hdr => {
+    hdr.addEventListener('click', () => {
+      const fnIdx = parseInt(hdr.dataset.fn, 10);
+      if (_cfnCollapsed.has(fnIdx)) _cfnCollapsed.delete(fnIdx);
+      else _cfnCollapsed.add(fnIdx);
+      refreshControlFunctionsUI();
     });
   });
-  controlFunctionsListEl.querySelectorAll('.cfn-always-active').forEach(input => {
-    input.addEventListener('change', () => { if (fn) fn.alwaysActive = !!input.checked; });
-  });
-  controlFunctionsListEl.querySelectorAll('.cfn-group').forEach(select => {
-    select.addEventListener('change', () => {
-      if (!fn) return;
-      if (controlFunctionGroups.some(g => g.id === select.value)) fn.groupId = select.value;
+  controlFunctionsListEl.querySelectorAll('.cfn-toggle-card').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const fnIdx = parseInt(btn.dataset.fn, 10);
+      if (_cfnCollapsed.has(fnIdx)) _cfnCollapsed.delete(fnIdx);
+      else _cfnCollapsed.add(fnIdx);
+      refreshControlFunctionsUI();
     });
   });
-  controlFunctionsListEl.querySelectorAll('.cfn-del-fn').forEach(btn => {
+
+  /* ── Function reorder arrows ── */
+  controlFunctionsListEl.querySelectorAll('.cfn-fn-up').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const fnIdx = parseInt(btn.dataset.fn, 10);
+      if (fnIdx <= 0) return;
+      const fn = controlFunctions[fnIdx];
+      const prev = controlFunctions[fnIdx - 1];
+      if (!fn || !prev || fn.groupId !== prev.groupId) return;
+      controlFunctions[fnIdx] = prev;
+      controlFunctions[fnIdx - 1] = fn;
+      refreshControlFunctionsUI();
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-fn-down').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const fnIdx = parseInt(btn.dataset.fn, 10);
+      if (fnIdx >= controlFunctions.length - 1) return;
+      const fn = controlFunctions[fnIdx];
+      const next = controlFunctions[fnIdx + 1];
+      if (!fn || !next || fn.groupId !== next.groupId) return;
+      controlFunctions[fnIdx] = next;
+      controlFunctions[fnIdx + 1] = fn;
+      refreshControlFunctionsUI();
+    });
+  });
+
+  /* ── Action reorder arrows ── */
+  controlFunctionsListEl.querySelectorAll('.cfn-act-up').forEach(btn => {
     btn.addEventListener('click', () => {
-      if (fnIdx >= 0 && fnIdx < controlFunctions.length) {
-        controlFunctions.splice(fnIdx, 1);
-        _bpGraph.selectedFnIdx = -1;
-        _bpGraph.selectedNodeId = null;
+      const fnIdx = parseInt(btn.dataset.fn, 10);
+      const actIdx = parseInt(btn.dataset.act, 10);
+      const fn = controlFunctions[fnIdx];
+      if (!fn || actIdx <= 0) return;
+      [fn.actions[actIdx - 1], fn.actions[actIdx]] = [fn.actions[actIdx], fn.actions[actIdx - 1]];
+      refreshControlFunctionsUI();
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-act-down').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const fnIdx = parseInt(btn.dataset.fn, 10);
+      const actIdx = parseInt(btn.dataset.act, 10);
+      const fn = controlFunctions[fnIdx];
+      if (!fn || actIdx >= fn.actions.length - 1) return;
+      [fn.actions[actIdx], fn.actions[actIdx + 1]] = [fn.actions[actIdx + 1], fn.actions[actIdx]];
+      refreshControlFunctionsUI();
+    });
+  });
+
+  /* ── Jump-to-function ── */
+  controlFunctionsListEl.querySelectorAll('.cfn-jump-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      _cfnJumpToFunction(btn.dataset.jumpName);
+    });
+  });
+
+  /* ── Function drag-and-drop ── */
+  controlFunctionsListEl.querySelectorAll('.cfn-fn-drag').forEach(handle => {
+    handle.addEventListener('dragstart', (e) => {
+      e.stopPropagation();
+      const fnIdx = handle.dataset.fn;
+      e.dataTransfer.setData('text/cfn-fn', fnIdx);
+      e.dataTransfer.effectAllowed = 'move';
+      const card = handle.closest('.ct-entry');
+      if (card) card.classList.add('cfn-dragging');
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.ct-entry[data-fn-index]').forEach(card => {
+    card.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer.types.includes('text/cfn-fn')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      controlFunctionsListEl.querySelectorAll('.cfn-drag-over').forEach(el => el.classList.remove('cfn-drag-over'));
+      card.classList.add('cfn-drag-over');
+    });
+    card.addEventListener('dragleave', () => card.classList.remove('cfn-drag-over'));
+    card.addEventListener('drop', (e) => {
+      e.preventDefault();
+      controlFunctionsListEl.querySelectorAll('.cfn-drag-over,.cfn-dragging').forEach(el => el.classList.remove('cfn-drag-over', 'cfn-dragging'));
+      const srcIdx = parseInt(e.dataTransfer.getData('text/cfn-fn'), 10);
+      const dstIdx = parseInt(card.dataset.fnIndex, 10);
+      if (!Number.isFinite(srcIdx) || !Number.isFinite(dstIdx) || srcIdx === dstIdx) return;
+      const [moved] = controlFunctions.splice(srcIdx, 1);
+      if (!moved) return;
+      const targetGroup = controlFunctions[Math.min(dstIdx, controlFunctions.length - 1)]?.groupId;
+      if (targetGroup) moved.groupId = targetGroup;
+      controlFunctions.splice(dstIdx > srcIdx ? dstIdx - 1 : dstIdx, 0, moved);
+      refreshControlFunctionsUI();
+    });
+  });
+  document.addEventListener('dragend', () => {
+    controlFunctionsListEl?.querySelectorAll('.cfn-drag-over,.cfn-dragging').forEach(el => el.classList.remove('cfn-drag-over', 'cfn-dragging'));
+  }, { once: false });
+
+  /* ── Action drag-and-drop ── */
+  controlFunctionsListEl.querySelectorAll('.cfn-act-drag').forEach(handle => {
+    handle.addEventListener('dragstart', (e) => {
+      e.stopPropagation();
+      e.dataTransfer.setData('text/cfn-act', `${handle.dataset.fn},${handle.dataset.act}`);
+      e.dataTransfer.effectAllowed = 'move';
+      const row = handle.closest('.cfn-act-row');
+      if (row) row.classList.add('cfn-dragging');
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-act-row').forEach(row => {
+    row.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer.types.includes('text/cfn-act')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      controlFunctionsListEl.querySelectorAll('.cfn-act-drag-over').forEach(el => el.classList.remove('cfn-act-drag-over'));
+      row.classList.add('cfn-act-drag-over');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('cfn-act-drag-over'));
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      controlFunctionsListEl.querySelectorAll('.cfn-act-drag-over,.cfn-dragging').forEach(el => el.classList.remove('cfn-act-drag-over', 'cfn-dragging'));
+      const src = e.dataTransfer.getData('text/cfn-act').split(',').map(Number);
+      if (src.length !== 2) return;
+      const [srcFn, srcAct] = src;
+      const dstFn = parseInt(row.dataset.fn, 10);
+      const dstAct = parseInt(row.dataset.act, 10);
+      if (srcFn !== dstFn || srcAct === dstAct) return;
+      const fn = controlFunctions[srcFn];
+      if (!fn) return;
+      const [moved] = fn.actions.splice(srcAct, 1);
+      fn.actions.splice(dstAct > srcAct ? dstAct - 1 : dstAct, 0, moved);
+      refreshControlFunctionsUI();
+    });
+  });
+
+  /* ── Standard bindings ── */
+  controlFunctionsListEl.querySelectorAll('.cfn-name').forEach(input => {
+    input.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(input.dataset.fn, 10);
+      if (controlFunctions[idx]) controlFunctions[idx].name = input.value.trim();
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-always-active').forEach(input => {
+    input.addEventListener('change', () => {
+      const idx = parseInt(input.dataset.fn, 10);
+      if (controlFunctions[idx]) controlFunctions[idx].alwaysActive = !!input.checked;
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-group').forEach(select => {
+    select.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(select.dataset.fn, 10);
+      const fn = controlFunctions[idx];
+      if (!fn) return;
+      if (controlFunctionGroups.some(group => group.id === select.value)) {
+        fn.groupId = select.value;
+      }
+      refreshControlFunctionsUI();
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-group-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const gid = btn.dataset.cfg;
+      const group = controlFunctionGroups.find(g => g.id === gid);
+      if (group) group.collapsed = !group.collapsed;
+      refreshControlFunctionsUI();
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-del-fn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.fn, 10);
+      if (idx >= 0 && idx < controlFunctions.length) controlFunctions.splice(idx, 1);
+      refreshControlFunctionsUI();
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-sim').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.fn, 10);
+      if (!state.isPlaytest) simulateFunction(idx);
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-sim-reset').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.fn, 10);
+      if (!state.isPlaytest) resetSimulation();
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-add-act').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.fn, 10);
+      if (controlFunctions[idx]) {
+        controlFunctions[idx].actions.push(createDefaultFunctionAction());
         refreshControlFunctionsUI();
       }
     });
   });
-  controlFunctionsListEl.querySelectorAll('.cfn-sim').forEach(btn => {
-    btn.addEventListener('click', () => { if (!state.isPlaytest) simulateFunction(fnIdx); });
-  });
-  controlFunctionsListEl.querySelectorAll('.cfn-sim-reset').forEach(btn => {
-    btn.addEventListener('click', () => { if (!state.isPlaytest) resetSimulation(); });
-  });
 
-  // ── Target node bindings ──
-  controlFunctionsListEl.querySelectorAll('.nd-target-reftype').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const node = fn?.nodes?.find(n => n.id === _bpGraph.selectedNodeId);
-      if (node && node.type === 'target') { node.refType = sel.value === 'name' ? 'name' : 'group'; _bpRefreshDetail(); refreshBpGraph(); }
-    });
-  });
-
-  // ── Label binding ──
-  controlFunctionsListEl.querySelectorAll('.nd-label').forEach(input => {
-    input.addEventListener('change', () => {
-      const node = fn?.nodes?.find(n => n.id === _bpGraph.selectedNodeId);
-      if (node) { node.label = input.value.trim(); refreshBpGraph(); }
-    });
-  });
-
-  // ── Connection delete from detail panel ──
-  controlFunctionsListEl.querySelectorAll('.nd-conn-del').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (!fn || !Array.isArray(fn.connections)) return;
-      const fromId = btn.dataset.connFrom;
-      const toId = btn.dataset.connTo;
-      const idx = fn.connections.findIndex(c => c.from === fromId && c.to === toId);
-      if (idx !== -1) fn.connections.splice(idx, 1);
-      _bpSyncFnActionsFromNodes(fn);
-      refreshBpGraph();
-      _bpRefreshDetail();
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.nd-target-refval').forEach(input => {
-    input.addEventListener('change', () => {
-      const node = fn?.nodes?.find(n => n.id === _bpGraph.selectedNodeId);
-      if (node && node.type === 'target') { node.refValue = input.value.trim(); refreshBpGraph(); }
-    });
-  });
-
-  // ── Condition node bindings ──
-  const getCondNode = () => {
-    const node = fn?.nodes?.find(n => n.id === _bpGraph.selectedNodeId);
-    return (node && node.type === 'condition') ? node : null;
-  };
-  controlFunctionsListEl.querySelectorAll('.nd-cond-logic').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const node = getCondNode(); if (node) { node.conditionLogic = sel.value === 'or' ? 'or' : 'and'; _bpRefreshDetail(); }
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.nd-cond-type').forEach(sel => {
-    sel.addEventListener('change', () => {
-      const node = getCondNode(); if (!node) return;
-      const di = parseInt(sel.dataset.condIndex, 10);
-      if (di >= 0 && di < node.conditions.length) { node.conditions[di] = normalizeCondition({ ...node.conditions[di], type: sel.value }); }
-      _bpRefreshDetail();
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.nd-cond-negate').forEach(input => {
-    input.addEventListener('change', () => {
-      const node = getCondNode(); if (!node) return;
-      const di = parseInt(input.dataset.condIndex, 10);
-      if (di >= 0 && di < node.conditions.length) node.conditions[di].negate = input.checked;
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.nd-cond-del').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const node = getCondNode(); if (!node) return;
-      const di = parseInt(btn.dataset.condIndex, 10);
-      if (di >= 0 && di < node.conditions.length && node.conditions.length > 1) { node.conditions.splice(di, 1); _bpRefreshDetail(); }
-    });
-  });
-  controlFunctionsListEl.querySelectorAll('.nd-cond-add').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const node = getCondNode(); if (node) { node.conditions.push(createDefaultCondition()); _bpRefreshDetail(); }
-    });
-  });
-  // Condition field bindings
-  const bindCondField = (cls, updater) => {
-    controlFunctionsListEl.querySelectorAll(cls).forEach(el => {
-      el.addEventListener('change', () => {
-        const node = getCondNode(); if (!node) return;
-        const di = parseInt(el.dataset.condIndex, 10);
-        if (di >= 0 && di < node.conditions.length) updater(node.conditions[di], el);
-      });
-    });
-  };
-  const bindCondFieldRefresh = (cls, updater) => {
-    controlFunctionsListEl.querySelectorAll(cls).forEach(el => {
-      el.addEventListener('change', () => {
-        const node = getCondNode(); if (!node) return;
-        const di = parseInt(el.dataset.condIndex, 10);
-        if (di >= 0 && di < node.conditions.length) { updater(node.conditions[di], el); _bpRefreshDetail(); }
-      });
-    });
-  };
-  bindCondField('.nd-cond-ref', (c, el) => { c.ref = el.value.trim(); });
-  bindCondFieldRefresh('.nd-cond-touch-type', (c, el) => { c.touchRefType = el.value; });
-  bindCondField('.nd-cond-touch-ref', (c, el) => { c.touchRef = el.value.trim(); });
-  bindCondField('.nd-cond-pos-subj', (c, el) => { c.posSubject = el.value.trim(); });
-  bindCondField('.nd-cond-pos-axis', (c, el) => { c.posAxis = el.value; });
-  bindCondField('.nd-cond-pos-op', (c, el) => { c.posOp = el.value; });
-  bindCondFieldRefresh('.nd-cond-pos-type', (c, el) => { c.posValueType = el.value; });
-  bindCondField('.nd-cond-pos-val', (c, el) => { c.posValue = parseFloat(el.value) || 0; });
-  bindCondField('.nd-cond-pos-var', (c, el) => { c.posValueVar = el.value.trim(); });
-  bindCondField('.nd-cond-dist-target', (c, el) => { c.distTarget = el.value.trim(); });
-  bindCondField('.nd-cond-dist-op', (c, el) => { c.distOp = el.value; });
-  bindCondFieldRefresh('.nd-cond-dist-type', (c, el) => { c.distValueType = el.value; });
-  bindCondField('.nd-cond-dist-val', (c, el) => { c.distValue = parseFloat(el.value) || 0; });
-  bindCondField('.nd-cond-dist-var', (c, el) => { c.distValueVar = el.value.trim(); });
-  bindCondFieldRefresh('.nd-cond-timer-type', (c, el) => { c.timerType = el.value; });
-  bindCondField('.nd-cond-timer', (c, el) => { c.timerSeconds = parseFloat(el.value) || 0; });
-  bindCondField('.nd-cond-timer-var', (c, el) => { c.timerVar = el.value.trim(); });
-  bindCondField('.nd-cond-key', (c, el) => { c.keyCode = el.value; });
-  bindCondField('.nd-cond-var-name', (c, el) => { c.varCmpName = el.value.trim(); });
-  bindCondField('.nd-cond-var-op', (c, el) => { c.varCmpOp = el.value; });
-  bindCondFieldRefresh('.nd-cond-var-type', (c, el) => { c.varCmpValueType = el.value; });
-  bindCondField('.nd-cond-var-val', (c, el) => { c.varCmpValue = parseFloat(el.value) || 0; });
-  bindCondField('.nd-cond-var-ref', (c, el) => { c.varCmpValueVar = el.value.trim(); });
-  bindCondField('.nd-cond-bool-name', (c, el) => { c.boolName = el.value.trim(); });
-
-  // ── Action node bindings ──
-  const getActionNode = () => {
-    const node = fn?.nodes?.find(n => n.id === _bpGraph.selectedNodeId);
-    return (node && node.type === 'action') ? node : null;
-  };
-  const withNodeAction = (actIdx, updater) => {
-    const node = getActionNode();
-    if (!node) return;
-    while (node.actions.length <= actIdx) node.actions.push(createDefaultFunctionAction());
-    updater(node.actions[actIdx]);
-  };
-  controlFunctionsListEl.querySelectorAll('.nd-add-act').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const node = getActionNode(); if (node) { node.actions.push(createDefaultFunctionAction()); _bpRefreshDetail(); }
-    });
-  });
   controlFunctionsListEl.querySelectorAll('.cfn-del-act').forEach(btn => {
     btn.addEventListener('click', () => {
+      const fnIdx = parseInt(btn.dataset.fn, 10);
       const actIdx = parseInt(btn.dataset.act, 10);
-      const node = getActionNode(); if (!node) return;
-      if (actIdx >= 0 && actIdx < node.actions.length) node.actions.splice(actIdx, 1);
-      if (!node.actions.length) node.actions.push(createDefaultFunctionAction());
-      _bpRefreshDetail();
+      const fn = controlFunctions[fnIdx];
+      if (!fn) return;
+      if (actIdx >= 0 && actIdx < fn.actions.length) fn.actions.splice(actIdx, 1);
+      if (!fn.actions.length) fn.actions.push(createDefaultFunctionAction());
+      refreshControlFunctionsUI();
     });
   });
+
   controlFunctionsListEl.querySelectorAll('.cfn-action-type').forEach(sel => {
     sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
       const actIdx = parseInt(sel.dataset.act, 10);
-      withNodeAction(actIdx, a => { a.actionType = CONTROL_ACTION_TYPES.includes(sel.value) ? sel.value : 'move'; });
-      _bpRefreshDetail();
+      withFnAction(fnIdx, actIdx, a => { a.actionType = CONTROL_ACTION_TYPES.includes(sel.value) ? sel.value : 'move'; });
+      refreshControlFunctionsUI();
     });
   });
+
   controlFunctionsListEl.querySelectorAll('.cfn-ref-type').forEach(sel => {
     sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
       const actIdx = parseInt(sel.dataset.act, 10);
-      withNodeAction(actIdx, a => { a.refType = sel.value === 'name' ? 'name' : 'group'; });
-      _bpRefreshDetail();
+      withFnAction(fnIdx, actIdx, a => { a.refType = sel.value === 'name' ? 'name' : 'group'; });
+      refreshControlFunctionsUI();
     });
   });
+
   controlFunctionsListEl.querySelectorAll('.cfn-ref-val').forEach(input => {
     input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
       const actIdx = parseInt(input.dataset.act, 10);
-      withNodeAction(actIdx, a => { a.refValue = input.value.trim(); });
+      withFnAction(fnIdx, actIdx, a => { a.refValue = input.value.trim(); });
     });
   });
 
-  const bindNum = (sel, updater) => {
-    controlFunctionsListEl.querySelectorAll(sel).forEach(input => {
+  const bindCfnNumber = (selector, updater) => {
+    controlFunctionsListEl.querySelectorAll(selector).forEach(input => {
       input.addEventListener('change', () => {
+        const fnIdx = parseInt(input.dataset.fn, 10);
         const actIdx = parseInt(input.dataset.act, 10);
         const val = parseFloat(input.value) || 0;
-        withNodeAction(actIdx, a => updater(a, val));
-      });
-    });
-  };
-  bindNum('.cfn-ox', (a, v) => { a.offset[0] = v; });
-  bindNum('.cfn-oy', (a, v) => { a.offset[1] = v; });
-  bindNum('.cfn-oz', (a, v) => { a.offset[2] = v; });
-  bindNum('.cfn-sox', (a, v) => { a.startOffset[0] = v; });
-  bindNum('.cfn-soy', (a, v) => { a.startOffset[1] = v; });
-  bindNum('.cfn-soz', (a, v) => { a.startOffset[2] = v; });
-  bindNum('.cfn-rox', (a, v) => { a.rotateOffset[0] = v; });
-  bindNum('.cfn-roy', (a, v) => { a.rotateOffset[1] = v; });
-  bindNum('.cfn-roz', (a, v) => { a.rotateOffset[2] = v; });
-  bindNum('.cfn-rsox', (a, v) => { a.rotateStartOffset[0] = v; });
-  bindNum('.cfn-rsoy', (a, v) => { a.rotateStartOffset[1] = v; });
-  bindNum('.cfn-rsoz', (a, v) => { a.rotateStartOffset[2] = v; });
-  bindNum('.cfn-rrx', (a, v) => { a.rotateRpm[0] = v; });
-  bindNum('.cfn-rry', (a, v) => { a.rotateRpm[1] = v; });
-  bindNum('.cfn-rrz', (a, v) => { a.rotateRpm[2] = v; });
-  bindNum('.cfn-scx', (a, v) => { a.scaleOffset[0] = v; });
-  bindNum('.cfn-scy', (a, v) => { a.scaleOffset[1] = v; });
-  bindNum('.cfn-scz', (a, v) => { a.scaleOffset[2] = v; });
-  bindNum('.cfn-ssx', (a, v) => { a.scaleStartOffset[0] = v; });
-  bindNum('.cfn-ssy', (a, v) => { a.scaleStartOffset[1] = v; });
-  bindNum('.cfn-ssz', (a, v) => { a.scaleStartOffset[2] = v; });
-  bindNum('.cfn-light-val', (a, v) => { a.lightValue = v; });
-  bindNum('.cfn-dur', (a, v) => { a.duration = Math.max(0, v); });
-  bindNum('.cfn-set-var-value', (a, v) => { a.setVarValue = Math.trunc(v); });
-
-  const bindSel = (sel, updater) => {
-    controlFunctionsListEl.querySelectorAll(sel).forEach(el => {
-      el.addEventListener('change', () => {
-        const actIdx = parseInt(el.dataset.act, 10);
-        withNodeAction(actIdx, a => updater(a, el));
-      });
-    });
-  };
-  const bindSelRefresh = (sel, updater) => {
-    controlFunctionsListEl.querySelectorAll(sel).forEach(el => {
-      el.addEventListener('change', () => {
-        const actIdx = parseInt(el.dataset.act, 10);
-        withNodeAction(actIdx, a => updater(a, el));
-        _bpRefreshDetail();
-      });
-    });
-  };
-  const bindInput = (sel, updater) => {
-    controlFunctionsListEl.querySelectorAll(sel).forEach(input => {
-      input.addEventListener('change', () => {
-        const actIdx = parseInt(input.dataset.act, 10);
-        withNodeAction(actIdx, a => updater(a, input));
+        withFnAction(fnIdx, actIdx, a => updater(a, val));
       });
     });
   };
 
-  bindSel('.cfn-pg-mode', (a, el) => { a.playerGroupMode = CONTROL_PLAYER_GROUP_MODES.includes(el.value) ? el.value : 'set'; });
-  bindInput('.cfn-pg-value', (a, el) => { a.playerGroupValue = el.value.trim(); });
-  bindSel('.cfn-light-op', (a, el) => { a.lightOp = CONTROL_LIGHT_OPS.includes(el.value) ? el.value : 'toggle'; });
-  bindInput('.cfn-audio-name', (a, el) => { a.audioName = el.value.trim(); });
-  bindSel('.cfn-audio-mode', (a, el) => { a.audioMode = AUDIO_PLAY_MODES.includes(el.value) ? el.value : 'global'; });
-  bindNum('.cfn-audio-dist', (a, v) => { a.audioDistance = clampAudioDistance(v); });
-  bindSelRefresh('.cfn-audio-until', (a, el) => { a.audioUntil = AUDIO_UNTIL_EVENTS.includes(el.value) ? el.value : 'deactivate'; });
-  bindInput('.cfn-audio-until-fn', (a, el) => { a.audioUntilFunction = el.value.trim(); });
-  bindSel('.cfn-audio-loop', (a, el) => { a.audioLoop = el.checked; });
-  bindSel('.cfn-fc-cmd', (a, el) => { a.functionControlCommand = FUNCTION_CONTROL_COMMANDS.includes(el.value) ? el.value : 'stop'; });
+  bindCfnNumber('.cfn-ox', (a, v) => { a.offset[0] = v; });
+  bindCfnNumber('.cfn-oy', (a, v) => { a.offset[1] = v; });
+  bindCfnNumber('.cfn-oz', (a, v) => { a.offset[2] = v; });
+  bindCfnNumber('.cfn-sox', (a, v) => { a.startOffset[0] = v; });
+  bindCfnNumber('.cfn-soy', (a, v) => { a.startOffset[1] = v; });
+  bindCfnNumber('.cfn-soz', (a, v) => { a.startOffset[2] = v; });
+  bindCfnNumber('.cfn-rox', (a, v) => { a.rotateOffset[0] = v; });
+  bindCfnNumber('.cfn-roy', (a, v) => { a.rotateOffset[1] = v; });
+  bindCfnNumber('.cfn-roz', (a, v) => { a.rotateOffset[2] = v; });
+  bindCfnNumber('.cfn-rsox', (a, v) => { a.rotateStartOffset[0] = v; });
+  bindCfnNumber('.cfn-rsoy', (a, v) => { a.rotateStartOffset[1] = v; });
+  bindCfnNumber('.cfn-rsoz', (a, v) => { a.rotateStartOffset[2] = v; });
+  bindCfnNumber('.cfn-rrx', (a, v) => { a.rotateRpm[0] = v; });
+  bindCfnNumber('.cfn-rry', (a, v) => { a.rotateRpm[1] = v; });
+  bindCfnNumber('.cfn-rrz', (a, v) => { a.rotateRpm[2] = v; });
+  bindCfnNumber('.cfn-scx', (a, v) => { a.scaleOffset[0] = v; });
+  bindCfnNumber('.cfn-scy', (a, v) => { a.scaleOffset[1] = v; });
+  bindCfnNumber('.cfn-scz', (a, v) => { a.scaleOffset[2] = v; });
+  bindCfnNumber('.cfn-ssx', (a, v) => { a.scaleStartOffset[0] = v; });
+  bindCfnNumber('.cfn-ssy', (a, v) => { a.scaleStartOffset[1] = v; });
+  bindCfnNumber('.cfn-ssz', (a, v) => { a.scaleStartOffset[2] = v; });
+  bindCfnNumber('.cfn-light-val', (a, v) => { a.lightValue = v; });
+  bindCfnNumber('.cfn-dur', (a, v) => { a.duration = Math.max(0, v); });
+  bindCfnNumber('.cfn-set-var-value', (a, v) => { a.setVarValue = Math.trunc(v); });
+  bindCfnNumber('.cfn-delay-dur', (a, v) => { a.delayDuration = Math.max(0, v || 1); });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-pg-mode').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => {
+        a.playerGroupMode = CONTROL_PLAYER_GROUP_MODES.includes(sel.value) ? sel.value : 'set';
+      });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-pg-value').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.playerGroupValue = input.value.trim(); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-light-op').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.lightOp = CONTROL_LIGHT_OPS.includes(sel.value) ? sel.value : 'toggle'; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-audio-name').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.audioName = input.value.trim(); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-audio-mode').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.audioMode = AUDIO_PLAY_MODES.includes(sel.value) ? sel.value : 'global'; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-audio-dist').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.audioDistance = clampAudioDistance(input.value); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-audio-until').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.audioUntil = AUDIO_UNTIL_EVENTS.includes(sel.value) ? sel.value : 'deactivate'; });
+      refreshControlFunctionsUI();
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-audio-until-fn').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.audioUntilFunction = input.value.trim(); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-audio-loop').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.audioLoop = input.checked; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-fc-cmd').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => {
+        a.functionControlCommand = FUNCTION_CONTROL_COMMANDS.includes(sel.value) ? sel.value : 'stop';
+      });
+    });
+  });
 
   controlFunctionsListEl.querySelectorAll('.cfn-fc-target-entry').forEach(input => {
     input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
       const actIdx = parseInt(input.dataset.act, 10);
       const tgtIdx = parseInt(input.dataset.tgtIndex, 10);
-      withNodeAction(actIdx, a => {
+      withFnAction(fnIdx, actIdx, a => {
         const list = normalizeFunctionNameList(a.functionControlTarget || '');
         const name = input.value.trim();
-        if (tgtIdx >= 0 && tgtIdx < list.length) { if (name) list[tgtIdx] = name; else list.splice(tgtIdx, 1); }
+        if (tgtIdx >= 0 && tgtIdx < list.length) {
+          if (name) { list[tgtIdx] = name; }
+          else { list.splice(tgtIdx, 1); }
+        }
         a.functionControlTarget = list.join(', ');
       });
-      _bpRefreshDetail();
+      refreshControlFunctionsUI();
     });
   });
+
   controlFunctionsListEl.querySelectorAll('.cfn-fc-target-del').forEach(btn => {
     btn.addEventListener('click', () => {
+      const fnIdx = parseInt(btn.dataset.fn, 10);
       const actIdx = parseInt(btn.dataset.act, 10);
       const tgtIdx = parseInt(btn.dataset.tgtIndex, 10);
-      withNodeAction(actIdx, a => {
+      withFnAction(fnIdx, actIdx, a => {
         const list = normalizeFunctionNameList(a.functionControlTarget || '');
         if (tgtIdx >= 0 && tgtIdx < list.length) list.splice(tgtIdx, 1);
         a.functionControlTarget = list.join(', ');
       });
-      _bpRefreshDetail();
+      refreshControlFunctionsUI();
     });
   });
+
   controlFunctionsListEl.querySelectorAll('.cfn-fc-target-add').forEach(btn => {
     btn.addEventListener('click', () => {
+      const fnIdx = parseInt(btn.dataset.fn, 10);
       const actIdx = parseInt(btn.dataset.act, 10);
-      withNodeAction(actIdx, a => {
+      withFnAction(fnIdx, actIdx, a => {
         const list = normalizeFunctionNameList(a.functionControlTarget || '');
         list.push('');
         a.functionControlTarget = list.join(', ');
       });
-      _bpRefreshDetail();
+      refreshControlFunctionsUI();
     });
   });
 
-  bindSel('.cfn-path-cmd', (a, el) => { a.pathCommand = PATH_CONTROL_COMMANDS.includes(el.value) ? el.value : 'start'; });
-  bindInput('.cfn-set-var-name', (a, el) => { a.setVarName = el.value.trim(); });
-  bindSel('.cfn-set-var-op', (a, el) => { a.setVarOp = ['=', '+', '-', '*', '/'].includes(el.value) ? el.value : '='; });
-  bindSelRefresh('.cfn-set-var-type', (a, el) => { a.setVarValueType = el.value === 'var' ? 'var' : 'digits'; });
-  bindInput('.cfn-set-var-var', (a, el) => { a.setVarValueVar = el.value.trim(); });
-  bindInput('.cfn-set-bool-name', (a, el) => { a.setBoolName = el.value.trim(); });
-  bindSel('.cfn-set-bool-value', (a, el) => { a.setBoolValue = el.value === 'toggle' ? 'toggle' : (el.value === 'true'); });
-  bindSel('.cfn-ps-target-type', (a, el) => { a.playerStatTargetType = el.value; });
-  bindInput('.cfn-ps-target', (a, el) => { a.playerStatTarget = el.value.trim(); });
-  bindSel('.cfn-ps-key', (a, el) => { a.playerStatKey = el.value; });
-  bindSel('.cfn-ps-op', (a, el) => { a.playerStatOp = el.value; });
-  bindNum('.cfn-ps-value', (a, v) => { a.playerStatValue = v; });
-  bindSelRefresh('.cfn-teleport-mode', (a, el) => { a.teleportMode = TELEPORT_MODES.includes(el.value) ? el.value : 'coords'; });
-  bindNum('.cfn-teleport-x', (a, v) => { a.teleportCoords[0] = v; });
-  bindNum('.cfn-teleport-y', (a, v) => { a.teleportCoords[1] = v; });
-  bindNum('.cfn-teleport-z', (a, v) => { a.teleportCoords[2] = v; });
-  bindSel('.cfn-teleport-world', (a, el) => { a.teleportWorldId = el.value; });
-  bindInput('.cfn-teleport-target-ref', (a, el) => { a.teleportTargetRef = el.value.trim(); });
-  bindSel('.cfn-skel-cmd', (a, el) => { a.skelAnimCommand = SKELETON_ANIM_COMMANDS.includes(el.value) ? el.value : 'play'; });
-  bindInput('.cfn-skel-clip', (a, el) => { a.skelAnimClip = el.value.trim(); });
-  bindNum('.cfn-skel-speed', (a, v) => { a.skelAnimSpeed = Math.max(0, v || 1); });
-  bindSel('.cfn-style', (a, el) => { a.style = ['glide','strict','snap'].includes(el.value) ? el.value : 'glide'; });
-  bindSel('.cfn-return', (a, el) => { a.returnOnDeactivate = el.checked; });
-  bindSel('.cfn-rotate-repeat', (a, el) => { a.rotateRepeat = el.checked; });
-  bindSel('.cfn-rotate-mode', (a, el) => { a.rotateGroupMode = el.value === 'together' ? 'together' : 'separate'; });
-  bindSel('.cfn-keep-upright', (a, el) => { a.rotateKeepUpright = el.checked; });
+  controlFunctionsListEl.querySelectorAll('.cfn-path-cmd').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => {
+        a.pathCommand = PATH_CONTROL_COMMANDS.includes(sel.value) ? sel.value : 'start';
+      });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-set-var-name').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.setVarName = input.value.trim(); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-set-var-op').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.setVarOp = ['=', '+', '-', '*', '/'].includes(sel.value) ? sel.value : '='; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-set-var-type').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.setVarValueType = sel.value === 'var' ? 'var' : 'digits'; });
+      refreshControlFunctionsUI();
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-set-var-var').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.setVarValueVar = input.value.trim(); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-set-bool-name').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.setBoolName = input.value.trim(); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-set-bool-value').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => {
+        a.setBoolValue = sel.value === 'toggle' ? 'toggle' : (sel.value === 'true');
+      });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-ps-target-type').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.playerStatTargetType = sel.value; });
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-ps-target').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.playerStatTarget = input.value.trim(); });
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-ps-key').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.playerStatKey = sel.value; });
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-ps-op').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.playerStatOp = sel.value; });
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-ps-value').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.playerStatValue = parseFloat(input.value) || 0; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-teleport-mode').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.teleportMode = TELEPORT_MODES.includes(sel.value) ? sel.value : 'coords'; });
+      refreshControlFunctionsUI();
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-teleport-x').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.teleportCoords[0] = parseFloat(input.value) || 0; });
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-teleport-y').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.teleportCoords[1] = parseFloat(input.value) || 0; });
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-teleport-z').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.teleportCoords[2] = parseFloat(input.value) || 0; });
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-teleport-world').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.teleportWorldId = sel.value; });
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-teleport-target-ref').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.teleportTargetRef = input.value.trim(); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-cmd-text').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.commandText = input.value.trim(); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-skel-cmd').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.skelAnimCommand = SKELETON_ANIM_COMMANDS.includes(sel.value) ? sel.value : 'play'; });
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-skel-clip').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.skelAnimClip = input.value.trim(); });
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-skel-speed').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.skelAnimSpeed = Math.max(0, parseFloat(input.value) || 1); });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-style').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.style = ['glide','strict','snap'].includes(sel.value) ? sel.value : 'glide'; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-return').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.returnOnDeactivate = input.checked; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-rotate-repeat').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.rotateRepeat = input.checked; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-rotate-mode').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.rotateGroupMode = sel.value === 'together' ? 'together' : 'separate'; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-keep-upright').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.rotateKeepUpright = input.checked; });
+    });
+  });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-group-add').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const groupId = String(btn.dataset.cfg || '').trim();
+      controlFunctions.push(createDefaultControlFunction(groupId));
+      refreshControlFunctionsUI();
+    });
+  });
 }
 
+/* ── Top-level button wiring ── */
 if (btnAddControlFn) {
   btnAddControlFn.addEventListener('click', () => {
     ensureControlFunctionGroups();
@@ -23321,114 +23710,30 @@ if (controlFnSearchInput) {
   controlFnSearchInput.addEventListener('input', () => refreshControlFunctionsUI());
 }
 
-// ── Blueprint overlay: toggle, toolbar wiring ────────────────────────────────
-if (_bpToggleBtn && _bpOverlayEl) {
-  _bpToggleBtn.addEventListener('click', () => {
-    const active = _bpOverlayEl.classList.toggle('active');
-    _bpOverlayEl.style.display = active ? 'flex' : 'none';
-    _bpToggleBtn.classList.toggle('bp-active', active);
-    if (active) {
-      _bpRefreshFnSelect();
-      refreshBpGraph();
-    }
-  });
-}
-
-// Function selector dropdown
-function _bpRefreshFnSelect() {
-  if (!_bpFnSelectEl) return;
-  let html = '<option value="-1">(select FN Group)</option>';
-  controlFunctions.forEach((fn, i) => {
-    const name = fn.name || `FN Group ${i + 1}`;
-    const sel = i === _bpGraph.selectedFnIdx ? ' selected' : '';
-    html += `<option value="${i}"${sel}>${escapeHtml(name)}</option>`;
-  });
-  _bpFnSelectEl.innerHTML = html;
-}
-if (_bpFnSelectEl) {
-  _bpFnSelectEl.addEventListener('change', () => {
-    _bpGraph.selectedFnIdx = parseInt(_bpFnSelectEl.value, 10);
-    _bpGraph.selectedNodeId = null;
-    _bpGraph.panX = 0;
-    _bpGraph.panY = 0;
-    _bpGraph.zoom = 1;
-    refreshBpGraph();
-    _bpRefreshDetail();
-  });
-}
-
-// Create new FN Group from graph toolbar
-if (_bpAddFnGroupBtn) {
-  _bpAddFnGroupBtn.addEventListener('click', () => {
-    ensureControlFunctionGroups();
-    const defaultGroupId = controlFunctionGroups[0]?.id || '';
-    controlFunctions.push(createDefaultControlFunction(defaultGroupId));
-    const newIdx = controlFunctions.length - 1;
-    _bpGraph.selectedFnIdx = newIdx;
-    _bpGraph.selectedNodeId = null;
+/* ── Toolbar wiring ── */
+if (cfnActionFilterEl) {
+  cfnActionFilterEl.addEventListener('change', () => {
+    _cfnActionTypeFilter = cfnActionFilterEl.value;
     refreshControlFunctionsUI();
   });
 }
-
-// Add Target / Condition / Action nodes
-if (_bpAddTargetBtn) {
-  _bpAddTargetBtn.addEventListener('click', () => {
-    const fnIdx = _bpGraph.selectedFnIdx ?? -1;
-    const fn = controlFunctions[fnIdx];
-    if (!fn) return;
-    if (!Array.isArray(fn.nodes)) fn.nodes = [];
-    const n = createDefaultTargetNode();
-    n.graphX = 30 + fn.nodes.length * 220;
-    n.graphY = 30;
-    fn.nodes.push(n);
-    refreshBpGraph();
-  });
-}
-if (_bpAddConditionBtn) {
-  _bpAddConditionBtn.addEventListener('click', () => {
-    const fnIdx = _bpGraph.selectedFnIdx ?? -1;
-    const fn = controlFunctions[fnIdx];
-    if (!fn) return;
-    if (!Array.isArray(fn.nodes)) fn.nodes = [];
-    const n = createDefaultConditionNode();
-    n.graphX = 30 + fn.nodes.length * 220;
-    n.graphY = 30;
-    fn.nodes.push(n);
-    refreshBpGraph();
-  });
-}
-if (_bpAddActionBtn) {
-  _bpAddActionBtn.addEventListener('click', () => {
-    const fnIdx = _bpGraph.selectedFnIdx ?? -1;
-    const fn = controlFunctions[fnIdx];
-    if (!fn) return;
-    if (!Array.isArray(fn.nodes)) fn.nodes = [];
-    const n = createDefaultActionNode();
-    n.graphX = 30 + fn.nodes.length * 220;
-    n.graphY = 30;
-    fn.nodes.push(n);
-    refreshBpGraph();
-  });
-}
-
-if (_bpOverlayAddGroupBtn) {
-  _bpOverlayAddGroupBtn.addEventListener('click', () => {
-    const name = String(_bpOverlayNewGroupInput?.value ?? '').trim();
-    if (!name) return;
-    controlFunctionGroups.push(createDefaultControlFunctionGroup(name));
-    if (_bpOverlayNewGroupInput) _bpOverlayNewGroupInput.value = '';
+if (cfnCollapseAllBtn) {
+  cfnCollapseAllBtn.addEventListener('click', () => {
+    controlFunctions.forEach((_, i) => _cfnCollapsed.add(i));
     refreshControlFunctionsUI();
   });
 }
-if (_bpOverlayNewGroupInput) {
-  _bpOverlayNewGroupInput.addEventListener('keydown', e => {
-    if (e.key !== 'Enter') return;
-    e.preventDefault();
-    _bpOverlayAddGroupBtn?.click();
+if (cfnExpandAllBtn) {
+  cfnExpandAllBtn.addEventListener('click', () => {
+    _cfnCollapsed.clear();
+    refreshControlFunctionsUI();
   });
 }
-if (_bpOverlaySearchInput) {
-  _bpOverlaySearchInput.addEventListener('input', () => refreshBpGraph());
+if (cfnCompactToggle) {
+  cfnCompactToggle.addEventListener('change', () => {
+    _cfnCompactMode = cfnCompactToggle.checked;
+    refreshControlFunctionsUI();
+  });
 }
 
 // ─── Quality control helpers ─────────────────────────────────────────────────
@@ -23856,6 +24161,93 @@ function _renderPortalViews() {
   }
 }
 
+// ─── Camera-to-screen live feed rendering ─────────────────────────────────────
+const _camScreenRT = new THREE.WebGLRenderTarget(512, 288);
+const _camScreenCam = new THREE.PerspectiveCamera(60, 16 / 9, 0.1, 500);
+const _camScreenTmpPos = new THREE.Vector3();
+const CAMERA_SCREEN_MAX_DIST = 60;
+const CAMERA_SCREEN_MAX_ACTIVE = 4;
+
+function _renderCameraScreenViews() {
+  if (!state.isPlaytest) return;
+  let rendered = 0;
+  for (const m of sceneObjects) {
+    if (m.userData.type !== 'screen') continue;
+    const sc = m.userData.screenConfig;
+    if (!sc || sc.mediaType !== 'camera' || !sc.cameraLabel) continue;
+    if (rendered >= CAMERA_SCREEN_MAX_ACTIVE) break;
+
+    // Distance check from player
+    _camScreenTmpPos.setFromMatrixPosition(m.matrixWorld);
+    const dist = _camScreenTmpPos.distanceTo(fpsPos);
+    if (dist > CAMERA_SCREEN_MAX_DIST) continue;
+
+    // Find the camera object by label
+    const targetLabel = sc.cameraLabel.toLowerCase();
+    const camMesh = sceneObjects.find(o =>
+      o.userData.type === 'camera' &&
+      (o.userData.label || '').toLowerCase() === targetLabel
+    );
+    if (!camMesh) continue;
+
+    // Configure render camera from camera mesh
+    const cfg = normalizeCameraConfig(camMesh.userData.cameraConfig);
+    _camScreenCam.fov = cfg.fov;
+    _camScreenCam.aspect = cfg.aspectRatio;
+    _camScreenCam.near = cfg.near;
+    _camScreenCam.far = cfg.far;
+    _camScreenCam.updateProjectionMatrix();
+
+    camMesh.updateMatrixWorld(true);
+    const worldPos = new THREE.Vector3();
+    camMesh.getWorldPosition(worldPos);
+    _camScreenCam.position.copy(worldPos);
+
+    if (cfg.lookAtEnabled) {
+      _camScreenCam.lookAt(cfg.lookAtTarget[0], cfg.lookAtTarget[1], cfg.lookAtTarget[2]);
+    } else {
+      const worldQuat = new THREE.Quaternion();
+      camMesh.getWorldQuaternion(worldQuat);
+      _camScreenCam.quaternion.copy(worldQuat);
+    }
+
+    // Hide camera mesh during render
+    const camWasVis = camMesh.visible;
+    camMesh.visible = false;
+
+    // Temporarily reveal objects in camera frustum that frustum culling hid
+    const savedVis = [];
+    _camScreenCam.updateMatrixWorld();
+    _projScreenMatrix.multiplyMatrices(_camScreenCam.projectionMatrix, _camScreenCam.matrixWorldInverse);
+    _frustum.setFromProjectionMatrix(_projScreenMatrix);
+    for (const o of sceneObjects) {
+      if (!o.visible && !o.userData._dead && !o.userData._playtestHidden && _frustum.intersectsObject(o)) {
+        savedVis.push(o);
+        o.visible = true;
+      }
+    }
+
+    // Render to RT
+    renderer.setRenderTarget(_camScreenRT);
+    renderer.render(scene, _camScreenCam);
+    renderer.setRenderTarget(null);
+
+    // Restore
+    for (const o of savedVis) o.visible = false;
+    camMesh.visible = camWasVis;
+
+    // Apply RT texture to screen material
+    if (m.material) {
+      if (!m.userData._camScreenActive) {
+        m.userData._camScreenActive = true;
+      }
+      m.material.map = _camScreenRT.texture;
+      m.material.needsUpdate = true;
+    }
+    rendered++;
+  }
+}
+
 // ─── Animation loop ───────────────────────────────────────────────────────────
 const _fwd   = new THREE.Vector3();
 const _right = new THREE.Vector3();
@@ -23977,9 +24369,23 @@ function animate(t) {
 
     if (_move.lengthSq() > 0) {
       let speed = canSprint ? resolveGameRule('sprintSpeed', 12) : BASE_FPS_SPEED;
+      if (window._flame3dConsole && window._flame3dConsole.speedMul !== 1) speed *= window._flame3dConsole.speedMul;
       if (fpsCrouching) speed *= 0.5;
       _move.normalize().multiplyScalar(speed * dt);
     }
+
+    // Noclip: skip all collision, gravity, traction — free flight
+    if (window._flame3dConsole && window._flame3dConsole.noclip) {
+      fpsPos.x += _move.x;
+      fpsPos.z += _move.z;
+      const flyDir = (fpsKeys.has('Space') || fpsKeys.has('KeyE') ? 1 : 0) - (fpsKeys.has(keybinds.crouch) || fpsKeys.has('KeyQ') ? 1 : 0);
+      const noclipSpeed = (canSprint ? resolveGameRule('sprintSpeed', 12) : BASE_FPS_SPEED) * dt;
+      if (flyDir !== 0) fpsPos.y += flyDir * noclipSpeed;
+      fpsVelY = 0;
+      fpsGrounded = false;
+      fpsFallStartY = null;
+      syncFpsCamera();
+    } else {
 
     refreshSolids();
     const _tractionIgnore = applyTractionCarry();
@@ -24069,6 +24475,8 @@ function animate(t) {
       fpsFallStartY = null;
     }
 
+    } // end noclip else
+
     // Track first ground touch after spawn
     if (!fpsSpawnLanded && fpsGrounded) fpsSpawnLanded = true;
 
@@ -24132,6 +24540,7 @@ function animate(t) {
     updateSpawnDirectionIndicators();
     updateJointIndicators();
     _renderPortalViews();
+    _renderCameraScreenViews();
     renderer.render(scene, fpsCam);
     for (const m of sceneObjects) {
       _playtestPrevPositions.set(m, m.position.clone());
@@ -24312,6 +24721,563 @@ if (_consoleClearBtn) _consoleClearBtn.addEventListener('click', clearConsole);
 if (_consoleFilterLog) _consoleFilterLog.addEventListener('change', _applyAllConsoleFilters);
 if (_consoleFilterWarn) _consoleFilterWarn.addEventListener('change', _applyAllConsoleFilters);
 if (_consoleFilterErr) _consoleFilterErr.addEventListener('change', _applyAllConsoleFilters);
+
+// ─── Console Command System ──────────────────────────────────────────────────
+{
+const _cmdInput = document.getElementById('console-input');
+const _cmdHistory = [];
+let _cmdHistoryIdx = -1;
+let _cmdHistoryDraft = '';
+
+// -- Helpers to log styled entries --
+function _cmdLog(text)    { appendConsoleEntry('result', [text]); }
+function _cmdError(text)  { appendConsoleEntry('error', ['[Error] ' + text]); }
+function _cmdEcho(text)   { appendConsoleEntry('cmd', ['> ' + text]); }
+
+// -- Tokenizer: splits respecting (parens), "quotes", key:value --
+function _tokenize(input) {
+  const tokens = [];
+  let i = 0;
+  while (i < input.length) {
+    // skip whitespace
+    if (input[i] === ' ' || input[i] === '\t') { i++; continue; }
+    // parenthesized group → collect as raw string (without parens)
+    if (input[i] === '(') {
+      let depth = 1, start = i + 1;
+      i++;
+      while (i < input.length && depth > 0) {
+        if (input[i] === '(') depth++;
+        else if (input[i] === ')') depth--;
+        i++;
+      }
+      tokens.push({ type: 'group', value: input.slice(start, i - 1).trim() });
+      continue;
+    }
+    // bracket group [key: value] → treat as kv pair
+    if (input[i] === '[') {
+      let depth = 1, start = i + 1;
+      i++;
+      while (i < input.length && depth > 0) {
+        if (input[i] === '[') depth++;
+        else if (input[i] === ']') depth--;
+        i++;
+      }
+      const inner = input.slice(start, i - 1).trim();
+      if (inner.includes(':')) {
+        const cidx = inner.indexOf(':');
+        tokens.push({ type: 'kv', key: inner.slice(0, cidx).trim().toLowerCase(), value: inner.slice(cidx + 1).trim() });
+      } else {
+        tokens.push({ type: 'word', value: inner });
+      }
+      continue;
+    }
+    // quoted string
+    if (input[i] === '"' || input[i] === "'") {
+      const q = input[i]; i++;
+      let s = '';
+      while (i < input.length && input[i] !== q) { s += input[i]; i++; }
+      if (i < input.length) i++; // closing quote
+      tokens.push({ type: 'string', value: s });
+      continue;
+    }
+    // word or key:value
+    let word = '';
+    while (i < input.length && input[i] !== ' ' && input[i] !== '\t' && input[i] !== '(' && input[i] !== '[') {
+      word += input[i]; i++;
+    }
+    if (word.includes(':')) {
+      const cidx = word.indexOf(':');
+      tokens.push({ type: 'kv', key: word.slice(0, cidx).toLowerCase(), value: word.slice(cidx + 1) });
+    } else {
+      tokens.push({ type: 'word', value: word });
+    }
+  }
+  return tokens;
+}
+
+// -- Parse a group token "x y z" into a Vector3 --
+function _parseVec3(groupToken) {
+  if (!groupToken || groupToken.type !== 'group') return null;
+  const parts = groupToken.value.split(/[\s,]+/).map(Number);
+  if (parts.length < 3 || parts.some(isNaN)) return null;
+  return new THREE.Vector3(parts[0], parts[1], parts[2]);
+}
+
+// -- Selector resolver: returns array of meshes --
+function _resolveSelector(selectorStr) {
+  if (!selectorStr) return [];
+  const s = selectorStr.trim();
+  if (s === '*') return [...sceneObjects];
+  if (s === '.') {
+    const result = [];
+    if (state.selectedObject) result.push(state.selectedObject);
+    result.push(...state.extraSelected);
+    return result;
+  }
+  // group:Name
+  if (s.toLowerCase().startsWith('group:')) {
+    const gName = s.slice(6);
+    return sceneObjects.filter(m => m.userData.editorGroupId === gName);
+  }
+  // type:typename
+  if (s.toLowerCase().startsWith('type:')) {
+    const tName = s.slice(5).toLowerCase();
+    return sceneObjects.filter(m => (m.userData.type || '').toLowerCase() === tName);
+  }
+  // by label (exact), then fall back to label (case-insensitive), then type name
+  const byLabel = sceneObjects.filter(m => (m.userData.label || '') === s);
+  if (byLabel.length) return byLabel;
+  const sl = s.toLowerCase();
+  const byLabelCI = sceneObjects.filter(m => (m.userData.label || '').toLowerCase() === sl);
+  if (byLabelCI.length) return byLabelCI;
+  return sceneObjects.filter(m => (m.userData.type || '').toLowerCase() === sl);
+}
+
+// -- Parse kv pairs from remaining tokens --
+function _collectKV(tokens, startIdx) {
+  const kv = {};
+  for (let i = startIdx; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t.type === 'kv') kv[t.key] = t.value;
+    else if (t.type === 'word' && t.value.includes(':')) {
+      const ci = t.value.indexOf(':');
+      kv[t.value.slice(0, ci).toLowerCase()] = t.value.slice(ci + 1);
+    }
+  }
+  return kv;
+}
+
+// -- Command registry --
+const _commands = {};
+
+function _registerCmd(name, desc, usage, fn) {
+  _commands[name.toLowerCase()] = { name, desc, usage, fn };
+}
+
+// ── help ──
+_registerCmd('help', 'Show available commands', 'help [command]', (tokens) => {
+  if (tokens.length > 1) {
+    const cmd = _commands[tokens[1].value.toLowerCase()];
+    if (cmd) { _cmdLog(cmd.name + ' — ' + cmd.desc + '\n  Usage: ' + cmd.usage); }
+    else _cmdError('Unknown command: "' + tokens[1].value + '"');
+    return;
+  }
+  _cmdLog('── Flame3D Console Commands ──');
+  const cats = {
+    'Editor': ['place', 'delete', 'select', 'deselect', 'move', 'rotate', 'scale', 'group', 'ungroup', 'rename', 'set', 'list', 'count', 'inspect'],
+    'Playtest': ['tp', 'heal', 'damage', 'kill', 'god', 'noclip', 'speed'],
+    'General': ['help', 'clear', 'echo'],
+  };
+  for (const [cat, names] of Object.entries(cats)) {
+    const lines = names.filter(n => _commands[n]).map(n => '  ' + _commands[n].name.padEnd(12) + _commands[n].desc);
+    _cmdLog(cat + ':\n' + lines.join('\n'));
+  }
+});
+
+// ── clear ──
+_registerCmd('clear', 'Clear the console', 'clear', () => { clearConsole(); });
+
+// ── echo ──
+_registerCmd('echo', 'Print a message', 'echo <message>', (tokens) => {
+  _cmdLog(tokens.slice(1).map(t => t.value).join(' '));
+});
+
+// ── place ──
+_registerCmd('place', 'Place an object at a position', 'place <type> (<x> <y> <z>) [name:<n>] [group:<g>]', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.place.usage); return; }
+  const typeName = tokens[1].value.toLowerCase();
+  if (!DEFS[typeName]) {
+    _cmdError('Unknown type: "' + tokens[1].value + '". Available: ' + Object.keys(DEFS).join(', '));
+    return;
+  }
+  // Find position group
+  const posToken = tokens.find(t => t.type === 'group');
+  const pos = posToken ? _parseVec3(posToken) : new THREE.Vector3(0, DEFS[typeName].placedY || 0, 0);
+  if (!pos) { _cmdError('Invalid position. Use: (x y z)'); return; }
+  const kv = _collectKV(tokens, 2);
+
+  const mesh = createMesh(typeName, false, { opacity: state.placeOpacity });
+  mesh.position.copy(pos);
+  scene.add(mesh);
+  sceneObjects.push(mesh);
+  mesh.userData.type = typeName;
+  if (kv.name) mesh.userData.label = kv.name;
+  if (kv.group) mesh.userData.editorGroupId = kv.group;
+
+  pushUndo({ type: 'add', mesh });
+  if (typeof refreshBpAssets === 'function') refreshBpAssets();
+  refreshStatus();
+  _cmdLog('Placed ' + DEFS[typeName].label + ' at (' + pos.x + ', ' + pos.y + ', ' + pos.z + ')' + (kv.name ? ' as "' + kv.name + '"' : ''));
+});
+
+// ── delete ──
+_registerCmd('delete', 'Delete objects matching a selector', 'delete <selector>', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.delete.usage); return; }
+  const sel = tokens.slice(1).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  for (const m of [...objs]) deleteObject(m);
+  _cmdLog('Deleted ' + objs.length + ' object(s)');
+});
+
+// ── select ──
+_registerCmd('select', 'Select objects matching a selector', 'select <selector>', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.select.usage); return; }
+  const sel = tokens.slice(1).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  selectObject(objs[0]);
+  for (let i = 1; i < objs.length; i++) toggleExtraSelect(objs[i]);
+  _cmdLog('Selected ' + objs.length + ' object(s)');
+});
+
+// ── deselect ──
+_registerCmd('deselect', 'Deselect all', 'deselect', () => {
+  selectObject(null);
+  _cmdLog('Selection cleared');
+});
+
+// ── move ──
+_registerCmd('move', 'Move objects to a position', 'move <selector> (<x> <y> <z>)', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.move.usage); return; }
+  const sel = tokens[1].value;
+  const posToken = tokens.find(t => t.type === 'group');
+  const pos = _parseVec3(posToken);
+  if (!pos) { _cmdError('Invalid position. Use: (x y z)'); return; }
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  for (const m of objs) m.position.copy(pos);
+  refreshProps();
+  refreshStatus();
+  _cmdLog('Moved ' + objs.length + ' object(s) to (' + pos.x + ', ' + pos.y + ', ' + pos.z + ')');
+});
+
+// ── rotate ──
+_registerCmd('rotate', 'Rotate objects (degrees)', 'rotate <selector> (<xDeg> <yDeg> <zDeg>)', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.rotate.usage); return; }
+  const sel = tokens[1].value;
+  const rotToken = tokens.find(t => t.type === 'group');
+  const rot = _parseVec3(rotToken);
+  if (!rot) { _cmdError('Invalid rotation. Use: (xDeg yDeg zDeg)'); return; }
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  for (const m of objs) m.rotation.set(
+    THREE.MathUtils.degToRad(rot.x),
+    THREE.MathUtils.degToRad(rot.y),
+    THREE.MathUtils.degToRad(rot.z)
+  );
+  refreshProps();
+  refreshStatus();
+  _cmdLog('Rotated ' + objs.length + ' object(s) to (' + rot.x + '°, ' + rot.y + '°, ' + rot.z + '°)');
+});
+
+// ── scale ──
+_registerCmd('scale', 'Scale objects', 'scale <selector> (<x> <y> <z>)', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.scale.usage); return; }
+  const sel = tokens[1].value;
+  const scToken = tokens.find(t => t.type === 'group');
+  const sc = _parseVec3(scToken);
+  if (!sc) { _cmdError('Invalid scale. Use: (x y z)'); return; }
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  for (const m of objs) m.scale.set(sc.x, sc.y, sc.z);
+  refreshProps();
+  refreshStatus();
+  _cmdLog('Scaled ' + objs.length + ' object(s) to (' + sc.x + ', ' + sc.y + ', ' + sc.z + ')');
+});
+
+// ── group ──
+_registerCmd('group', 'Assign objects to a named group', 'group <groupName> <selector>', (tokens) => {
+  if (tokens.length < 3) { _cmdError('Usage: ' + _commands.group.usage); return; }
+  const gName = tokens[1].value;
+  const sel = tokens.slice(2).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  for (const m of objs) m.userData.editorGroupId = gName;
+  _cmdLog('Assigned ' + objs.length + ' object(s) to group "' + gName + '"');
+});
+
+// ── ungroup ──
+_registerCmd('ungroup', 'Remove objects from their group', 'ungroup <selector>', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.ungroup.usage); return; }
+  const sel = tokens.slice(1).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  for (const m of objs) delete m.userData.editorGroupId;
+  _cmdLog('Ungrouped ' + objs.length + ' object(s)');
+});
+
+// ── rename ──
+_registerCmd('rename', 'Rename an object', 'rename <selector> <newName>', (tokens) => {
+  if (tokens.length < 3) { _cmdError('Usage: ' + _commands.rename.usage); return; }
+  const sel = tokens[1].value;
+  const newName = tokens.slice(2).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  for (const m of objs) m.userData.label = newName;
+  refreshProps();
+  _cmdLog('Renamed ' + objs.length + ' object(s) to "' + newName + '"');
+});
+
+// ── set ──
+_registerCmd('set', 'Set a property on objects', 'set <selector> <property> <value>', (tokens) => {
+  if (tokens.length < 4) { _cmdError('Usage: ' + _commands.set.usage); return; }
+  const sel = tokens[1].value;
+  const prop = tokens[2].value.toLowerCase();
+  const val = tokens.slice(3).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  // Handle known properties
+  const numVal = Number(val);
+  for (const m of objs) {
+    if (prop === 'color' || prop === 'colour') {
+      m.material.color.set(val);
+    } else if (prop === 'opacity') {
+      m.material.transparent = true;
+      m.material.opacity = THREE.MathUtils.clamp(numVal, 0, 1);
+    } else if (prop === 'visible') {
+      m.visible = val === 'true' || val === '1';
+    } else if (prop === 'label' || prop === 'name') {
+      m.userData.label = val;
+    } else {
+      m.userData[prop] = isNaN(numVal) ? val : numVal;
+    }
+  }
+  refreshProps();
+  refreshStatus();
+  _cmdLog('Set ' + prop + ' = ' + val + ' on ' + objs.length + ' object(s)');
+});
+
+// ── list ──
+_registerCmd('list', 'List objects, groups, or types', 'list [objects|groups|types]', (tokens) => {
+  const what = (tokens[1]?.value || 'objects').toLowerCase();
+  if (what === 'groups') {
+    const groups = new Map();
+    for (const m of sceneObjects) {
+      const g = m.userData.editorGroupId;
+      if (g) groups.set(g, (groups.get(g) || 0) + 1);
+    }
+    if (!groups.size) { _cmdLog('No groups defined'); return; }
+    const lines = [];
+    for (const [name, count] of groups) lines.push('  ' + name + ' (' + count + ' objects)');
+    _cmdLog('Groups:\n' + lines.join('\n'));
+  } else if (what === 'types') {
+    const types = new Map();
+    for (const m of sceneObjects) {
+      const t = m.userData.type || 'unknown';
+      types.set(t, (types.get(t) || 0) + 1);
+    }
+    const lines = [];
+    for (const [t, c] of types) lines.push('  ' + t + ': ' + c);
+    _cmdLog('Object types:\n' + lines.join('\n'));
+  } else {
+    if (!sceneObjects.length) { _cmdLog('No objects in scene'); return; }
+    const lines = sceneObjects.slice(0, 50).map(m => {
+      const label = m.userData.label || '(unnamed)';
+      const type = m.userData.type || '?';
+      const p = m.position;
+      const g = m.userData.editorGroupId ? ' [' + m.userData.editorGroupId + ']' : '';
+      return '  ' + label + ' (' + type + ') at (' + r3(p.x) + ', ' + r3(p.y) + ', ' + r3(p.z) + ')' + g;
+    });
+    _cmdLog('Objects (' + sceneObjects.length + '):\n' + lines.join('\n') + (sceneObjects.length > 50 ? '\n  ...and ' + (sceneObjects.length - 50) + ' more' : ''));
+  }
+});
+
+// ── count ──
+_registerCmd('count', 'Count objects matching selector', 'count <selector>', (tokens) => {
+  if (tokens.length < 2) { _cmdLog('Total objects: ' + sceneObjects.length); return; }
+  const sel = tokens.slice(1).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  _cmdLog('Matched: ' + objs.length + ' object(s)');
+});
+
+// ── inspect ──
+_registerCmd('inspect', 'Show details of an object', 'inspect <selector>', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.inspect.usage); return; }
+  const sel = tokens.slice(1).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  const m = objs[0];
+  const p = m.position, r = m.rotation, s = m.scale;
+  const lines = [
+    'Label: ' + (m.userData.label || '(none)'),
+    'Type: ' + (m.userData.type || '?'),
+    'Position: (' + r3(p.x) + ', ' + r3(p.y) + ', ' + r3(p.z) + ')',
+    'Rotation: (' + r3(THREE.MathUtils.radToDeg(r.x)) + '°, ' + r3(THREE.MathUtils.radToDeg(r.y)) + '°, ' + r3(THREE.MathUtils.radToDeg(r.z)) + '°)',
+    'Scale: (' + r3(s.x) + ', ' + r3(s.y) + ', ' + r3(s.z) + ')',
+    'Group: ' + (m.userData.editorGroupId || '(none)'),
+    'Visible: ' + m.visible,
+    'Color: #' + m.material.color.getHexString(),
+    'Opacity: ' + r3(m.material.opacity),
+  ];
+  _cmdLog(lines.join('\n'));
+});
+
+// ── Playtest commands ──
+
+// ── tp ──
+_registerCmd('tp', 'Teleport player (playtest only)', 'tp (<x> <y> <z>)', (tokens) => {
+  if (!state.isPlaytest) { _cmdError('tp is only available during playtest'); return; }
+  const posToken = tokens.find(t => t.type === 'group');
+  const pos = _parseVec3(posToken);
+  if (!pos) { _cmdError('Invalid position. Use: tp (x y z)'); return; }
+  fpsPos.copy(pos);
+  syncFpsCamera();
+  _cmdLog('Teleported to (' + pos.x + ', ' + pos.y + ', ' + pos.z + ')');
+});
+
+// ── heal ──
+_registerCmd('heal', 'Heal the player', 'heal <amount>', (tokens) => {
+  if (!state.isPlaytest) { _cmdError('heal is only available during playtest'); return; }
+  const amt = Number(tokens[1]?.value);
+  if (isNaN(amt)) { _cmdError('Usage: heal <amount>'); return; }
+  const maxHp = resolveGameRule('maxHealth', 100);
+  fpsHealth = Math.min(fpsHealth + amt, maxHp);
+  updateHealthHud();
+  _cmdLog('Healed ' + amt + ' → HP: ' + Math.ceil(fpsHealth) + '/' + maxHp);
+});
+
+// ── damage ──
+_registerCmd('damage', 'Damage the player', 'damage <amount>', (tokens) => {
+  if (!state.isPlaytest) { _cmdError('damage is only available during playtest'); return; }
+  const amt = Number(tokens[1]?.value);
+  if (isNaN(amt)) { _cmdError('Usage: damage <amount>'); return; }
+  fpsHealth = Math.max(0, fpsHealth - amt);
+  updateHealthHud();
+  _cmdLog('Damaged ' + amt + ' → HP: ' + Math.ceil(fpsHealth));
+});
+
+// ── kill ──
+_registerCmd('kill', 'Kill the player', 'kill', () => {
+  if (!state.isPlaytest) { _cmdError('kill is only available during playtest'); return; }
+  fpsHealth = 0;
+  updateHealthHud();
+  _cmdLog('Player killed');
+});
+
+// ── god ──
+let _godMode = false;
+_registerCmd('god', 'Toggle god mode (invincible)', 'god', () => {
+  if (!state.isPlaytest) { _cmdError('god is only available during playtest'); return; }
+  _godMode = !_godMode;
+  if (_godMode) {
+    fpsHealth = resolveGameRule('maxHealth', 100);
+    updateHealthHud();
+  }
+  _cmdLog('God mode: ' + (_godMode ? 'ON' : 'OFF'));
+});
+
+// ── noclip ──
+let _noclip = false;
+_registerCmd('noclip', 'Toggle noclip flying', 'noclip', () => {
+  if (!state.isPlaytest) { _cmdError('noclip is only available during playtest'); return; }
+  _noclip = !_noclip;
+  _cmdLog('Noclip: ' + (_noclip ? 'ON' : 'OFF'));
+});
+
+// ── speed ──
+let _speedMul = 1;
+_registerCmd('speed', 'Set movement speed multiplier', 'speed <multiplier>', (tokens) => {
+  if (!state.isPlaytest) { _cmdError('speed is only available during playtest'); return; }
+  const mul = Number(tokens[1]?.value);
+  if (isNaN(mul) || mul <= 0) { _cmdError('Usage: speed <positive number>'); return; }
+  _speedMul = mul;
+  _cmdLog('Speed multiplier: ' + _speedMul + 'x');
+});
+
+// ── spawn (alias for place during playtest) ──
+_registerCmd('spawn', 'Place an object at a position (alias for place)', 'spawn <type> (<x> <y> <z>)', (tokens) => {
+  _commands.place.fn(tokens);
+});
+
+// Expose cheat state for the game loop
+window._flame3dConsole = { get godMode() { return _godMode; }, get noclip() { return _noclip; }, get speedMul() { return _speedMul; }, execute: _executeCommand, get commands() { return _commands; } };
+
+// -- Execute a command string --
+function _executeCommand(input) {
+  const trimmed = input.trim();
+  if (!trimmed) return;
+  _cmdEcho(trimmed);
+  const tokens = _tokenize(trimmed);
+  if (!tokens.length) return;
+  const cmdName = tokens[0].value.toLowerCase();
+  const cmd = _commands[cmdName];
+  if (!cmd) {
+    _cmdError('Unknown command: "' + cmdName + '". Type "help" for a list of commands.');
+    return;
+  }
+  try { cmd.fn(tokens); } catch (e) { _cmdError(e.message || String(e)); }
+}
+
+// -- Wire up input --
+if (_cmdInput) {
+  _cmdInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const val = _cmdInput.value;
+      if (val.trim()) {
+        _cmdHistory.push(val);
+        if (_cmdHistory.length > 200) _cmdHistory.shift();
+        _cmdHistoryIdx = -1;
+        _cmdHistoryDraft = '';
+        _executeCommand(val);
+        _cmdInput.value = '';
+      }
+      e.preventDefault();
+    } else if (e.key === 'ArrowUp') {
+      if (_cmdHistory.length) {
+        if (_cmdHistoryIdx === -1) {
+          _cmdHistoryDraft = _cmdInput.value;
+          _cmdHistoryIdx = _cmdHistory.length - 1;
+        } else if (_cmdHistoryIdx > 0) {
+          _cmdHistoryIdx--;
+        }
+        _cmdInput.value = _cmdHistory[_cmdHistoryIdx];
+      }
+      e.preventDefault();
+    } else if (e.key === 'ArrowDown') {
+      if (_cmdHistoryIdx !== -1) {
+        _cmdHistoryIdx++;
+        if (_cmdHistoryIdx >= _cmdHistory.length) {
+          _cmdHistoryIdx = -1;
+          _cmdInput.value = _cmdHistoryDraft;
+        } else {
+          _cmdInput.value = _cmdHistory[_cmdHistoryIdx];
+        }
+      }
+      e.preventDefault();
+    } else if (e.key === 'Tab') {
+      // Tab completion for command names
+      const partial = _cmdInput.value.trim().toLowerCase();
+      if (partial) {
+        const matches = Object.keys(_commands).filter(n => n.startsWith(partial));
+        if (matches.length === 1) { _cmdInput.value = matches[0] + ' '; }
+        else if (matches.length > 1) { _cmdLog('Commands: ' + matches.join(', ')); }
+      }
+      e.preventDefault();
+    }
+    // Stop propagation so editor hotkeys don't fire while typing
+    e.stopPropagation();
+  });
+  // Prevent keyup from leaking to editor
+  _cmdInput.addEventListener('keyup', e => e.stopPropagation());
+}
+
+// Reset cheat state when playtest ends
+const _origCleanupPlaytest = typeof _cleanupPlaytest === 'function' ? _cleanupPlaytest : null;
+if (typeof _cleanupPlaytest !== 'undefined') {
+  // Monkey-patch is not ideal; instead we hook via a mutation observer on healthHud
+  // We'll use a simpler approach: reset on stopPlaytest button
+}
+// Listen for playtest state changes to reset cheats
+const _cmdPlaytestResetInterval = setInterval(() => {
+  if (!state.isPlaytest && (_godMode || _noclip || _speedMul !== 1)) {
+    _godMode = false;
+    _noclip = false;
+    _speedMul = 1;
+  }
+}, 1000);
+
+} // end Console Command System block
 
 // ─── Performance Monitor ─────────────────────────────────────────────────────
 const _perfBufSize = 120; // 60 seconds at 2 Hz
@@ -25260,8 +26226,8 @@ applySidebarState({ save: false, reflow: true });
 applyFunctionsPanelState({ save: false, reflow: true });
 applyBottomPanelState({ save: false, reflow: true });
 setBpPane(_activeBpPane);
-setLibraryPane(activeLibraryPane, { save: false });
 refreshAudioLibraryUI();
+setMode(state.mode);   // apply context-sensitive settings visibility
 setSnap(snapSelect.value);
 setDefaultLightIntensity(lightIntensityInput.value);
 setPlacementSides(state.placeSides);

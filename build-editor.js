@@ -33,7 +33,14 @@ async function buildEditorHtml() {
     }
 
     const indexSource = fs.readFileSync(indexPath, 'utf8');
-    const mainSource = fs.readFileSync(mainPath, 'utf8');
+    let mainSource = fs.readFileSync(mainPath, 'utf8');
+
+    // Inject shape-editable.js at the @@SHAPE_EDITABLE@@ marker
+    const shapeEditablePath = path.join(__dirname, 'shape-editable.js');
+    if (fs.existsSync(shapeEditablePath)) {
+      const shapeEditableSource = fs.readFileSync(shapeEditablePath, 'utf8');
+      mainSource = mainSource.replace('// @@SHAPE_EDITABLE@@', shapeEditableSource);
+    }
 
     // Create a script tag to replace the module import
     const runtimeFlagsScript = [

@@ -646,446 +646,19 @@
       gap: 5px;
     }
 
-    /* ── Individual action (pin row) ────────────────────── */
-    .bp-action {
-      margin: 0 7px;
-      padding: 6px 8px;
-      background: #0f1520;
-      border: 1px solid #1e2630;
-      border-radius: 5px;
-      position: relative;
-      transition: border-color .12s ease;
-    }
-    .bp-action:hover { border-color: #2a3a50; }
-
-    .bp-action-hdr {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      margin-bottom: 5px;
-      padding-bottom: 4px;
-      border-bottom: 1px solid #1a2030;
-    }
-    .bp-pin {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      flex-shrink: 0;
-      border: 1.5px solid;
-    }
-    .bp-pin-move     { background: #3fb950; border-color: #3fb950; }
-    .bp-pin-rotate   { background: #d29922; border-color: #d29922; }
-    .bp-pin-light    { background: #f0e060; border-color: #f0e060; }
-    .bp-pin-audio    { background: #a371f7; border-color: #a371f7; }
-    .bp-pin-path     { background: #79c0ff; border-color: #79c0ff; }
-    .bp-pin-functionControl { background: #f78166; border-color: #f78166; }
-    .bp-pin-playerGroup     { background: #56d4dd; border-color: #56d4dd; }
-    .bp-pin-setVar   { background: #ff7b72; border-color: #ff7b72; }
-    .bp-pin-setBool  { background: #d2a8ff; border-color: #d2a8ff; }
-    .bp-pin-playerStats     { background: #ffa657; border-color: #ffa657; }
-    .bp-pin-teleport { background: #7ee787; border-color: #7ee787; }
-    .bp-pin-skeleton { background: #e0e0e0; border-color: #e0e0e0; }
-
-    .bp-action-hdr .bp-act-num {
-      font-size: 8px;
-      color: #4a5568;
-      font-weight: 600;
-      min-width: 14px;
-    }
-    .bp-action-hdr select.cfn-action-type {
-      font-size: 9px;
-      padding: 1px 4px;
-      background: #1a2230;
-      border: 1px solid #2a3140;
-      color: var(--text);
-      border-radius: 3px;
-      font-weight: 500;
-    }
-    .bp-action-hdr select.cfn-ref-type {
-      font-size: 9px;
-      padding: 1px 4px;
-      background: #1a2230;
-      border: 1px solid #2a3140;
-      color: var(--muted);
-      border-radius: 3px;
-    }
-    .bp-action-hdr input.cfn-ref-val {
-      width: 68px;
-      font-size: 9px;
-      padding: 1px 4px;
-      background: #1a2230;
-      border: 1px solid #2a3140;
-      color: var(--text);
-      border-radius: 3px;
-    }
-    .bp-action-hdr .ct-del {
-      margin-left: auto;
-      font-size: 10px;
-      padding: 0 2px;
-      opacity: 0.4;
-      transition: opacity .12s ease;
-    }
-    .bp-action:hover .bp-action-hdr .ct-del { opacity: 0.8; }
-    .bp-action-hdr .ct-del:hover { opacity: 1; }
-
-    .bp-action-fields {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    .bp-action-fields .sf-row {
-      gap: 4px;
-    }
-    .bp-action-fields .sf-row span {
-      font-size: 8px;
-      color: var(--muted);
-      min-width: 48px;
-      flex-shrink: 0;
-    }
-    .bp-action-fields select {
-      font-size: 9px;
-      padding: 1px 4px;
-      background: #1a2230;
-      border: 1px solid #2a3140;
-      color: var(--text);
-      border-radius: 3px;
-    }
-    .bp-action-fields input[type="number"] {
-      width: 46px;
-      font-size: 9px;
-      padding: 1px 4px;
-      background: #1a2230;
-      border: 1px solid #2a3140;
-      color: var(--text);
-      border-radius: 3px;
-    }
-    .bp-action-fields input[type="text"] {
-      font-size: 9px;
-      padding: 1px 4px;
-      background: #1a2230;
-      border: 1px solid #2a3140;
-      color: var(--text);
-      border-radius: 3px;
-    }
-    .bp-action-fields input:focus,
-    .bp-action-fields select:focus {
-      border-color: var(--accent);
-      outline: none;
-    }
-    .bp-action-fields label {
-      display: flex;
-      align-items: center;
-      gap: 3px;
-      font-size: 8px;
-      color: var(--muted);
-      cursor: pointer;
-      white-space: nowrap;
-    }
-
-    .bp-node-footer {
-      padding: 4px 7px 6px;
-    }
-    .bp-add-action {
-      width: 100%;
-      padding: 3px 6px;
-      font-size: 9px;
-      background: rgba(31,111,235,.08);
-      border: 1px dashed #2a3a50;
-      color: var(--accentHi);
-      border-radius: 4px;
-      cursor: pointer;
-      transition: background .12s ease, border-color .12s ease;
-    }
-    .bp-add-action:hover {
-      background: rgba(31,111,235,.15);
-      border-color: var(--accent);
-    }
-
+    /* ── Function action readout ────────────────────────── */
     .cfn-pos-readout {
       font-size: 8px;
       color: var(--accentHi);
       font-family: monospace;
       opacity: 0.7;
-      padding-left: 22px;
-      min-height: 10px;
+      margin-left: 34px;
+      min-height: 12px;
     }
 
-    /* ── Blueprint Graph Overlay (full viewport) ─────── */
-    #bp-graph-overlay {
-      position: absolute;
-      top: 0; left: 0; right: 0; bottom: 0;
-      z-index: 25;
-      display: none;
-      flex-direction: column;
-      background: #0c1018;
-    }
-    #bp-graph-overlay.active { display: flex; }
+    /* Blueprint graph overlay — removed */
 
-    #btn-toggle-blueprint.bp-active {
-      background: rgba(31,111,235,.2);
-      color: var(--accentHi);
-      border-color: var(--accent);
-    }
-
-    /* ── Blueprint Graph View ──────────────────────────── */
-    .bp-graph-toolbar {
-      display: flex;
-      align-items: center;
-      gap: 4px;
-      padding: 5px 7px;
-      background: linear-gradient(180deg, #121820, #0f141b);
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
-    }
-    .bp-graph-toolbar input[type="text"] {
-      flex: 1;
-      min-width: 0;
-      font-size: 10px;
-      padding: 3px 6px;
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      color: var(--text);
-      border-radius: 4px;
-    }
-    .bp-graph-toolbar input[type="text"]:focus {
-      border-color: var(--accent);
-      outline: none;
-    }
-    .bp-graph-toolbar button {
-      font-size: 10px;
-      padding: 3px 7px;
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      color: var(--muted);
-      border-radius: 4px;
-      cursor: pointer;
-      white-space: nowrap;
-      transition: background .12s ease, color .12s ease;
-    }
-    .bp-graph-toolbar button:hover {
-      background: #283040;
-      color: var(--text);
-    }
-
-    .bp-graph {
-      flex: 1;
-      min-height: 120px;
-      position: relative;
-      overflow: hidden;
-      cursor: grab;
-      background-color: #0c1018;
-      background-image:
-        linear-gradient(rgba(30,40,55,.35) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(30,40,55,.35) 1px, transparent 1px),
-        linear-gradient(rgba(30,40,55,.15) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(30,40,55,.15) 1px, transparent 1px);
-      background-size: 100px 100px, 100px 100px, 20px 20px, 20px 20px;
-      background-position: -1px -1px, -1px -1px, -1px -1px, -1px -1px;
-    }
-    .bp-graph:active { cursor: grabbing; }
-
-    .bp-graph-svg {
-      position: absolute;
-      top: 0; left: 0;
-      width: 100%;
-      height: 100%;
-      pointer-events: none;
-      z-index: 1;
-      overflow: visible;
-    }
-
-    .bp-graph-nodes {
-      position: absolute;
-      top: 0; left: 0;
-      width: 0; height: 0;
-      z-index: 2;
-    }
-
-    /* ── Graph Node ────────────────────────────────────── */
-    .bp-gnode {
-      position: absolute;
-      width: 150px;
-      background: #1a2030;
-      border: 1.5px solid #2a3548;
-      border-radius: 5px;
-      box-shadow: 0 2px 10px rgba(0,0,0,.5);
-      cursor: pointer;
-      user-select: none;
-      transition: box-shadow .12s ease, border-color .12s ease;
-      z-index: 2;
-    }
-    .bp-gnode:hover {
-      border-color: #3a5070;
-      box-shadow: 0 3px 16px rgba(0,0,0,.6);
-    }
-    .bp-gnode.selected {
-      border-color: var(--accentHi);
-      box-shadow: 0 0 0 1px var(--accentHi), 0 3px 16px rgba(56,139,253,.2);
-      z-index: 3;
-    }
-
-    .bp-gnode-hdr {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      padding: 4px 8px;
-      border-radius: 4px 4px 0 0;
-      min-height: 24px;
-      cursor: grab;
-    }
-    .bp-gnode-hdr:active { cursor: grabbing; }
-    .bp-gnode-hdr .bp-gnode-icon {
-      font-size: 10px;
-      flex-shrink: 0;
-    }
-    .bp-gnode-hdr .bp-gnode-title {
-      flex: 1;
-      font-size: 10px;
-      font-weight: 600;
-      color: #e6edf3;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .bp-gnode-hdr .bp-gnode-badge {
-      font-size: 8px;
-      background: rgba(255,255,255,.1);
-      color: var(--muted);
-      padding: 1px 4px;
-      border-radius: 3px;
-      flex-shrink: 0;
-    }
-
-    .bp-gnode-body {
-      padding: 3px 0 4px;
-      display: flex;
-      flex-direction: column;
-      gap: 1px;
-    }
-
-    .bp-gnode-pin {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      padding: 2px 8px;
-      font-size: 9px;
-      color: var(--muted);
-    }
-    .bp-gnode-pin-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      flex-shrink: 0;
-      border: 1.5px solid;
-    }
-    .bp-gnode-pin-exec {
-      width: 0; height: 0;
-      border-style: solid;
-      border-width: 5px 0 5px 7px;
-      border-color: transparent transparent transparent #c8d1d9;
-      flex-shrink: 0;
-      margin: 0 -1px;
-    }
-    .bp-gnode-pin-exec.connected {
-      border-left-color: #fff;
-    }
-    .bp-gnode-pin-out {
-      justify-content: flex-end;
-    }
-    .bp-gnode-pin-label {
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    /* Exec row at top of node */
-    .bp-gnode-exec {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 2px 8px 3px;
-      border-bottom: 1px solid rgba(255,255,255,.04);
-    }
-
-    /* Node header colors by group */
-    .bp-gnode-hdr-default    { background: linear-gradient(135deg, #1a3a5c, #162a44); }
-    .bp-gnode-hdr-gameplay   { background: linear-gradient(135deg, #3a1a5c, #2a1644); }
-    .bp-gnode-hdr-movement   { background: linear-gradient(135deg, #1a5c3a, #16442a); }
-    .bp-gnode-hdr-audio      { background: linear-gradient(135deg, #5c3a1a, #44291a); }
-    .bp-gnode-hdr-visual     { background: linear-gradient(135deg, #5c5c1a, #444416); }
-
-    /* Node header colors by TYPE (Phase 1) */
-    .bp-gnode-hdr-target     { background: linear-gradient(135deg, #0d4a3a, #0a3a2c); }
-    .bp-gnode-hdr-condition  { background: linear-gradient(135deg, #5c4a0a, #44380a); }
-    .bp-gnode-hdr-action     { background: linear-gradient(135deg, #1a3a5c, #162a44); }
-
-    /* In/out pin dots for drag-to-connect */
-    .bp-gnode-pin-in-dot,
-    .bp-gnode-pin-out-dot {
-      width: 9px;
-      height: 9px;
-      border-radius: 50%;
-      flex-shrink: 0;
-      border: 1.5px solid;
-      cursor: crosshair;
-      transition: transform .1s ease, box-shadow .1s ease;
-    }
-    .bp-gnode-pin-in-dot:hover,
-    .bp-gnode-pin-out-dot:hover {
-      transform: scale(1.4);
-      box-shadow: 0 0 6px currentColor;
-    }
-    
-    /* Function selector in toolbar */
-    #bp-fn-select {
-      background: var(--surface);
-      color: #c9d1d9;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      font-size: 11px;
-      padding: 2px 6px;
-      max-width: 200px;
-    }
-
-    /* ── Detail panel ──────────────────────────────────── */
-    .bp-detail-resizer {
-      height: 6px;
-      background: linear-gradient(180deg, #181e28, #121820);
-      border-top: 1px solid var(--border);
-      border-bottom: 1px solid var(--border);
-      cursor: row-resize;
-      flex-shrink: 0;
-    }
-    .bp-detail-resizer:hover { background: #1e2a38; }
-
-    .bp-detail {
-      flex: 0 0 auto;
-      height: 200px;
-      min-height: 80px;
-      max-height: 60%;
-      display: flex;
-      flex-direction: column;
-      background: var(--surface);
-      overflow: hidden;
-    }
-    .bp-detail-header {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 5px 9px;
-      background: linear-gradient(180deg, #141a24, #111820);
-      border-bottom: 1px solid var(--border);
-      font-size: 10px;
-      color: var(--accentHi);
-      font-weight: 600;
-      flex-shrink: 0;
-    }
-    .bp-detail-body {
-      flex: 1;
-      overflow-y: auto;
-      overflow-x: hidden;
-      padding: 7px;
-    }
+    /* Blueprint graph view CSS — removed */
 
     #props-panel { flex: 0 0 auto; overflow: visible; border-top: 1px solid var(--border); background: var(--surface); }
     .props-category { border-bottom: 1px solid var(--border); }
@@ -1133,6 +706,19 @@
       white-space: nowrap;
       padding-top: 5px;
     }
+
+    /* ── Shape-editable controls ──────────────────────────── */
+    #prop-shape-type {
+      background: var(--bg);
+      border: 1px solid #30363d;
+      color: var(--text);
+      font-size: 11px;
+      padding: 2px 4px;
+      border-radius: 4px;
+    }
+    #prop-shape-type:focus { border-color: #58a6ff; outline: none; }
+    #prop-shape-tube-radius { width: 64px; }
+    #prop-visible-in-play { accent-color: #58a6ff; }
 
     /* ── Canvas container ─────────────────────────────────── */
     #canvas-container {
@@ -1304,6 +890,22 @@
     .console-entry.ce-log { color: #c9d1d9; }
     .console-entry.ce-warn { color: #d29922; background: rgba(187,128,9,.06); }
     .console-entry.ce-error { color: #f85149; background: rgba(248,81,73,.06); }
+    .console-entry.ce-cmd { color: #58a6ff; }
+    .console-entry.ce-result { color: #8be9a8; }
+    .console-input-row {
+      display: flex; align-items: center; gap: 0; flex-shrink: 0;
+      border-top: 1px solid var(--border); background: var(--surface);
+    }
+    .console-input-row .prompt {
+      padding: 0 4px 0 8px; color: var(--accent); font-family: ui-monospace,'Cascadia Code',monospace;
+      font-size: 12px; font-weight: 700; user-select: none; line-height: 28px;
+    }
+    #console-input {
+      flex: 1; background: transparent; border: none; outline: none;
+      color: var(--text); font-family: ui-monospace,'Cascadia Code',monospace;
+      font-size: 11px; padding: 5px 8px 5px 0; line-height: 18px;
+    }
+    #console-input::placeholder { color: var(--muted); opacity: .6; }
 
     /* Perf monitor pane */
     .perf-grid {
@@ -1333,6 +935,12 @@
       cursor: pointer; line-height: 1;
     }
     .bp-cat-arrow:hover { color: var(--text); border-color: var(--accentHi); }
+    .bp-toolbar-btn {
+      font-size: 10px; padding: 2px 8px; background: var(--accent);
+      border: 1px solid var(--accent); color: #fff; border-radius: 3px;
+      cursor: pointer; line-height: 1; white-space: nowrap;
+    }
+    .bp-toolbar-btn:hover { background: var(--accentHi); border-color: var(--accentHi); }
     .bp-cat-label {
       font-size: 10px; color: var(--text); min-width: 70px; text-align: center;
       user-select: none; white-space: nowrap;
@@ -1667,6 +1275,59 @@
       flex-direction: column;
       gap: 8px;
     }
+    /* ── Function card collapse/expand ─── */
+    .cfn-card-header {
+      display:flex; flex-wrap:wrap; gap:3px; align-items:center;
+      padding:4px 0; font-size:10px; cursor:pointer;
+      border-bottom:1px solid #1a1f26;
+      transition: background .1s ease;
+    }
+    .cfn-card-header:hover { background:rgba(56,139,253,.04); }
+    .cfn-card-body { padding:2px 0 4px 0; }
+    .cfn-card-body.cfn-collapsed { display:none; }
+    .cfn-caret { font-size:9px; color:var(--muted); min-width:12px; text-align:center; user-select:none; }
+    /* ── Action type badges ─── */
+    .cfn-action-badge {
+      display:inline-block; font-size:7px; padding:1px 5px; border-radius:3px;
+      line-height:1.3; white-space:nowrap; font-weight:600; letter-spacing:.02em;
+    }
+    .cfn-badges-row { display:flex; flex-wrap:wrap; gap:2px; align-items:center; margin-left:auto; }
+    /* ── Compact mode ─── */
+    .cfn-compact-row {
+      display:flex; align-items:center; gap:4px; padding:3px 6px; font-size:9px;
+      border-bottom:1px solid #1a1f26; transition:background .1s ease;
+    }
+    .cfn-compact-row:hover { background:rgba(56,139,253,.04); }
+    .cfn-compact-name { font-weight:600; color:var(--text); min-width:60px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:120px; }
+    /* ── Drag-and-drop ─── */
+    .cfn-drag-handle { cursor:grab; color:var(--muted); font-size:10px; user-select:none; padding:0 2px; opacity:.5; transition:opacity .1s; }
+    .cfn-drag-handle:hover { opacity:1; }
+    .cfn-dragging { opacity:.35!important; }
+    .cfn-drag-over { border-top:2px solid var(--accentHi)!important; }
+    .cfn-act-drag-over { border-top:2px solid var(--accent)!important; }
+    /* ── Reorder arrows ─── */
+    .cfn-reorder-btn {
+      font-size:8px; padding:0 2px; cursor:pointer; background:none; border:none;
+      color:var(--muted); line-height:1; transition:color .1s;
+    }
+    .cfn-reorder-btn:hover { color:var(--accentHi); }
+    /* ── Jump-to-function ─── */
+    .cfn-jump-btn { background:none; border:none; color:var(--accentHi); cursor:pointer; font-size:10px; padding:0 2px; transition:opacity .15s; }
+    .cfn-jump-btn:hover { opacity:.7; }
+    /* ── Highlight flash ─── */
+    @keyframes cfnHighlight {
+      0%   { box-shadow:0 0 0 2px var(--accentHi); }
+      100% { box-shadow:0 0 0 0 transparent; }
+    }
+    .cfn-highlight { animation: cfnHighlight 1.5s ease-out; }
+    /* ── Toolbar row ─── */
+    .cfn-toolbar {
+      display:flex; flex-wrap:wrap; gap:4px; align-items:center;
+      padding:3px 0; font-size:9px; border-bottom:1px solid var(--border); margin-bottom:4px;
+    }
+    .cfn-toolbar select { font-size:9px; padding:1px 3px; }
+    .cfn-toolbar button { font-size:8px; padding:1px 5px; cursor:pointer; }
+    .cfn-toolbar label { display:flex; align-items:center; gap:2px; font-size:8px; color:var(--muted); cursor:pointer; }
 
     /* ── Crosshair ────────────────────────────────────────── */
     #crosshair {
@@ -1881,6 +1542,8 @@
   <button class="menu-bar-btn" id="menu-file">File</button>
   <button class="menu-bar-btn" id="menu-edit">Edit</button>
   <button class="menu-bar-btn" id="menu-view">View</button>
+  <button class="menu-bar-btn" id="menu-tools">Tools</button>
+  <button class="menu-bar-btn" id="menu-help">Help</button>
 
   <span style="flex:1"></span>
 
@@ -1895,7 +1558,7 @@
   <button id="btn-stop"     class="stop-btn" style="display:none" title="Stop playtest (Esc)">⏹ Stop</button>
 
   <span class="tb-sep"></span>
-  <button id="btn-toggle-blueprint" title="Toggle Blueprint graph view (B)">📐 Blueprint</button>
+  <button id="btn-toggle-blueprint" title="Toggle Blueprint graph view (B)" style="display:none">📐 Blueprint</button>
 </div>
 <!-- hidden file inputs (needed by File menu) -->
 <input id="load-input" type="file" accept=".json" style="display:none"/>
@@ -1906,7 +1569,7 @@
   <!-- Sidebar -->
   <div id="sidebar">
 
-    <!-- BLOCK: Library -->
+    <!-- BLOCK: Tools -->
     <div id="sidebar-block" class="sidebar-section active">
       <div class="panel-hdr">🔧 Tools</div>
       <div class="sidebar-form">
@@ -1918,11 +1581,13 @@
           <button class="tool-btn" data-mode="paint" title="Paint objects">🖌 Paint</button>
           <button class="tool-btn" data-mode="erase" title="Erase (boolean cut)">◫ Erase</button>
         </div>
+        <div data-settings-for="select">
         <div class="sf-sub">Transform</div>
-        <div id="transform-group" class="tool-btn-row" style="opacity:.4;pointer-events:none">
+        <div id="transform-group" class="tool-btn-row">
           <button class="tool-btn active" data-transform="translate" title="Move (G)">↔ Move</button>
           <button class="tool-btn" data-transform="rotate" title="Rotate (R)">↻ Rotate</button>
           <button class="tool-btn" data-transform="scale" title="Scale (S)">⤡ Scale</button>
+        </div>
         </div>
         <div class="sf-row">
           <span class="sf-label">Snap</span>
@@ -1935,6 +1600,7 @@
             <option value="4">4</option>
           </select>
         </div>
+        <div data-settings-for="select">
         <div class="sf-sub">Actions</div>
         <div class="tool-btn-row">
           <button id="btn-select-all" class="tool-btn" title="Select all (Ctrl+A)">☷ All</button>
@@ -1943,143 +1609,12 @@
           <button id="btn-merge" class="tool-btn" title="Merge meshes">⊕ Merge</button>
           <button id="btn-unmerge" class="tool-btn" title="Unmerge">⊖ Unmerge</button>
         </div>
+        </div>
       </div>
 
-      <div class="panel-hdr">📚 Library</div>
-      <div class="lib-top-tabs">
-        <button id="lib-pane-objects-btn" class="lib-top-btn active" type="button" data-lib-pane="objects">Objects</button>
-        <button id="lib-pane-audio-btn" class="lib-top-btn" type="button" data-lib-pane="audio">Audio</button>
-        <button id="lib-pane-import-btn" class="lib-top-btn" type="button" data-lib-pane="import">📦 Import</button>
-      </div>
-
-      <div id="library-pane-objects" class="lib-pane active">
-      <div style="padding:6px 9px 4px;"><input id="lib-search" type="text" placeholder="🔍 Search objects..." style="width:100%;box-sizing:border-box;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:4px 8px;font-size:11px;font-family:inherit" /></div>
-      <div class="lib-category">
-        <div class="lib-category-title">Objects / Blocks</div>
-        <div class="lib-category-body"><div class="lib-grid">
-          <button class="lib-btn active" data-type="wall">
-            <span class="icon">🧱</span>Wall
-          </button>
-          <button class="lib-btn" data-type="floor">
-            <span class="icon">⬜</span>Floor
-          </button>
-          <button class="lib-btn" data-type="terrain">
-            <span class="icon">🏔️</span>Terrain
-          </button>
-        </div></div>
-      </div>
-      <div class="lib-category">
-        <div class="lib-category-title">3D Primitives</div>
-        <div class="lib-category-body"><div class="lib-grid">
-          <button class="lib-btn" data-type="cube">
-            <span class="icon">🧊</span>Cube
-          </button>
-          <button class="lib-btn" data-type="sphere">
-            <span class="icon">⚽</span>Sphere
-          </button>
-          <button class="lib-btn" data-type="cylinder">
-            <span class="icon">🥫</span>Cylinder
-          </button>
-          <button class="lib-btn" data-type="cone">
-            <span class="icon">🔺</span>Cone
-          </button>
-          <button class="lib-btn" data-type="pyramid">
-            <span class="icon">🔻</span>Pyramid
-          </button>
-          <button class="lib-btn" data-type="prism">
-            <span class="icon">⬣</span>Prism
-          </button>
-          <button class="lib-btn" data-type="torus">
-            <span class="icon">⭕</span>Torus
-          </button>
-        </div></div>
-      </div>
-      <div class="lib-category">
-        <div class="lib-category-title">2D Shapes</div>
-        <div class="lib-category-body"><div class="lib-grid">
-          <button class="lib-btn" data-type="plane2d">
-            <span class="icon">▭</span>Square
-          </button>
-          <button class="lib-btn" data-type="triangle2d">
-            <span class="icon">△</span>Triangle
-          </button>
-          <button class="lib-btn" data-type="circle2d">
-            <span class="icon">◯</span>Circle
-          </button>
-          <button class="lib-btn" data-type="polygon2d">
-            <span class="icon">⬟</span>Polygon
-          </button>
-        </div></div>
-      </div>
-      <div class="lib-category">
-        <div class="lib-category-title">Lighting</div>
-        <div class="lib-category-body"><div class="lib-grid">
-          <button class="lib-btn" data-type="light">
-            <span class="icon">💡</span>Light
-          </button>
-        </div></div>
-      </div>
-      <div class="lib-category">
-        <div class="lib-category-title">Gameplay</div>
-        <div class="lib-category-body"><div class="lib-grid">
-          <button class="lib-btn" data-type="target">
-            <span class="icon">🎯</span>Target
-          </button>
-          <button class="lib-btn" data-type="checkpoint">
-            <span class="icon">🏁</span>Checkpoint
-          </button>
-          <button class="lib-btn" data-type="spawn">
-            <span class="icon">🚩</span>Spawn
-          </button>
-          <button class="lib-btn" data-type="joint">
-            <span class="icon">🔗</span>Joint
-          </button>
-          <button class="lib-btn" data-type="pivot">
-            <span class="icon">📌</span>Pivot
-          </button>
-          <button class="lib-btn" data-type="teleport">
-            <span class="icon">🌀</span>Teleport
-          </button>
-        </div></div>
-      </div>
-      <div class="lib-category">
-        <div class="lib-category-title">Control</div>
-        <div class="lib-category-body"><div class="lib-grid">
-          <button class="lib-btn" data-type="trigger">
-            <span class="icon">🎛</span>Control
-          </button>
-          <button class="lib-btn" data-type="keypad">
-            <span class="icon">⌨</span>Keypad
-          </button>
-        </div></div>
-      </div>
-      <div class="lib-category">
-        <div class="lib-category-title">Characters</div>
-        <div class="lib-category-body"><div class="lib-grid">
-          <button class="lib-btn" data-type="npc">
-            <span class="icon">🧑</span>NPC
-          </button>
-        </div></div>
-      </div>
-      <div class="lib-category">
-        <div class="lib-category-title">Media</div>
-        <div class="lib-category-body"><div class="lib-grid">
-          <button class="lib-btn" data-type="text">
-            <span class="icon">📝</span>Text
-          </button>
-          <button class="lib-btn" data-type="text3d">
-            <span class="icon">🔤</span>3D Text
-          </button>
-          <button class="lib-btn" data-type="screen">
-            <span class="icon">🖥️</span>Screen
-          </button>
-          <button class="lib-btn" data-type="camera">
-            <span class="icon">🎥</span>Camera
-          </button>
-        </div></div>
-      </div>
-      <div class="panel-hdr">🔧 Tools</div>
+      <div class="panel-hdr">⚙️ Settings</div>
       <div class="sidebar-form">
+        <div data-settings-for="place,erase">
         <div class="sf-row">
           <span class="sf-label">Sides</span>
           <input id="shape-sides" type="number" min="3" max="64" step="1" value="12" title="Side count for parametric 3D and 2D shapes"/>
@@ -2092,6 +1627,8 @@
           <span class="sf-label">Opacity</span>
           <input id="place-opacity" type="number" min="0.02" max="1" step="0.01" value="1" title="Opacity for newly placed objects"/>
         </div>
+        </div>
+        <div data-settings-for="paint">
         <div class="sf-sub">Paint</div>
         <div class="sf-row">
           <span class="sf-label">Mode</span>
@@ -2162,6 +1699,8 @@
           <span class="sf-label">Strength</span>
           <input id="terrain-strength" type="number" min="0.01" max="2" step="0.01" value="0.3" title="Sculpt brush strength"/>
         </div>
+        </div>
+        <div data-settings-for="erase">
         <div class="sf-sub">Eraser</div>
         <div class="sf-row">
           <span class="sf-label">Shape</span>
@@ -2179,6 +1718,7 @@
         <div class="sf-row">
           <span class="sf-label">Size</span>
           <input id="eraser-size" type="number" min="0.1" max="12" step="0.1" value="1" title="Eraser cutter size"/>
+        </div>
         </div>
         <div class="sf-sub">Clipboard</div>
         <div class="sf-row" style="gap:4px">
@@ -2204,33 +1744,6 @@
           </select>
         </div>
         <div id="custom-objects-list" style="max-height:300px;overflow-y:auto"></div>
-      </div>
-      </div>
-
-      <div id="library-pane-audio" class="lib-pane">
-        <div class="panel-hdr">🔊 Audio Library</div>
-        <div class="sidebar-form">
-          <div class="sf-row">
-            <button id="btn-audio-import" type="button" style="width:100%;justify-content:center">+ Import Audio</button>
-            <input id="audio-import-input" type="file" accept="audio/*" multiple style="display:none"/>
-          </div>
-          <div style="font-size:9px;color:var(--muted);line-height:1.35">Imported files are saved inside this project and referenced by name in function actions.</div>
-          <div id="audio-lib-list" class="audio-lib-list"></div>
-        </div>
-      </div>
-
-      <div id="library-pane-import" class="lib-pane">
-        <div class="panel-hdr">📦 Import Models</div>
-        <div class="sidebar-form">
-          <div id="import-drop-zone" style="border:2px dashed var(--border);border-radius:8px;padding:18px 12px;text-align:center;cursor:pointer;margin-bottom:8px;transition:border-color 0.2s,background 0.2s">
-            <div style="font-size:24px;margin-bottom:4px">📂</div>
-            <div style="font-size:11px;color:var(--muted)">Drop .glb, .gltf, or .fbx here</div>
-            <div style="font-size:10px;color:var(--muted);margin-top:2px">or click to browse</div>
-            <input id="import-pane-file-input" type="file" accept=".glb,.gltf,.fbx" style="display:none" multiple/>
-          </div>
-          <div class="sf-sub">Imported Models</div>
-          <div id="import-pane-list" style="max-height:calc(100vh - 340px);overflow-y:auto"></div>
-        </div>
       </div>
     </div>
 
@@ -2586,22 +2099,7 @@
 
   <!-- 3-D viewport -->
   <div id="canvas-container">
-    <!-- Blueprint graph overlay (full viewport, hidden by default) -->
-    <div id="bp-graph-overlay" style="display:none">
-      <div class="bp-graph-toolbar" id="bp-overlay-toolbar">
-        <select id="bp-fn-select" title="Select FN Group"><option value="-1">(select FN Group)</option></select>
-        <button id="bp-add-fn-group" type="button" title="New FN Group">+ FN</button>
-        <button id="bp-add-target" type="button" title="Add target node">+ T</button>
-        <button id="bp-add-condition" type="button" title="Add condition node">+ C</button>
-        <button id="bp-add-action" type="button" title="Add action node">+ A</button>
-        <button id="bp-detail-toggle" type="button" title="Toggle detailed view">📋</button>
-        <button id="bp-graph-fit" type="button" title="Fit all nodes">⊞</button>
-      </div>
-      <div id="bp-graph" class="bp-graph">
-        <svg id="bp-graph-svg" class="bp-graph-svg"></svg>
-        <div id="bp-graph-nodes" class="bp-graph-nodes"></div>
-      </div>
-    </div>
+    <!-- Blueprint overlay removed -->
     <div id="crosshair"></div>
     <div id="coord-hud"></div>
     <div id="play-hint">WASD · Move &nbsp;│&nbsp; R · Sprint &nbsp;│&nbsp; Space · Jump &nbsp;│&nbsp; Mouse · Look &nbsp;│&nbsp; LMB · Shoot &nbsp;│&nbsp; Esc · Exit</div>
@@ -2630,19 +2128,41 @@
 
   <div id="functions-panel">
     <div class="fn-panel-tabs">
-      <button class="fn-panel-tab active" data-fn-pane="functions" type="button">🧠 FN Groups</button>
+      <button class="fn-panel-tab active" data-fn-pane="functions" type="button">🧠 Functions</button>
       <button class="fn-panel-tab" data-fn-pane="objlib" type="button">📋 Objects</button>
       <button class="fn-panel-tab" data-fn-pane="outliner" type="button">🌳 Outliner</button>
       <button class="fn-panel-tab" data-fn-pane="content" type="button">🗂 Content</button>
     </div>
 
-    <!-- Functions pane (detail panel for selected node) -->
+    <!-- Functions pane -->
     <div class="fn-pane active" id="fn-pane-functions">
-      <div id="bp-detail" class="bp-detail" style="flex:1;height:auto;max-height:none">
-        <div id="bp-detail-header" class="bp-detail-header">
-          <span id="bp-detail-title">No FN Group selected</span>
+      <div class="sidebar-form">
+        <div class="sf-row">
+          <span class="sf-label">Find</span>
+          <input id="control-fn-search" type="text" placeholder="Search functions" style="width:100%"/>
         </div>
-        <div id="control-functions-list" class="bp-detail-body"></div>
+        <div class="sf-row">
+          <span class="sf-label">Group</span>
+          <input id="control-fn-new-group" type="text" placeholder="Add group" style="width:100%"/>
+          <button id="btn-add-control-group" type="button" style="padding:2px 7px">+</button>
+        </div>
+        <div style="font-size:9px;color:var(--muted);line-height:1.35;margin:-1px 0 1px 0">Organize functions into expandable groups. Each function can be assigned to a group.</div>
+        <div class="cfn-toolbar">
+          <select id="cfn-action-filter" title="Filter by action type">
+            <option value="">All types</option>
+            <option value="move">↔ move</option><option value="rotate">↻ rotate</option><option value="scale">⇔ scale</option>
+            <option value="light">💡 light</option><option value="audio">🔊 audio</option><option value="path">⤴ path</option>
+            <option value="functionControl">⚙ function ctrl</option><option value="playerGroup">👥 player group</option>
+            <option value="setVar"># set var</option><option value="setBool">☑ set bool</option>
+            <option value="playerStats">❤ player stats</option><option value="teleport">🌀 teleport</option>
+            <option value="skeleton">🦴 skeleton</option><option value="command">&gt;_ command</option><option value="delay">⏱ delay</option>
+          </select>
+          <button id="cfn-collapse-all" type="button" title="Collapse all function cards">⊟ All</button>
+          <button id="cfn-expand-all" type="button" title="Expand all function cards">⊞ All</button>
+          <label title="Show compact one-line summaries"><input id="cfn-compact-toggle" type="checkbox"/> Compact</label>
+        </div>
+        <div id="control-functions-list"></div>
+        <button id="btn-add-control-fn" style="margin-top:2px;width:100%;font-size:10px;padding:4px 6px">+ Add Function</button>
       </div>
     </div>
 
@@ -2733,6 +2253,10 @@
       <label><input type="checkbox" id="console-filter-error" checked/> ✖ Error</label>
     </div>
     <div class="console-log" id="console-log"></div>
+    <div class="console-input-row">
+      <span class="prompt">&gt;</span>
+      <input id="console-input" type="text" placeholder="Type a command... (help for list)" autocomplete="off" spellcheck="false"/>
+    </div>
   </div>
 
   <!-- Performance pane -->
@@ -2789,6 +2313,11 @@
         <option value="grid">Grid</option>
         <option value="list">List</option>
       </select>
+      <span class="bp-tb-sep"></span>
+      <button id="bp-import-model" type="button" class="bp-toolbar-btn" title="Import 3D model (.glb, .gltf, .fbx)">📦 Import</button>
+      <button id="bp-import-audio" type="button" class="bp-toolbar-btn" title="Import audio file">🔊 Audio</button>
+      <input id="bp-import-model-input" type="file" accept=".glb,.gltf,.fbx" style="display:none" multiple/>
+      <input id="bp-import-audio-input" type="file" accept="audio/*" style="display:none" multiple/>
     </div>
     <div id="bp-asset-grid" class="bp-asset-grid"></div>
   </div>
