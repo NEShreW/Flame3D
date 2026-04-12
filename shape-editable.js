@@ -8,7 +8,7 @@
 
 const SHAPE_PALETTE = [
   'cube', 'sphere', 'cylinder', 'cone', 'pyramid', 'prism',
-  'torus', 'plane2d', 'triangle2d', 'circle2d', 'polygon2d',
+  'torus', 'hollowbox', 'plane2d', 'triangle2d', 'circle2d', 'polygon2d',
 ];
 
 const SHAPE_EDITABLE_TYPES = new Set([
@@ -39,6 +39,12 @@ function clampTubeRadius(v) {
   const n = parseFloat(v);
   if (!Number.isFinite(n)) return 0.24;
   return Math.max(0.02, Math.min(2.0, n));
+}
+
+function clampFrameThickness(v) {
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return 0.22;
+  return Math.max(0.05, Math.min(0.9, n));
 }
 
 // ── Playtest Visibility ──────────────────────────────────────────
@@ -83,6 +89,14 @@ function buildTubeRadiusHTML(mesh) {
   return `<div class="prop-row"><span class="prop-key">Tube R</span><div class="prop-controls"><input id="prop-shape-tube-radius" type="number" min="0.02" max="2" step="0.01" value="${val}" style="width:64px"/></div></div>`;
 }
 
+function buildFrameThicknessHTML(mesh) {
+  const effectiveType = getEffectiveShapeType(mesh);
+  if (effectiveType !== 'hollowbox') return '';
+  const sp = normalizeShapeParams(effectiveType, mesh.userData.shapeParams || {});
+  const val = r3(sp.frameThickness ?? 0.22, 2);
+  return `<div class="prop-row"><span class="prop-key">Frame</span><div class="prop-controls"><input id="prop-shape-frame-thickness" type="number" min="0.05" max="0.9" step="0.01" value="${val}" style="width:64px"/></div></div>`;
+}
+
 function buildVisibleInPlayHTML(mesh) {
   if (!SHAPE_EDITABLE_TYPES.has(mesh.userData.type)) return '';
   let checked;
@@ -106,6 +120,7 @@ function buildEffectiveShapeControls(mesh) {
     html += `<div class="prop-row"><span class="prop-key">Depth</span><div class="prop-controls"><input id="prop-shape-depth" type="number" min="0.05" max="8" step="0.05" value="${r3(sp.depth ?? clampShapeDepth(state.place2DDepth), 2)}" style="width:64px"/></div></div>`;
   }
   html += buildTubeRadiusHTML(mesh);
+  html += buildFrameThicknessHTML(mesh);
   return html;
 }
 
@@ -169,6 +184,41 @@ function bindTubeRadiusProps(mesh) {
     for (const t of targets) {
       const beforeParams = normalizeShapeParams(effectiveType, t.userData.shapeParams || {});
       const nextParams = normalizeShapeParams(effectiveType, { ...beforeParams, tubeRadius: newRadius });
+      if (JSON.stringify(beforeParams) === JSON.stringify(nextParams)) continue;
+
+      const beforeGeo = t.geometry.clone();
+      const afterGeo = buildTypeGeometry(effectiveType, nextParams);
+      t.userData.shapeParams = nextParams;
+      setMeshGeometry(t, afterGeo);
+
+      pushUndo({
+        type: 'shape',
+        mesh: t,
+        beforeParams,
+        afterParams: nextParams,
+        beforeGeo,
+        afterGeo: afterGeo.clone(),
+      });
+    }
+    refreshProps();
+  });
+}
+
+function bindFrameThicknessProps(mesh) {
+  const input = document.getElementById('prop-shape-frame-thickness');
+  if (!input || state.selectedObject !== mesh) return;
+
+  const effectiveType = getEffectiveShapeType(mesh);
+  if (effectiveType !== 'hollowbox') return;
+
+  const targets = getPropertyTargets(mesh).filter(t => getEffectiveShapeType(t) === 'hollowbox');
+  if (!targets.length) return;
+
+  input.addEventListener('change', () => {
+    const newThickness = clampFrameThickness(parseFloat(input.value));
+    for (const t of targets) {
+      const beforeParams = normalizeShapeParams(effectiveType, t.userData.shapeParams || {});
+      const nextParams = normalizeShapeParams(effectiveType, { ...beforeParams, frameThickness: newThickness });
       if (JSON.stringify(beforeParams) === JSON.stringify(nextParams)) continue;
 
       const beforeGeo = t.geometry.clone();

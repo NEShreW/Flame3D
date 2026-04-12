@@ -63,3 +63,5 @@
 - Library Hover Tooltips: Show a tooltip with the object name and preview when hovering over items in the shape/primitive library.
 
 - Bottom Asset Library: A docked panel at the bottom for browsing and placing assets with a select-and-place workflow instead of drag-and-drop only.
+
+- Pop-ups: Make popup with info as a panel or text
