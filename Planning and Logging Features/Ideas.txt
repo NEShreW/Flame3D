@@ -47,3 +47,21 @@
 - LOD System: Automatically reduce geometry detail for distant objects to improve performance on large worlds.
 
 - Reflection Probes: Place probes in the scene to generate environment maps for realistic reflections on shiny/metallic surfaces.
+
+=== Recently Added / Proposed ===
+
+- [IMPLEMENTED] Detailed Mode Toggle: A 📋 button on the blueprint toolbar toggles extra detail on graph nodes — targets show type info, conditions show parameter breakdowns, actions show per-action target and duration.
+
+- Per-Face Brush Painting: Let the paint tool color individual faces instead of the whole object, matching how the eraser already works per-face.
+
+- Image Textures: Built-in texture library plus support for user-uploaded images applied to object faces. Downloadable texture packs.
+
+- Classic Menu Bar Redesign: Replace the current icon toolbar with a traditional File / Edit / Tools menu bar for better discoverability.
+
+- Context-Sensitive Side Panel: The right-side property panel adapts its contents based on what is selected — object properties, world settings, blueprint node details, etc.
+
+- Library Hover Tooltips: Show a tooltip with the object name and preview when hovering over items in the shape/primitive library.
+
+- Bottom Asset Library: A docked panel at the bottom for browsing and placing assets with a select-and-place workflow instead of drag-and-drop only.
+
+- Pop-ups: Make popup with info as a panel or text

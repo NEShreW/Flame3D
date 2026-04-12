@@ -1,0 +1,5 @@
+--- Known Bugs ---
+
+- [FIXED] Target nodes were cosmetic — wiring target→condition→action in the blueprint graph had no runtime effect. Actions now inherit targets from upstream target nodes and evaluate chain conditions from upstream condition nodes.
+- Paint tool colors entire object, not per-face like eraser does.
+- Script tab appears non-functional — no visible scripting capability.

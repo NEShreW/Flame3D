@@ -19,6 +19,17 @@ function safeModuleSourceForInlineScript(src) {
   return src.replace(/<\/script>/g, '<\\/script>');
 }
 
+function buildSafePerformanceScript() {
+  return [
+    '<script>',
+    '(function(){',
+    '  window.__FLAME3D_SAFE_PERF_MODE__ = true;',
+    '  window.__FLAME3D_PERF_PRESET__ = "balanced";',
+    '})();',
+    '</script>'
+  ].join('\n');
+}
+
 async function buildEditorHtml() {
   try {
     // Read the source files from disk
@@ -33,7 +44,14 @@ async function buildEditorHtml() {
     }
 
     const indexSource = fs.readFileSync(indexPath, 'utf8');
-    const mainSource = fs.readFileSync(mainPath, 'utf8');
+    let mainSource = fs.readFileSync(mainPath, 'utf8');
+
+    // Inject shape-editable.js at the @@SHAPE_EDITABLE@@ marker
+    const shapeEditablePath = path.join(__dirname, 'shape-editable.js');
+    if (fs.existsSync(shapeEditablePath)) {
+      const shapeEditableSource = fs.readFileSync(shapeEditablePath, 'utf8');
+      mainSource = mainSource.replace('// @@SHAPE_EDITABLE@@', shapeEditableSource);
+    }
 
     // Create a script tag to replace the module import
     const runtimeFlagsScript = [
@@ -77,8 +95,16 @@ async function buildEditorHtml() {
     const outputPath = path.join(__dirname, 'flame3d-editor.html');
     fs.writeFileSync(outputPath, html, 'utf8');
 
+    // Write a safe optimized copy (performance preset only, no WebAssembly monkey-patching)
+    const perfScript = buildSafePerformanceScript();
+    const wasmHtml = html.replace(/<\/head>/i, `${perfScript}\n</head>`);
+    const wasmOutputPath = path.join(__dirname, 'flame3d-editor-wasm-optimized.html');
+    fs.writeFileSync(wasmOutputPath, wasmHtml, 'utf8');
+
     console.log(`✓ Editor exported to: ${outputPath}`);
     console.log(`✓ File size: ${(fs.statSync(outputPath).size / 1024 / 1024).toFixed(2)} MB`);
+    console.log(`✓ Safe optimized copy: ${wasmOutputPath}`);
+    console.log(`✓ Optimized copy size: ${(fs.statSync(wasmOutputPath).size / 1024 / 1024).toFixed(2)} MB`);
   } catch (err) {
     console.error('✗ Failed to build editor HTML:');
     console.error(err.message);

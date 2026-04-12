@@ -1,8 +1,30 @@
 import * as THREE from 'three';
 import { OrbitControls }    from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
-import { Sky }              from 'three/addons/objects/Sky.js';
+import { Sky } from 'three/addons/objects/Sky.js';
 import { CSG }              from 'https://esm.sh/three-csg-ts@3.2.0?external=three';
+import { GLTFLoader }       from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader }      from 'three/addons/loaders/DRACOLoader.js';
+
+// Load webm-muxer at startup (top-level await) so it's cached before render time.
+// Tries multiple CDNs so a single CDN outage doesn't break video rendering.
+let _WebmMuxer = null, _ArrayBufferTarget = null;
+for (const _cdn of [
+  'https://esm.sh/webm-muxer@5',
+  'https://cdn.jsdelivr.net/npm/webm-muxer@5/+esm',
+  'https://unpkg.com/webm-muxer@5/dist/webm-muxer.mjs',
+]) {
+  try {
+    const _muxMod = await import(_cdn);
+    _WebmMuxer = _muxMod.Muxer;
+    _ArrayBufferTarget = _muxMod.ArrayBufferTarget;
+    console.log('[Flame3D] webm-muxer loaded from', _cdn);
+    break;
+  } catch (_e) {
+    console.warn('[Flame3D] webm-muxer failed from', _cdn, _e);
+  }
+}
+if (!_WebmMuxer) console.warn('[Flame3D] webm-muxer unavailable — video render disabled');
 
 // ─── IndexedDB-backed storage (replaces localStorage for large project data) ─
 const _IDB_NAME = 'flame3d_store';
@@ -71,6 +93,7 @@ async function _idbSet(key, value) {
 const _storageCache = {
   projects: [],
   runtimeLibrary: [],
+  versionHistory: {},
   _ready: false,
 };
 
@@ -83,6 +106,13 @@ function _flushProjects() {
 function _flushRuntimeLibrary() {
   _idbSet('flame3d_runtime_library_v1', _storageCache.runtimeLibrary).catch(err => {
     console.error('Failed to persist runtime library:', err);
+  });
+}
+
+/** Flush version history cache to IndexedDB (fire-and-forget). */
+function _flushVersionHistory() {
+  _idbSet('flame3d_version_history_v1', _storageCache.versionHistory).catch(err => {
+    console.error('Failed to persist version history:', err);
   });
 }
 
@@ -222,10 +252,17 @@ async function _bootStorage() {
       }
     }
     _storageCache.runtimeLibrary = rtLib;
+
+    let versionHistory = await _idbGet('flame3d_version_history_v1');
+    if (!versionHistory || typeof versionHistory !== 'object' || Array.isArray(versionHistory)) {
+      versionHistory = {};
+    }
+    _storageCache.versionHistory = versionHistory;
   } catch (err) {
     console.error('IndexedDB boot failed, starting with empty data:', err);
     _storageCache.projects = [];
     _storageCache.runtimeLibrary = [];
+    _storageCache.versionHistory = {};
   }
   _storageCache._ready = true;
 }
@@ -245,29 +282,41 @@ propsContent.addEventListener('input', e => {
   if (e.target.matches('input[type="color"]')) markRestoreDirty();
 });
 
-const topMenuSelect   = document.getElementById('top-menu-select');
+const topMenuSelect   = document.getElementById('top-menu-select');   // removed from HTML – may be null
 const topPanels       = Array.from(document.querySelectorAll('.top-panel'));
 const snapSelect      = document.getElementById('snap-select');
 const lightIntensityInput = document.getElementById('light-intensity');
-const sunIntensityInput   = document.getElementById('sun-intensity');
-const sunTimeInput        = document.getElementById('sun-time');
-const sunNorthInput       = document.getElementById('sun-north');
-const sunTurbidityInput   = document.getElementById('sun-turbidity');
+// ─── Sky / atmosphere input refs ─────────────────────────────────────────────
+const sunTimeInput       = document.getElementById('sun-time');
+const sunTimeValSpan     = document.getElementById('sun-time-val');
+const sunNorthInput      = document.getElementById('sun-north');
+const sunNorthValSpan    = document.getElementById('sun-north-val');
+const sunIntensityInput  = document.getElementById('sun-intensity');
+const sunTurbidityInput  = document.getElementById('sun-turbidity');
+const sunTurbidityValSpan = document.getElementById('sun-turbidity-val');
 const sunShadowRangeInput = document.getElementById('sun-shadow-range');
+const sunSizeInput       = document.getElementById('sun-size');
+const sunDayCycleInput   = document.getElementById('sun-day-cycle');
 const sunDayDurationInput = document.getElementById('sun-day-duration');
-const sunDayCycleEnabledInput = document.getElementById('sun-day-cycle-enabled');
-const sunSizeInput     = document.getElementById('sun-size');
-const skyColorInput    = document.getElementById('sky-color');
+const skyColorInput      = document.getElementById('sky-color');
 const cloudsEnabledInput = document.getElementById('clouds-enabled');
 const cloudWindSpeedInput = document.getElementById('cloud-wind-speed');
-const cloudWindDirInput = document.getElementById('cloud-wind-dir');
-const cloudOpacityInput = document.getElementById('cloud-opacity');
-const starsEnabledInput = document.getElementById('stars-enabled');
-const starsCountInput   = document.getElementById('stars-count');
+const cloudWindDirInput  = document.getElementById('cloud-wind-dir');
+const cloudOpacityInput  = document.getElementById('cloud-opacity');
+const cloudOpacityValSpan = document.getElementById('cloud-opacity-val');
+const starsEnabledInput  = document.getElementById('stars-enabled');
+const starsCountInput    = document.getElementById('stars-count');
 const starsBrightnessInput = document.getElementById('stars-brightness');
-const moonEnabledInput  = document.getElementById('moon-enabled');
+const moonEnabledInput   = document.getElementById('moon-enabled');
 const moonBrightnessInput = document.getElementById('moon-brightness');
-const moonAuraInput     = document.getElementById('moon-aura');
+const moonAuraInput      = document.getElementById('moon-aura');
+const fogEnabledInput    = document.getElementById('fog-enabled');
+const fogModeInput       = document.getElementById('fog-mode');
+const fogColorInput      = document.getElementById('fog-color');
+const fogDensityInput    = document.getElementById('fog-density');
+const fogNearInput       = document.getElementById('fog-near');
+const fogFarInput        = document.getElementById('fog-far');
+const fogBrightnessInput = document.getElementById('fog-brightness');
 const chunkRangeSelect = document.getElementById('chunk-range-select');
 const undoBtn         = document.getElementById('btn-undo');
 const redoBtn         = document.getElementById('btn-redo');
@@ -282,14 +331,13 @@ const functionsToggleBtn = document.getElementById('functions-toggle');
 const shapeSidesInput  = document.getElementById('shape-sides');
 const shapeDepthInput  = document.getElementById('shape-depth');
 const placeOpacityInput = document.getElementById('place-opacity');
+const autoSidebarToolsToggle = document.getElementById('auto-sidebar-tools-toggle');
 const paintColorInput  = document.getElementById('paint-color');
 const paintModeInput   = document.getElementById('paint-mode');
 const pickColorBtn     = document.getElementById('btn-pick-color');
 const eraserShapeInput = document.getElementById('eraser-shape');
 const eraserSizeInput  = document.getElementById('eraser-size');
-const libraryPaneButtons = Array.from(document.querySelectorAll('[data-lib-pane]'));
-const libraryPaneObjectsEl = document.getElementById('library-pane-objects');
-const libraryPaneAudioEl = document.getElementById('library-pane-audio');
+/* library pane refs removed — library now lives in bottom panel */
 const audioImportBtn = document.getElementById('btn-audio-import');
 const audioImportInput = document.getElementById('audio-import-input');
 const audioLibListEl = document.getElementById('audio-lib-list');
@@ -297,6 +345,11 @@ const audioLibListEl = document.getElementById('audio-lib-list');
 // Main menu / project library
 const mainMenuEl          = document.getElementById('main-menu');
 const mainMenuProjectList = document.getElementById('mm-project-list');
+const mainMenuHistoryList = document.getElementById('mm-history-list');
+const mainMenuHistoryProject = document.getElementById('mm-history-project');
+const mainMenuHistoryCaption = document.getElementById('mm-history-caption');
+const mmHistorySaveBtn    = document.getElementById('mm-history-save');
+const mmHistoryOpenBtn    = document.getElementById('mm-history-open');
 const mmNewBtn            = document.getElementById('mm-new');
 const mmImportBtn         = document.getElementById('mm-import');
 const mmImportInput       = document.getElementById('mm-import-input');
@@ -326,10 +379,17 @@ const healthBarFill  = document.getElementById('health-bar-fill');
 const healthText     = document.getElementById('health-text');
 const sprintHud      = document.getElementById('sprint-hud');
 const sprintBarFill  = document.getElementById('sprint-bar-fill');
+const inventoryHud   = document.getElementById('inventory-hud');
+const inventorySlots = document.getElementById('inventory-slots');
 
 // Grid floor fill
 const gridFillColorInput   = document.getElementById('grid-fill-color');
 const gridFillEnabledInput = document.getElementById('grid-fill-enabled');
+const gridPlayVisibleInput = document.getElementById('grid-play-visible');
+const gridPlaySolidInput   = document.getElementById('grid-play-solid');
+const gridPlayMaskTerrainInput = document.getElementById('grid-play-mask-terrain');
+const gridFillUploadBtn    = document.getElementById('grid-fill-upload-btn');
+const gridFillUploadFile   = document.getElementById('grid-fill-upload-file');
 
 // World border settings
 const worldBorderEnabledInput = document.getElementById('world-border-enabled');
@@ -342,12 +402,6 @@ const worldBorderMaxZInput = document.getElementById('world-border-max-z');
 const qualityRenderDistInput = document.getElementById('quality-render-dist');
 const qualityShadowsSelect   = document.getElementById('quality-shadows');
 const qualityLightDistInput  = document.getElementById('quality-light-dist');
-
-// Fog settings
-const fogEnabledInput    = document.getElementById('fog-enabled');
-const fogColorInput      = document.getElementById('fog-color');
-const fogDensityInput    = document.getElementById('fog-density');
-const fogBrightnessInput = document.getElementById('fog-brightness');
 
 // FOV settings
 const fovEditorInput   = document.getElementById('fov-editor');
@@ -376,18 +430,23 @@ const btnAddVar             = document.getElementById('btn-add-var');
 const btnAddBool            = document.getElementById('btn-add-bool');
 
 const functionsPanelEl      = document.getElementById('functions-panel');
+const bottomPanelEl         = document.getElementById('bottom-panel');
+const bottomResizerEl       = document.getElementById('bottom-resizer');
+const bottomToggleBtn       = document.getElementById('bottom-toggle');
 const controlFunctionsListEl = document.getElementById('control-functions-list');
 const btnAddControlFn       = document.getElementById('btn-add-control-fn');
 const controlFnSearchInput  = document.getElementById('control-fn-search');
 const controlFnNewGroupInput = document.getElementById('control-fn-new-group');
 const btnAddControlGroup    = document.getElementById('btn-add-control-group');
+const cfnActionFilterEl     = document.getElementById('cfn-action-filter');
+const cfnCollapseAllBtn     = document.getElementById('cfn-collapse-all');
+const cfnExpandAllBtn       = document.getElementById('cfn-expand-all');
+const cfnCompactToggle      = document.getElementById('cfn-compact-toggle');
 
-const modeSelect = document.getElementById('mode-select');
-const gizmoSelect = document.getElementById('gizmo-select');
+const modeSelect = document.getElementById('mode-select');     // removed – may be null
+const gizmoSelect = document.getElementById('gizmo-select');   // removed – may be null
 const transformGroup = document.getElementById('transform-group');
-const scaleSideXSelect = document.getElementById('scale-side-x');
-const scaleSideYSelect = document.getElementById('scale-side-y');
-const scaleSideZSelect = document.getElementById('scale-side-z');
+
 
 // ─── Editor state ────────────────────────────────────────────────────────────
 const MODES = { PLACE: 'place', SELECT: 'select', DELETE: 'delete', PAINT: 'paint', ERASE: 'erase' };
@@ -412,11 +471,9 @@ const state = {
   colorPickArmed: false,
   eraserShape: 'box',
   eraserSize: 1,
-  scaleSides: {
-    x: 'pos',
-    y: 'pos',
-    z: 'pos',
-  },
+  autoSwapSidebar: true,
+  placeRotationY: 0,         // Y-axis rotation for ghost/placement (radians)
+
 };
 
 const sceneObjects = [];   // all placed meshes
@@ -425,6 +482,7 @@ const GHOST_OPACITY = 0.42;
 const undoStack    = [];
 const redoStack    = [];
 let _nextEditorGroupId = 1;
+let _nextBatchGroupId = 1;
 let _nextPlacedOrder = 1;
 let currentProjectId = null;
 let currentProjectName = '';
@@ -434,8 +492,17 @@ let _clipboard = [];  // array of serialized objects for paste
 let _clipboardCenter = new THREE.Vector3();
 
 // ─── Custom Object Templates ─────────────────────────────────────────────────
-const customObjectTemplates = [];  // { id, name, objects: [serialized], thumbnail? }
+const customObjectTemplates = [];  // { id, name, objects: [serialized], thumbnail?, type?, triangleCount?, dateAdded?, tags? }
 let _nextCustomTemplateId = 1;
+let _customObjectSort = 'newest';   // name-asc | name-desc | newest | oldest | objects | triangles
+let _customObjectSearch = '';
+const _gltfLoader = new GLTFLoader();
+// Enable Draco compression support for GLTF
+try {
+  const _dracoLoader = new DRACOLoader();
+  _dracoLoader.setDecoderPath('https://unpkg.com/three@0.161.0/examples/jsm/libs/draco/');
+  _gltfLoader.setDRACOLoader(_dracoLoader);
+} catch (_e) { console.warn('[Flame3D] Draco loader unavailable:', _e); }
 
 // ─── Terrain Sculpt State ────────────────────────────────────────────────────
 const terrainSculptState = {
@@ -462,15 +529,122 @@ let _nextWorldId = 2;
 function getActiveWorld() { return worlds.find(w => w.id === activeWorldId) || worlds[0]; }
 function worldObjects(worldId) { return sceneObjects.filter(m => (m.userData.world || 'world_1') === worldId); }
 
+function _nextBatchId() {
+  return `bg_${_nextBatchGroupId++}`;
+}
+
+function _clearBatchRuntimeState() {
+  _batchedInstances.length = 0;
+}
+
+function _meshBatchSignature(mesh) {
+  const colHex = mesh.material?.color ? mesh.material.color.getHexString() : '888888';
+  const sKey = mesh.scale.toArray().map(v => v.toFixed(3)).join(',');
+  const geo = mesh.geometry;
+  const geoSig = `${geo?.attributes?.position?.count || 0}|${geo?.index?.count || 0}`;
+  const shapeType = mesh.userData.shapeType || '';
+  const shapeParams = mesh.userData.shapeParams ? JSON.stringify(mesh.userData.shapeParams) : '';
+  const namedGroups = normalizeGroupListValue(mesh.userData.groups ?? mesh.userData.group ?? 'default').sort().join(',');
+  const editorGroup = mesh.userData.editorGroupId || '';
+  const worldId = mesh.userData.world || activeWorldId;
+  return `${mesh.userData.type}|${shapeType}|${shapeParams}|${geoSig}|${colHex}|${sKey}|${namedGroups}|${editorGroup}|${worldId}`;
+}
+
+function _batchMeshSet(meshes, batchGroupId, key) {
+  if (!Array.isArray(meshes) || meshes.length < 2) return 0;
+  const templateMesh = meshes[0];
+  if (!templateMesh?.geometry) return 0;
+
+  const geo = templateMesh.geometry;
+  const mat = templateMesh.material.clone();
+  const inst = new THREE.InstancedMesh(geo, mat, meshes.length);
+  inst.castShadow = true;
+  inst.receiveShadow = true;
+
+  const _mat4 = new THREE.Matrix4();
+  for (let i = 0; i < meshes.length; i++) {
+    meshes[i].updateMatrixWorld(true);
+    _mat4.copy(meshes[i].matrixWorld);
+    inst.setMatrixAt(i, _mat4);
+  }
+  inst.instanceMatrix.needsUpdate = true;
+  inst.userData.type = templateMesh.userData.type;
+  inst.userData._isBatchInstance = true;
+  inst.userData.solid = templateMesh.userData.solid;
+  inst.userData.world = templateMesh.userData.world || activeWorldId;
+  inst.userData.batchGroupId = batchGroupId;
+  if (Array.isArray(templateMesh.userData.groups)) inst.userData.groups = [...templateMesh.userData.groups];
+  if (templateMesh.userData.group !== undefined) inst.userData.group = templateMesh.userData.group;
+  if (templateMesh.userData.editorGroupId) inst.userData.editorGroupId = templateMesh.userData.editorGroupId;
+
+  for (const m of meshes) {
+    m.userData.batchGroupId = batchGroupId;
+    const idx = sceneObjects.indexOf(m);
+    if (idx >= 0) sceneObjects.splice(idx, 1);
+    scene.remove(m);
+  }
+
+  sceneObjects.push(inst);
+  scene.add(inst);
+  _batchedInstances.push({ instancedMesh: inst, originals: meshes, key: key || batchGroupId });
+  return meshes.length;
+}
+
+function rebuildBatchesFromMetadata() {
+  const groups = new Map();
+  for (const m of sceneObjects) {
+    if (!m?.isMesh || !m.geometry) continue;
+    if (m.userData._isBatchInstance) continue;
+    if (m.userData._hasCustomGeometry || m.userData.collisionMode === 'geometry') continue;
+    const batchId = m.userData.batchGroupId;
+    if (!batchId) continue;
+    if (!groups.has(batchId)) groups.set(batchId, []);
+    groups.get(batchId).push(m);
+  }
+
+  let batched = 0;
+  for (const [batchId, meshes] of groups) {
+    if (meshes.length < 2) continue;
+    batched += _batchMeshSet(meshes, batchId, batchId);
+  }
+  return batched;
+}
+
+function getSerializableSceneObjects() {
+  const out = [];
+  const seen = new Set();
+
+  for (const mesh of sceneObjects) {
+    if (mesh?.userData?._isBatchInstance) {
+      const batch = _batchedInstances.find(b => b.instancedMesh === mesh);
+      if (batch?.originals?.length) {
+        for (const original of batch.originals) {
+          if (!original || seen.has(original)) continue;
+          out.push(original);
+          seen.add(original);
+        }
+        continue;
+      }
+    }
+
+    if (!mesh || seen.has(mesh)) continue;
+    out.push(mesh);
+    seen.add(mesh);
+  }
+
+  return out;
+}
+
 /** Save current scene objects into the active world's store. */
 function _stashCurrentWorld() {
   const w = worlds.find(ww => ww.id === activeWorldId);
-  if (w) w.objects = sceneObjects.map(m => serializeSingleObject(m));
+  if (w) w.objects = getSerializableSceneObjects().map(m => serializeSingleObject(m));
 }
 
 /** Remove all objects from the scene (real removal). */
 function _clearScene() {
   selectObject(null);
+  _clearBatchRuntimeState();
   const toRemove = [...sceneObjects];
   toRemove.forEach(removeFromScene);
 }
@@ -481,6 +655,7 @@ function _loadWorldObjects(worldId) {
   if (!w || !w.objects) return;
   const meshes = w.objects.map(deserializeObject).filter(Boolean);
   meshes.forEach(m => { m.userData.world = worldId; addToScene(m); });
+  rebuildBatchesFromMetadata();
 }
 
 /** Load ALL worlds' objects into the scene (for playtest). */
@@ -491,6 +666,7 @@ function _loadAllWorldObjects() {
     const meshes = w.objects.map(deserializeObject).filter(Boolean);
     meshes.forEach(m => { m.userData.world = w.id; addToScene(m); });
   }
+  rebuildBatchesFromMetadata();
 }
 
 /** After loading a project, distribute objects into world stores and keep only active world in scene. */
@@ -520,13 +696,9 @@ function _distributeObjectsToWorlds() {
 
 // ─── Fog settings ────────────────────────────────────────────────────────────
 const fogSettings = {
-  enabled: true,
-  mode: 'exp2',        // 'linear' | 'exp2'
-  color: 0x87ceeb,
-  density: 0.0008,     // for exp2
-  near: 10,            // for linear
-  far: 500,            // for linear
-  brightness: 1,       // fog brightness multiplier
+  enabled: true, mode: 'exp2',
+  color: 0x87ceeb, density: 0.0008,
+  near: 10, far: 500, brightness: 1,
 };
 
 // ─── FOV settings ────────────────────────────────────────────────────────────
@@ -549,6 +721,10 @@ const runtimeLoaderMode = !!globalThis.__FLAME3D_RUNTIME_LOADER__;
 const runtimeAutostart = globalThis.__FLAME3D_RUNTIME_AUTOSTART__ !== undefined
   ? !!globalThis.__FLAME3D_RUNTIME_AUTOSTART__
   : runtimeMode;
+const runtimeSafePerformance = !!globalThis.__FLAME3D_SAFE_PERFORMANCE__;
+const runtimeAutoVisualCapProfile = Number.isFinite(parseInt(globalThis.__FLAME3D_AUTO_VISUAL_CAP_PROFILE__, 10))
+  ? Math.max(0, parseInt(globalThis.__FLAME3D_AUTO_VISUAL_CAP_PROFILE__, 10))
+  : (runtimeSafePerformance ? 2 : null);
 const runtimeEmbeddedLevelRaw = globalThis.__FLAME3D_EMBEDDED_LEVEL__;
 const RUNTIME_LIBRARY_STORAGE_KEY = 'flame3d_runtime_library_v1';
 const RUNTIME_OPTIMIZER_CHECK_INTERVAL_MS = 5000;
@@ -558,6 +734,8 @@ const RUNTIME_QUALITY_PROFILES = [
   { label: 'Balanced', shadows: 'low', renderDist: 130, lightDist: 55 },
   { label: 'Quality', shadows: 'medium', renderDist: 185, lightDist: 85 },
   { label: 'Ultra', shadows: 'high', renderDist: 250, lightDist: 120 },
+  { label: 'Extreme', shadows: 'high', renderDist: 500, lightDist: 200 },
+  { label: 'Cinematic', shadows: 'high', renderDist: 1000, lightDist: 400 },
 ];
 let runtimeLoaderOverlayEl = null;
 let runtimeHudEl = null;
@@ -588,9 +766,14 @@ const functionsPanelState = {
   resizing: false,
 };
 
+const bottomPanelState = {
+  height: 200,
+  collapsed: true,
+  resizing: false,
+};
+
 const audioLibrary = [];
 const customFonts = [];
-let activeLibraryPane = 'objects';
 let libraryPreviewAudio = null;
 let libraryPreviewAudioId = null;
 
@@ -638,22 +821,49 @@ let runtimeScreenOverlayEl = null;
 // ─── Portal view (render-through teleport) ────────────────────────────────────
 const PORTAL_MAX_DIST = 40;
 
+// ─── Performance warning & LOD thresholds ─────────────────────────────────────
+const PERF_WARN_TRIANGLE_THRESHOLD = 50000;      // warn when a single object exceeds this
+const PERF_CRITICAL_TRIANGLE_THRESHOLD = 150000;  // strong warning
+const PERF_SCENE_WARN_THRESHOLD = 500000;          // warn if total scene exceeds this
+const LOD_AUTO_DISTANCE = 80;                      // distance beyond which LOD proxy is used
+const IMPORTED_MODEL_MAX_SCALE = 10;               // max auto-scale for imported models
+
+// Export/perf flags (set by build script for safer optimized exports).
+const _safePerfMode = globalThis.__FLAME3D_SAFE_PERF_MODE__ === true
+  || globalThis.__FLAME3D_PERF_PRESET__ === 'balanced';
+const _deviceThreads = Number(globalThis.navigator?.hardwareConcurrency || 8);
+const _deviceMemGb = Number(globalThis.navigator?.deviceMemory || 8);
+const _lowPowerDevice = _deviceThreads <= 4 || (_deviceMemGb > 0 && _deviceMemGb <= 4);
+const _initialResolutionScale = _safePerfMode
+  ? Math.min(devicePixelRatio, 1.25)
+  : (_lowPowerDevice ? Math.min(devicePixelRatio, 1.5) : Math.min(devicePixelRatio, 2));
+const _initialShadows = _safePerfMode ? 'low' : (_lowPowerDevice ? 'low' : 'medium');
+const _initialShadowMapRes = _safePerfMode ? 1024 : (_lowPowerDevice ? 1024 : 4096);
+const _initialAntialias = !(_safePerfMode || _lowPowerDevice);
+
 // ─── Quality settings ────────────────────────────────────────────────────────
 const quality = {
   renderDist:  150,   // block visibility distance
-  shadows:     'medium', // off | low | medium | high
+  shadows:     _initialShadows, // off | low | medium | high
   lightDist:   60,    // point-light render distance
+  shadowMapRes: _initialShadowMapRes,  // shadow map resolution
+  lodEnabled:  true,   // enable LOD proxy system
+  resolutionScale: _initialResolutionScale, // pixel ratio scale
+  showStats:   false,  // performance stats overlay
 };
 const _frustum = new THREE.Frustum();
 const _projScreenMatrix = new THREE.Matrix4();
 
+// ─── Performance stats ──────────────────────────────────────────────────────
+const _perfStats = { fps: 0, emaFps: 60, calls: 0, triangles: 0, objectCount: 0, lastUpdate: 0 };
+
 // ─── Renderer ────────────────────────────────────────────────────────────────
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const renderer = new THREE.WebGLRenderer({ antialias: _initialAntialias, powerPreference: 'high-performance' });
+renderer.setPixelRatio(_initialResolutionScale);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type         = THREE.PCFSoftShadowMap;
 renderer.toneMapping            = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure    = 0.5;
+renderer.toneMappingExposure    = 0.22;
 renderer.outputColorSpace       = THREE.SRGBColorSpace;
 canvasContainer.appendChild(renderer.domElement);
 renderer.domElement.tabIndex = 0;
@@ -669,15 +879,14 @@ function onResize() {
 }
 
 // ─── Cameras ─────────────────────────────────────────────────────────────────
-const editorCam = new THREE.PerspectiveCamera(60, 1, 0.1, 2000);
+const editorCam = new THREE.PerspectiveCamera(60, 1, 0.1, 12000);
 editorCam.position.set(8, 10, 16);
 editorCam.lookAt(0, 0, 0);
 
-const fpsCam = new THREE.PerspectiveCamera(75, 1, 0.05, 500);
+const fpsCam = new THREE.PerspectiveCamera(75, 1, 0.05, 6000);
 
 // ─── Scene ───────────────────────────────────────────────────────────────────
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x87ceeb, 0.0008);
 
 const ambientLight = new THREE.HemisphereLight(0x87ceeb, 0x362e1e, 0.4);
 scene.add(ambientLight);
@@ -687,30 +896,32 @@ const LIGHT_BLOCK_DECAY = 1.4;
 const LIGHT_BLOCK_SHADOW_MAP = 1024;
 const LIGHT_BLOCK_SHADOW_BIAS = -0.0005;
 
-// ─── Sun / Sky defaults ──────────────────────────────────────────────────────
-const SUN_INTENSITY_DEFAULT  = 22;
-const SUN_TIME_DEFAULT       = 14;     // 2 PM — nice afternoon
-const SUN_NORTH_DEFAULT      = 0;      // north offset degrees
-const SUN_TURBIDITY_DEFAULT  = 2.5;    // haze (2=clear, 10=hazy)
-const SUN_SHADOW_RANGE_DEFAULT = 100;
-const SUN_DAY_DURATION_DEFAULT = 120;  // seconds for a full 24h cycle
-const SUN_DAY_CYCLE_ENABLED_DEFAULT = false;
+// ─── Sky system — UE5-style physically-based atmosphere ──────────────────────
 const SUN_DISTANCE = 400;
-const SUN_SIZE_DEFAULT = 800;
-const SKY_COLOR_DEFAULT = '#5588cc';
-const CLOUDS_ENABLED_DEFAULT = true;
-const CLOUD_WIND_SPEED_DEFAULT = 3;
-const CLOUD_WIND_DIR_DEFAULT = 45;
-const CLOUD_OPACITY_DEFAULT = 0.6;
-const STARS_ENABLED_DEFAULT = true;
-const STARS_COUNT_DEFAULT = 1500;
-const STARS_BRIGHTNESS_DEFAULT = 1;
-const MOON_ENABLED_DEFAULT = true;
-const MOON_BRIGHTNESS_DEFAULT = 1.5;
-const MOON_AURA_DEFAULT = 0.8;
-const NIGHT_SKY_COLOR = new THREE.Color(0x0a0e24); // deep navy blue night
 
-// ─── Sky dome ────────────────────────────────────────────────────────────────
+// Defaults
+const SUN_INTENSITY_DEFAULT      = 22;
+const SUN_TIME_DEFAULT           = 14;
+const SUN_NORTH_DEFAULT          = 0;
+const SUN_TURBIDITY_DEFAULT      = 2.5;
+const SUN_SHADOW_RANGE_DEFAULT   = 100;
+const SUN_DAY_DURATION_DEFAULT   = 120;
+const SUN_DAY_CYCLE_DEFAULT      = false;
+const SUN_SIZE_DEFAULT           = 800;
+const SKY_COLOR_DEFAULT          = '#5588cc';
+const CLOUDS_ENABLED_DEFAULT     = true;
+const CLOUD_WIND_SPEED_DEFAULT   = 3;
+const CLOUD_WIND_DIR_DEFAULT     = 45;
+const CLOUD_OPACITY_DEFAULT      = 0.6;
+const STARS_ENABLED_DEFAULT      = true;
+const STARS_COUNT_DEFAULT        = 1500;
+const STARS_BRIGHTNESS_DEFAULT   = 1;
+const MOON_ENABLED_DEFAULT       = true;
+const MOON_BRIGHTNESS_DEFAULT    = 1.5;
+const MOON_AURA_DEFAULT          = 0.8;
+const NIGHT_SKY_COLOR            = new THREE.Color(0x0a0e24);
+
+// ── Sky dome (Preetham/Hosek scattering) ────────────────────────────────────
 const sky = new Sky();
 sky.scale.setScalar(450000);
 sky.material.fog = false;
@@ -722,11 +933,24 @@ scene.add(sky);
 
 const skyUniforms = sky.material.uniforms;
 skyUniforms['turbidity'].value        = SUN_TURBIDITY_DEFAULT;
-skyUniforms['rayleigh'].value         = 3;       // vivid blue sky — physically accurate Rayleigh
-skyUniforms['mieCoefficient'].value   = 0.003;   // subtle atmospheric haze
-skyUniforms['mieDirectionalG'].value  = 0.75;    // bright sun-halo forward scattering
+skyUniforms['rayleigh'].value         = 3;
+skyUniforms['mieCoefficient'].value   = 0.003;
+skyUniforms['mieDirectionalG'].value  = 0.75;
 
-// ─── Cloud layer ─────────────────────────────────────────────────────────────
+// ── Sun (directional light) ─────────────────────────────────────────────────
+const sunTarget = new THREE.Object3D();
+scene.add(sunTarget);
+const sunLight = new THREE.DirectionalLight(0xffffff, SUN_INTENSITY_DEFAULT);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(4096, 4096);
+sunLight.shadow.bias = -0.00015;
+sunLight.shadow.normalBias = 0.015;
+sunLight.shadow.camera.near = 0.5;
+sunLight.shadow.camera.far = SUN_DISTANCE * 2;
+sunLight.target = sunTarget;
+scene.add(sunLight);
+
+// ── Cloud layer ─────────────────────────────────────────────────────────────
 const _cloudGroup = new THREE.Group();
 _cloudGroup.renderOrder = 1;
 _cloudGroup.frustumCulled = false;
@@ -736,21 +960,22 @@ let _cloudMaterial = null;
 let _cloudWindOffset = new THREE.Vector2(0, 0);
 
 function _buildClouds() {
-  // Remove old
-  while (_cloudGroup.children.length) _cloudGroup.remove(_cloudGroup.children[0]);
+  while (_cloudGroup.children.length) {
+    const c = _cloudGroup.children[0];
+    c.geometry?.dispose();
+    c.material?.dispose();
+    _cloudGroup.remove(c);
+  }
   const count = 200;
   const spread = 800;
   const height = 180;
   const heightVariance = 30;
   const geo = new THREE.PlaneGeometry(40, 40);
   _cloudMaterial = new THREE.MeshBasicMaterial({
-    color: 0xffffff,
-    transparent: true,
-    opacity: CLOUD_OPACITY_DEFAULT,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    fog: false,
+    color: 0xffffff, transparent: true, opacity: CLOUD_OPACITY_DEFAULT,
+    depthWrite: false, side: THREE.DoubleSide, fog: false,
   });
+  const particles = [];
   for (let i = 0; i < count; i++) {
     const mesh = new THREE.Mesh(geo, _cloudMaterial.clone());
     mesh.position.set(
@@ -758,30 +983,31 @@ function _buildClouds() {
       height + (Math.random() - 0.5) * heightVariance,
       (Math.random() - 0.5) * spread,
     );
-    mesh.rotation.x = -Math.PI / 2; // face down
+    mesh.rotation.x = -Math.PI / 2;
     mesh.scale.set(1 + Math.random() * 2, 1 + Math.random() * 1.5, 1);
     mesh.userData._cloudBaseX = mesh.position.x;
     mesh.userData._cloudBaseZ = mesh.position.z;
     mesh.frustumCulled = false;
     _cloudGroup.add(mesh);
+    particles.push(mesh);
   }
+  _cloudParticles = particles;
   _cloudGroup.visible = CLOUDS_ENABLED_DEFAULT;
 }
 _buildClouds();
 
 function _updateCloudWind(dt) {
-  if (!_cloudGroup.visible || _cloudGroup.children.length === 0) return;
+  if (!_cloudGroup.visible || !_cloudParticles || _cloudParticles.length === 0) return;
   const speed = THREE.MathUtils.clamp(parseFloat(cloudWindSpeedInput?.value) || 0, 0, 50);
   const dirDeg = parseFloat(cloudWindDirInput?.value) || CLOUD_WIND_DIR_DEFAULT;
   const dirRad = THREE.MathUtils.degToRad(dirDeg);
   _cloudWindOffset.x += Math.cos(dirRad) * speed * dt;
   _cloudWindOffset.y += Math.sin(dirRad) * speed * dt;
   const spread = 800;
-  for (const c of _cloudGroup.children) {
+  const half = spread / 2;
+  for (const c of _cloudParticles) {
     let nx = c.userData._cloudBaseX + _cloudWindOffset.x;
     let nz = c.userData._cloudBaseZ + _cloudWindOffset.y;
-    // Wrap around
-    const half = spread / 2;
     nx = ((nx + half) % spread + spread) % spread - half;
     nz = ((nz + half) % spread + spread) % spread - half;
     c.position.x = nx;
@@ -789,47 +1015,46 @@ function _updateCloudWind(dt) {
   }
 }
 
-// ─── Star field ──────────────────────────────────────────────────────────────
+// ── Star field ──────────────────────────────────────────────────────────────
 let _starsMesh = null;
 let _starsMaterial = null;
+let _starsPhases = null;
+let _starsBaseOpacity = 0;
 
 function _buildStars(count) {
   if (_starsMesh) { scene.remove(_starsMesh); _starsMesh.geometry.dispose(); _starsMaterial.dispose(); }
   const positions = new Float32Array(count * 3);
+  const phases = new Float32Array(count);
   const radius = 420;
   for (let i = 0; i < count; i++) {
-    // Distribute on upper hemisphere (y > -0.1)
     let x, y, z;
     do {
       x = (Math.random() - 0.5) * 2;
-      y = Math.random(); // upper half
+      y = Math.random();
       z = (Math.random() - 0.5) * 2;
-      const len = Math.sqrt(x * x + y * y + z * z);
-      x /= len; y /= len; z /= len;
-    } while (y < -0.1);
-    positions[i * 3] = x * radius;
+    } while (y < 0.02);
+    const len = Math.sqrt(x * x + y * y + z * z);
+    x /= len; y /= len; z /= len;
+    positions[i * 3]     = x * radius;
     positions[i * 3 + 1] = y * radius;
     positions[i * 3 + 2] = z * radius;
+    phases[i] = Math.random() * Math.PI * 2;
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   _starsMaterial = new THREE.PointsMaterial({
-    color: 0xffffff,
-    size: 0.8,
-    sizeAttenuation: true,
-    transparent: true,
-    opacity: 0,
-    depthWrite: false,
-    fog: false,
+    color: 0xffffff, size: 0.8, sizeAttenuation: true,
+    transparent: true, opacity: 0, depthWrite: false, fog: false,
   });
   _starsMesh = new THREE.Points(geo, _starsMaterial);
   _starsMesh.renderOrder = 0;
   _starsMesh.frustumCulled = false;
+  _starsPhases = phases;
   scene.add(_starsMesh);
 }
 _buildStars(STARS_COUNT_DEFAULT);
 
-// ─── Moon ────────────────────────────────────────────────────────────────────
+// ── Moon ────────────────────────────────────────────────────────────────────
 const _moonGroup = new THREE.Group();
 _moonGroup.frustumCulled = false;
 scene.add(_moonGroup);
@@ -845,309 +1070,336 @@ const _moonAuraCanvas = document.createElement('canvas');
 _moonAuraCanvas.width = 128;
 _moonAuraCanvas.height = 128;
 const _moonAuraCtx = _moonAuraCanvas.getContext('2d');
-const gradient = _moonAuraCtx.createRadialGradient(64, 64, 8, 64, 64, 64);
-gradient.addColorStop(0, 'rgba(200,210,255,0.5)');
-gradient.addColorStop(0.4, 'rgba(200,210,255,0.15)');
-gradient.addColorStop(1, 'rgba(200,210,255,0)');
-_moonAuraCtx.fillStyle = gradient;
+const _moonGradient = _moonAuraCtx.createRadialGradient(64, 64, 8, 64, 64, 64);
+_moonGradient.addColorStop(0, 'rgba(200,210,255,0.5)');
+_moonGradient.addColorStop(0.4, 'rgba(200,210,255,0.15)');
+_moonGradient.addColorStop(1, 'rgba(200,210,255,0)');
+_moonAuraCtx.fillStyle = _moonGradient;
 _moonAuraCtx.fillRect(0, 0, 128, 128);
 const _moonAuraTexture = new THREE.CanvasTexture(_moonAuraCanvas);
 const _moonAuraMat = new THREE.SpriteMaterial({
-  map: _moonAuraTexture,
-  transparent: true,
-  opacity: 0,
-  depthWrite: false,
-  fog: false,
-  blending: THREE.AdditiveBlending,
+  map: _moonAuraTexture, transparent: true, opacity: 0,
+  depthWrite: false, fog: false, blending: THREE.AdditiveBlending,
 });
 const _moonAuraSprite = new THREE.Sprite(_moonAuraMat);
 _moonAuraSprite.scale.set(30, 30, 1);
 _moonAuraSprite.frustumCulled = false;
 _moonGroup.add(_moonAuraSprite);
 
-// ─── Sun light ───────────────────────────────────────────────────────────────
-const sunTarget = new THREE.Object3D();
-scene.add(sunTarget);
-
-const sunLight = new THREE.DirectionalLight(0xffffff, SUN_INTENSITY_DEFAULT);
-sunLight.castShadow = true;
-sunLight.shadow.mapSize.set(4096, 4096);
-sunLight.shadow.bias       = -0.00015;
-sunLight.shadow.normalBias = 0.015;
-sunLight.shadow.camera.near = 0.5;
-sunLight.shadow.camera.far  = SUN_DISTANCE * 2;
-sunLight.target = sunTarget;
-scene.add(sunLight);
-
-// ─── Sun helpers ─────────────────────────────────────────────────────────────
-function clampSunIntensity(v)    { return THREE.MathUtils.clamp(Number.isFinite(v) ? v : SUN_INTENSITY_DEFAULT, 0, 100); }
-function clampSunTime(v)         { return THREE.MathUtils.clamp(Number.isFinite(v) ? v : SUN_TIME_DEFAULT, 0.000, 24.000); }
-function clampSunNorth(v)        { return Number.isFinite(v) ? ((v % 360) + 360) % 360 : SUN_NORTH_DEFAULT; }
-function clampSunTurbidity(v)    { return THREE.MathUtils.clamp(Number.isFinite(v) ? v : SUN_TURBIDITY_DEFAULT, 1, 20); }
-function clampSunShadowRange(v)  { return THREE.MathUtils.clamp(Number.isFinite(v) ? v : SUN_SHADOW_RANGE_DEFAULT, 20, 500); }
-function clampSunDayDuration(v)  { return THREE.MathUtils.clamp(Number.isFinite(v) ? v : SUN_DAY_DURATION_DEFAULT, 1, 3600); }
-
-/** Convert time-of-day (0-24) + north offset → sun direction vector (unit).
- *  Uses a physically-motivated solar arc with smooth civil/nautical twilight. */
+// ── Sun position from time (physically-based solar arc) ─────────────────────
 function sunPositionFromTime(time, northDeg) {
-  // Hour angle: 0 at solar noon (12h), ±π at midnight
-  const hourAngle = ((time - 12) / 24) * Math.PI * 2;
-
-  // Declination ~0 for equinox-like default; latitude 40° for temperate look
-  const latitude = THREE.MathUtils.degToRad(40);
-  const declination = 0; // equinox
-
-  // Solar elevation via spherical astronomy formula
-  const sinElev = Math.sin(latitude) * Math.sin(declination)
-    + Math.cos(latitude) * Math.cos(declination) * Math.cos(hourAngle);
-  const elevation = Math.asin(THREE.MathUtils.clamp(sinElev, -1, 1));
-
-  // Solar azimuth (measured from south, positive westward)
-  const cosAz = (Math.sin(declination) - Math.sin(latitude) * sinElev)
-    / (Math.cos(latitude) * Math.cos(elevation) + 1e-10);
+  const lat = THREE.MathUtils.degToRad(40);
+  const hourAngle = THREE.MathUtils.degToRad((time - 12) * 15);
+  const decl = 0; // equinox
+  const sinEl = Math.sin(lat) * Math.sin(decl) + Math.cos(lat) * Math.cos(decl) * Math.cos(hourAngle);
+  const elevation = Math.asin(THREE.MathUtils.clamp(sinEl, -1, 1));
+  const cosAz = (Math.sin(decl) - Math.sin(lat) * sinEl) / (Math.cos(lat) * Math.cos(elevation) + 1e-10);
   let azimuth = Math.acos(THREE.MathUtils.clamp(cosAz, -1, 1));
-  if (hourAngle > 0) azimuth = -azimuth; // afternoon = west
+  if (hourAngle > 0) azimuth = Math.PI * 2 - azimuth;
   azimuth += THREE.MathUtils.degToRad(northDeg);
-
-  const cosEl = Math.cos(elevation);
-  return new THREE.Vector3(
-    -Math.sin(azimuth) * cosEl,
+  const dir = new THREE.Vector3(
+    -Math.sin(azimuth) * Math.cos(elevation),
     Math.sin(elevation),
-    -Math.cos(azimuth) * cosEl,
-  ).normalize();
+    -Math.cos(azimuth) * Math.cos(elevation)
+  );
+  dir.normalize();
+  return dir;
 }
 
-/** Compute atmospheric light color tint based on sun elevation.
- *  Models real-world color-temperature shift from ~2000 K at horizon
- *  through ~6500 K at zenith, with smooth blue-hour and twilight. */
+// ── Sun color from elevation (UE5-style color temperature model) ────────────
 function sunColorFromElevation(elevDeg) {
-  const color = new THREE.Color();
-  if (elevDeg > 25) {
-    // High sun — near-white daylight (CIE D65 ≈ 6500 K)
-    color.setRGB(1.0, 0.98, 0.94);
-  } else if (elevDeg > 6) {
-    // Mid-morning / late-afternoon — gentle warm bias
-    const f = THREE.MathUtils.mapLinear(elevDeg, 6, 25, 0, 1);
-    color.setRGB(
-      1.0,
-      THREE.MathUtils.lerp(0.85, 0.98, f),
-      THREE.MathUtils.lerp(0.65, 0.94, f),
+  const c = new THREE.Color();
+  if (elevDeg < -18) {
+    // Deep night — tiny warm glow on horizon
+    c.setRGB(0.02, 0.02, 0.04);
+  } else if (elevDeg < -6) {
+    // Nautical/astronomical twilight — deep blue
+    const t = (elevDeg + 18) / 12; // 0 at -18, 1 at -6
+    c.setRGB(
+      THREE.MathUtils.lerp(0.02, 0.15, t),
+      THREE.MathUtils.lerp(0.02, 0.1, t),
+      THREE.MathUtils.lerp(0.04, 0.25, t)
     );
-  } else if (elevDeg > 0.5) {
-    // Golden hour — warm orange (≈ 3000 K)
-    const f = THREE.MathUtils.mapLinear(elevDeg, 0.5, 6, 0, 1);
-    color.setRGB(
-      1.0,
-      THREE.MathUtils.lerp(0.45, 0.85, f),
-      THREE.MathUtils.lerp(0.15, 0.65, f),
+  } else if (elevDeg < 0) {
+    // Civil twilight — golden/orange horizon
+    const t = (elevDeg + 6) / 6; // 0 at -6, 1 at 0
+    c.setRGB(
+      THREE.MathUtils.lerp(0.15, 1.0, t),
+      THREE.MathUtils.lerp(0.1, 0.55, t),
+      THREE.MathUtils.lerp(0.25, 0.2, t)
     );
-  } else if (elevDeg > -4) {
-    // Civil twilight — deep orange to salmon-pink horizon
-    const f = THREE.MathUtils.mapLinear(elevDeg, -4, 0.5, 0, 1);
-    color.setRGB(
-      THREE.MathUtils.lerp(0.6, 1.0, f),
-      THREE.MathUtils.lerp(0.2, 0.45, f),
-      THREE.MathUtils.lerp(0.15, 0.15, f),
-    );
-  } else if (elevDeg > -12) {
-    // Nautical twilight — blue hour
-    const f = THREE.MathUtils.mapLinear(elevDeg, -12, -4, 0, 1);
-    color.setRGB(
-      THREE.MathUtils.lerp(0.04, 0.6, f),
-      THREE.MathUtils.lerp(0.04, 0.2, f),
-      THREE.MathUtils.lerp(0.12, 0.15, f),
+  } else if (elevDeg < 15) {
+    // Golden hour — warm white
+    const t = elevDeg / 15;
+    c.setRGB(
+      THREE.MathUtils.lerp(1.0, 1.0, t),
+      THREE.MathUtils.lerp(0.55, 0.9, t),
+      THREE.MathUtils.lerp(0.2, 0.8, t)
     );
   } else {
-    // Night
-    color.setRGB(0.04, 0.04, 0.12);
+    // Full daylight — neutral white ~6500K
+    c.setRGB(1.0, 0.95, 0.88);
   }
-  return color;
+  return c;
 }
 
+// ── Main sky orchestrator ───────────────────────────────────────────────────
 function updateSunSky() {
-  const time        = clampSunTime(parseFloat(sunTimeInput.value));
-  const northOffset = clampSunNorth(parseFloat(sunNorthInput.value));
-  const turbidity   = clampSunTurbidity(parseFloat(sunTurbidityInput.value));
-  const shadowRange = clampSunShadowRange(parseFloat(sunShadowRangeInput.value));
-  const intensity   = clampSunIntensity(parseFloat(sunIntensityInput.value));
-  const dayDuration = clampSunDayDuration(parseFloat(sunDayDurationInput.value));
+  const time       = parseFloat(sunTimeInput?.value)  ?? SUN_TIME_DEFAULT;
+  const northDeg   = parseFloat(sunNorthInput?.value)  ?? SUN_NORTH_DEFAULT;
+  const intensity  = parseFloat(sunIntensityInput?.value) ?? SUN_INTENSITY_DEFAULT;
+  const turbidity  = parseFloat(sunTurbidityInput?.value) ?? SUN_TURBIDITY_DEFAULT;
+  const shadowRange = parseFloat(sunShadowRangeInput?.value) ?? SUN_SHADOW_RANGE_DEFAULT;
+  const sunSize    = parseFloat(sunSizeInput?.value)   ?? SUN_SIZE_DEFAULT;
+  const userSkyColor = skyColorInput?.value || SKY_COLOR_DEFAULT;
+  const cloudsOn   = cloudsEnabledInput?.checked ?? CLOUDS_ENABLED_DEFAULT;
+  const cloudOp    = parseFloat(cloudOpacityInput?.value) ?? CLOUD_OPACITY_DEFAULT;
+  const starsOn    = starsEnabledInput?.checked ?? STARS_ENABLED_DEFAULT;
+  const starsBrt   = parseFloat(starsBrightnessInput?.value) ?? STARS_BRIGHTNESS_DEFAULT;
+  const moonOn     = moonEnabledInput?.checked ?? MOON_ENABLED_DEFAULT;
+  const moonBrt    = parseFloat(moonBrightnessInput?.value) ?? MOON_BRIGHTNESS_DEFAULT;
+  const moonAura   = parseFloat(moonAuraInput?.value) ?? MOON_AURA_DEFAULT;
 
-  // New settings
-  const sunSize = THREE.MathUtils.clamp(parseFloat(sunSizeInput?.value) || SUN_SIZE_DEFAULT, 100, 10000);
-  const userSkyColor = new THREE.Color(skyColorInput?.value || SKY_COLOR_DEFAULT);
-  const cloudsEnabled = cloudsEnabledInput ? cloudsEnabledInput.checked : CLOUDS_ENABLED_DEFAULT;
-  const cloudWindSpeed = THREE.MathUtils.clamp(parseFloat(cloudWindSpeedInput?.value) || 0, 0, 50);
-  const cloudWindDir = parseFloat(cloudWindDirInput?.value) || CLOUD_WIND_DIR_DEFAULT;
-  const cloudOpacity = THREE.MathUtils.clamp(parseFloat(cloudOpacityInput?.value) || CLOUD_OPACITY_DEFAULT, 0, 1);
-  const starsEnabled = starsEnabledInput ? starsEnabledInput.checked : STARS_ENABLED_DEFAULT;
-  const starsBrightness = THREE.MathUtils.clamp(parseFloat(starsBrightnessInput?.value) || STARS_BRIGHTNESS_DEFAULT, 0.1, 3);
-  const moonEnabled = moonEnabledInput ? moonEnabledInput.checked : MOON_ENABLED_DEFAULT;
-  const moonBrightness = THREE.MathUtils.clamp(parseFloat(moonBrightnessInput?.value) || MOON_BRIGHTNESS_DEFAULT, 0.1, 5);
-  const moonAura = THREE.MathUtils.clamp(parseFloat(moonAuraInput?.value) || MOON_AURA_DEFAULT, 0, 3);
+  // ─ Sun direction ─
+  const sunDir = sunPositionFromTime(time, northDeg);
+  const elevRad = Math.asin(THREE.MathUtils.clamp(sunDir.y, -1, 1));
+  const elevDeg = THREE.MathUtils.radToDeg(elevRad);
 
-  // Sync inputs
-  sunTimeInput.value        = time.toFixed(3);
-  sunNorthInput.value       = Math.round(northOffset);
-  sunTurbidityInput.value   = turbidity.toFixed(1);
-  sunShadowRangeInput.value = Math.round(shadowRange);
-  sunIntensityInput.value   = intensity.toFixed(1);
-  sunDayDurationInput.value = Math.round(dayDuration);
-
-  // Compute sun direction
-  const sunDir = sunPositionFromTime(time, northOffset);
-  const elevDeg = THREE.MathUtils.radToDeg(Math.asin(sunDir.y));
-
-  // ── Physically-based sky dome update ──
-  const baseRayleigh = 3.0;
-  const horizonBoost = THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(elevDeg, 0, 20, 1.5, 0), 0, 1.5);
-  skyUniforms['rayleigh'].value = baseRayleigh + horizonBoost;
+  // ─ Sky dome uniforms ─
   skyUniforms['turbidity'].value = turbidity;
-  const baseMie = 0.003;
-  const horizonMie = THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(elevDeg, -2, 15, 0.012, 0), 0, 0.012);
-  skyUniforms['mieCoefficient'].value = baseMie + horizonMie;
-  skyUniforms['mieDirectionalG'].value = THREE.MathUtils.lerp(0.85, 0.75, THREE.MathUtils.clamp(elevDeg / 60, 0, 1));
-  skyUniforms['sunPosition'].value.copy(sunDir);
+  skyUniforms['rayleigh'].value = THREE.MathUtils.lerp(3, 0.5, THREE.MathUtils.clamp((turbidity - 2) / 18, 0, 1));
+  skyUniforms['mieCoefficient'].value = 0.003 + sunSize / 500000;
+  skyUniforms['mieDirectionalG'].value = 0.75;
+  skyUniforms['sunPosition'].value.copy(sunDir).multiplyScalar(SUN_DISTANCE);
 
-  // Sun disk size — scale the sun position to control apparent size
-  if (skyUniforms['sunPosition']) {
-    // The Sky shader sun disk size is controlled by sunPosition magnitude implicitly;
-    // we override by scaling mieDirectionalG for a fatter sun glow
-    const sizeScale = sunSize / 800; // 800 = default
-    skyUniforms['mieDirectionalG'].value = THREE.MathUtils.clamp(
-      THREE.MathUtils.lerp(0.85, 0.75, THREE.MathUtils.clamp(elevDeg / 60, 0, 1)) * sizeScale,
-      0.5, 0.999,
-    );
+  // ─ Dynamic exposure (brighter day, darker night) ─
+  let exposure;
+  if (elevDeg > 10) {
+    exposure = 0.22;
+  } else if (elevDeg > 0) {
+    exposure = THREE.MathUtils.lerp(0.35, 0.22, elevDeg / 10);
+  } else if (elevDeg > -6) {
+    exposure = THREE.MathUtils.lerp(0.5, 0.35, (elevDeg + 6) / 6);
+  } else if (elevDeg > -18) {
+    exposure = THREE.MathUtils.lerp(0.08, 0.5, (elevDeg + 18) / 12);
+  } else {
+    exposure = 0.08;
   }
+  renderer.toneMappingExposure = exposure;
 
-  // ── Dynamic exposure ──
-  const dayFactor = THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(elevDeg, -6, 25, 0, 1), 0, 1);
-  const targetExposure = THREE.MathUtils.lerp(0.35, 0.6, dayFactor);
-  renderer.toneMappingExposure += (targetExposure - renderer.toneMappingExposure) * 0.08;
+  // ─ Sun light ─
+  const sunColor = sunColorFromElevation(elevDeg);
+  sunLight.color.copy(sunColor);
 
-  // ── Sun directional light ──
-  const sunFade = THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(elevDeg, -2, 8, 0, 1), 0, 1);
-  sunLight.intensity = intensity * sunFade;
-  sunLight.color.copy(sunColorFromElevation(elevDeg));
-  sunLight.position.copy(sunDir.clone().multiplyScalar(SUN_DISTANCE));
-  sunTarget.position.set(0, 0, 0);
+  // Intensity curve: peaks at zenith, fades to zero below -6°
+  let sunIntMult;
+  if (elevDeg > 15) sunIntMult = 1;
+  else if (elevDeg > 0) sunIntMult = THREE.MathUtils.lerp(0.3, 1, elevDeg / 15);
+  else if (elevDeg > -6) sunIntMult = THREE.MathUtils.lerp(0, 0.3, (elevDeg + 6) / 6);
+  else sunIntMult = 0;
+  sunLight.intensity = intensity * sunIntMult;
+
+  // Position sun
+  sunLight.position.copy(sunTarget.position).addScaledVector(sunDir, SUN_DISTANCE);
 
   // Shadow frustum
-  sunLight.shadow.camera.left   = -shadowRange;
-  sunLight.shadow.camera.right  =  shadowRange;
-  sunLight.shadow.camera.top    =  shadowRange;
-  sunLight.shadow.camera.bottom = -shadowRange;
-  sunLight.shadow.camera.far    =  shadowRange * 4;
-  const biasScale = Math.sqrt(shadowRange / 100);
-  sunLight.shadow.bias       = -0.00015 * biasScale;
-  sunLight.shadow.normalBias =  0.012   * biasScale;
+  const halfShadow = shadowRange / 2;
+  sunLight.shadow.camera.left   = -halfShadow;
+  sunLight.shadow.camera.right  = halfShadow;
+  sunLight.shadow.camera.top    = halfShadow;
+  sunLight.shadow.camera.bottom = -halfShadow;
   sunLight.shadow.camera.updateProjectionMatrix();
 
-  // ── Hemisphere ambient light (sky + ground bounce) ──
-  const ambientDayFactor = THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(elevDeg, -8, 20, 0, 1), 0, 1);
-  ambientLight.intensity = THREE.MathUtils.lerp(0.12, 0.55, ambientDayFactor);
-  const sunCol = sunColorFromElevation(elevDeg);
-
-  // Blend user sky color with sun-derived color
-  const zenithBlue = new THREE.Color().copy(userSkyColor);
-  const skyTint = new THREE.Color().copy(sunCol).lerp(zenithBlue, THREE.MathUtils.lerp(0, 0.5, ambientDayFactor));
-
-  // Night: deep navy blue
-  if (ambientDayFactor < 0.25) {
-    const nightMix = THREE.MathUtils.mapLinear(ambientDayFactor, 0, 0.25, 1, 0);
-    ambientLight.color.setRGB(
-      THREE.MathUtils.lerp(skyTint.r, NIGHT_SKY_COLOR.r, nightMix),
-      THREE.MathUtils.lerp(skyTint.g, NIGHT_SKY_COLOR.g, nightMix),
-      THREE.MathUtils.lerp(skyTint.b, NIGHT_SKY_COLOR.b, nightMix),
-    );
+  // ─ Hemisphere ambient light ─
+  const userCol = new THREE.Color(userSkyColor);
+  if (elevDeg > 5) {
+    ambientLight.color.copy(userCol).multiplyScalar(0.6);
+    ambientLight.groundColor.setHex(0x362e1e);
+    ambientLight.intensity = 0.4;
+  } else if (elevDeg > -6) {
+    const t = (elevDeg + 6) / 11; // 0 at -6, 1 at 5
+    const nightTop = NIGHT_SKY_COLOR.clone();
+    ambientLight.color.copy(nightTop).lerp(userCol.clone().multiplyScalar(0.6), t);
+    ambientLight.groundColor.setHex(0x0a0a14).lerp(new THREE.Color(0x362e1e), t);
+    ambientLight.intensity = THREE.MathUtils.lerp(0.08, 0.4, t);
   } else {
-    ambientLight.color.copy(skyTint);
+    ambientLight.color.copy(NIGHT_SKY_COLOR);
+    ambientLight.groundColor.setHex(0x0a0a14);
+    ambientLight.intensity = 0.08;
   }
-  // Ground color
-  ambientLight.groundColor.setRGB(
-    THREE.MathUtils.lerp(0.02, 0.18, ambientDayFactor),
-    THREE.MathUtils.lerp(0.02, 0.14, ambientDayFactor),
-    THREE.MathUtils.lerp(0.04, 0.08, ambientDayFactor),
-  );
 
-  // Make light-emitting blocks less affected by darkness
-  for (const m of sceneObjects) {
-    if (m.userData.pointLight && m.material) {
-      const nightBoost = THREE.MathUtils.lerp(1.8, 1.0, ambientDayFactor);
-      m.material.emissiveIntensity = nightBoost;
+  // ─ Clear color (background behind sky dome) ─
+  if (elevDeg > 5) {
+    renderer.setClearColor(userCol);
+  } else if (elevDeg > -12) {
+    const t = (elevDeg + 12) / 17;
+    const blended = NIGHT_SKY_COLOR.clone().lerp(userCol, t);
+    renderer.setClearColor(blended);
+  } else {
+    renderer.setClearColor(NIGHT_SKY_COLOR);
+  }
+
+  // ─ Fog atmospheric tinting ─
+  if (fogSettings.enabled) {
+    const baseFogCol = new THREE.Color(fogSettings.color);
+    if (elevDeg > 0 && elevDeg < 10) {
+      // Near horizon — tint fog toward sun color for inscattering effect
+      const inscatter = THREE.MathUtils.clamp(1 - elevDeg / 10, 0, 1) * 0.4;
+      baseFogCol.lerp(sunColor, inscatter);
+    } else if (elevDeg <= 0 && elevDeg > -12) {
+      const nightT = THREE.MathUtils.clamp(-elevDeg / 12, 0, 1);
+      baseFogCol.lerp(NIGHT_SKY_COLOR, nightT * 0.6);
+    }
+    const brightness = THREE.MathUtils.clamp(fogSettings.brightness ?? 1, 0, 5);
+    baseFogCol.multiplyScalar(brightness);
+    if (fogSettings.mode === 'linear') {
+      scene.fog = new THREE.Fog(baseFogCol, fogSettings.near, fogSettings.far);
+    } else {
+      scene.fog = new THREE.FogExp2(baseFogCol, fogSettings.density);
     }
   }
 
-  // ── Apply sky color to renderer clear color ──
-  renderer.setClearColor(userSkyColor);
-
-  // ── Atmospheric perspective fog ──
-  // Tint fog with a blend of the sun color and the user sky color so the
-  // horizon / distant haze actually reflects the sky colour the user chose.
-  if (scene.fog) {
-    const horizonColor = new THREE.Color().copy(sunCol).lerp(userSkyColor, 0.5);
-    const fogBright = THREE.MathUtils.lerp(0.005, 0.55, ambientDayFactor);
-    scene.fog.color.copy(horizonColor).multiplyScalar(fogBright);
-    if (ambientDayFactor > 0.5) {
-      const aerialBlend = THREE.MathUtils.mapLinear(ambientDayFactor, 0.5, 1, 0, 0.3);
-      scene.fog.color.lerp(new THREE.Color().copy(userSkyColor).multiplyScalar(0.7), aerialBlend);
+  // ─ Clouds ─
+  _cloudGroup.visible = cloudsOn;
+  if (cloudsOn && _cloudParticles) {
+    let cloudAlpha = cloudOp;
+    if (elevDeg < -6) cloudAlpha *= 0.15;
+    else if (elevDeg < 0) cloudAlpha *= THREE.MathUtils.lerp(0.15, 0.7, (elevDeg + 6) / 6);
+    else if (elevDeg < 5) cloudAlpha *= THREE.MathUtils.lerp(0.7, 1, elevDeg / 5);
+    for (const c of _cloudParticles) {
+      c.material.opacity = cloudAlpha;
     }
   }
 
-  // ── Clouds ──
-  _cloudGroup.visible = cloudsEnabled;
-  if (cloudsEnabled) {
-    for (const c of _cloudGroup.children) {
-      if (c.material) c.material.opacity = cloudOpacity * THREE.MathUtils.clamp(ambientDayFactor * 2.5, 0.15, 1);
+  // ─ Stars ─
+  if (_starsMesh) {
+    _starsMesh.visible = starsOn;
+    if (starsOn) {
+      let starAlpha = 0;
+      if (elevDeg < -12) starAlpha = 1;
+      else if (elevDeg < -3) starAlpha = THREE.MathUtils.clamp((-3 - elevDeg) / 9, 0, 1);
+      else starAlpha = 0;
+      _starsMaterial.opacity = starAlpha * starsBrt;
+      _starsBaseOpacity = _starsMaterial.opacity;
     }
   }
 
-  // ── Stars ──
-  if (_starsMaterial) {
-    const starAlpha = starsEnabled
-      ? THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(elevDeg, -2, 6, 1, 0), 0, 1) * starsBrightness
-      : 0;
-    _starsMaterial.opacity = starAlpha;
-    if (_starsMesh) _starsMesh.visible = starAlpha > 0.01;
-  }
-
-  // ── Moon ──
-  if (moonEnabled) {
-    // Place moon opposite the sun
+  // ─ Moon ─
+  if (moonOn) {
+    _moonGroup.visible = true;
     const moonDir = sunDir.clone().negate();
-    // Keep it above horizon even if sun is high
+    // Keep moon above horizon
     if (moonDir.y < 0.05) moonDir.y = 0.05;
     moonDir.normalize();
-    _moonMesh.position.copy(moonDir.clone().multiplyScalar(SUN_DISTANCE * 0.95));
+    _moonMesh.position.copy(moonDir).multiplyScalar(350);
     _moonAuraSprite.position.copy(_moonMesh.position);
-    // Moon visibility: fade in as sun sets
-    const moonAlpha = THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(elevDeg, -4, 8, 1, 0), 0, 1);
-    _moonMat.opacity = moonAlpha * moonBrightness;
-    _moonAuraMat.opacity = moonAlpha * moonAura * 0.5;
-    _moonGroup.visible = moonAlpha > 0.01;
+
+    let moonAlpha = 0;
+    if (elevDeg < -6) moonAlpha = 1;
+    else if (elevDeg < 3) moonAlpha = THREE.MathUtils.clamp((3 - elevDeg) / 9, 0, 1);
+    else moonAlpha = 0;
+
+    _moonMat.opacity = moonAlpha * THREE.MathUtils.clamp(moonBrt, 0, 5);
+    _moonAuraMat.opacity = moonAlpha * THREE.MathUtils.clamp(moonAura, 0, 3);
   } else {
     _moonGroup.visible = false;
   }
+
+  // ─ Update time display ─
+  if (sunTimeValSpan) {
+    const h = Math.floor(time) % 24;
+    const m = Math.floor((time % 1) * 60);
+    sunTimeValSpan.textContent = String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+  }
+  if (sunTurbidityValSpan) sunTurbidityValSpan.textContent = turbidity.toFixed(1);
+  if (sunNorthValSpan) sunNorthValSpan.textContent = Math.round(northDeg) + '°';
+  if (cloudOpacityValSpan) cloudOpacityValSpan.textContent = cloudOp.toFixed(2);
 }
 
-/** Keep shadow camera centered on active camera so shadows work everywhere. */
 function updateSunShadowCenter(pos) {
-  const time = clampSunTime(parseFloat(sunTimeInput.value));
-  const north = clampSunNorth(parseFloat(sunNorthInput.value));
-  const sunDir = sunPositionFromTime(time, north);
   sunTarget.position.set(pos.x, 0, pos.z);
+  const sunDir = sunPositionFromTime(
+    parseFloat(sunTimeInput?.value) ?? SUN_TIME_DEFAULT,
+    parseFloat(sunNorthInput?.value) ?? SUN_NORTH_DEFAULT
+  );
   sunLight.position.copy(sunTarget.position).addScaledVector(sunDir, SUN_DISTANCE);
   sunLight.shadow.camera.updateProjectionMatrix();
 }
 
-/** Keep sky dome, clouds, stars, and moon centered on the active camera so
- *  the player can never walk to the edge of the sky. */
 function syncSkyToCamera(cam) {
+  if (!cam) return;
   const p = cam.position;
   sky.position.set(p.x, p.y, p.z);
   _cloudGroup.position.set(p.x, 0, p.z);
   if (_starsMesh) _starsMesh.position.set(p.x, p.y, p.z);
   _moonGroup.position.set(p.x, p.y, p.z);
 }
+
+function syncSunInputs() {
+  if (sunTimeInput)       sunTimeInput.value       = SUN_TIME_DEFAULT;
+  if (sunNorthInput)      sunNorthInput.value      = SUN_NORTH_DEFAULT;
+  if (sunIntensityInput)  sunIntensityInput.value   = SUN_INTENSITY_DEFAULT;
+  if (sunTurbidityInput)  sunTurbidityInput.value   = SUN_TURBIDITY_DEFAULT;
+  if (sunShadowRangeInput) sunShadowRangeInput.value = SUN_SHADOW_RANGE_DEFAULT;
+  if (sunSizeInput)       sunSizeInput.value        = SUN_SIZE_DEFAULT;
+  if (sunDayCycleInput)   sunDayCycleInput.checked  = SUN_DAY_CYCLE_DEFAULT;
+  if (sunDayDurationInput) sunDayDurationInput.value = SUN_DAY_DURATION_DEFAULT;
+  if (skyColorInput)      skyColorInput.value       = SKY_COLOR_DEFAULT;
+  if (cloudsEnabledInput) cloudsEnabledInput.checked = CLOUDS_ENABLED_DEFAULT;
+  if (cloudWindSpeedInput) cloudWindSpeedInput.value = CLOUD_WIND_SPEED_DEFAULT;
+  if (cloudWindDirInput)  cloudWindDirInput.value    = CLOUD_WIND_DIR_DEFAULT;
+  if (cloudOpacityInput)  cloudOpacityInput.value    = CLOUD_OPACITY_DEFAULT;
+  if (starsEnabledInput)  starsEnabledInput.checked  = STARS_ENABLED_DEFAULT;
+  if (starsCountInput)    starsCountInput.value      = STARS_COUNT_DEFAULT;
+  if (starsBrightnessInput) starsBrightnessInput.value = STARS_BRIGHTNESS_DEFAULT;
+  if (moonEnabledInput)   moonEnabledInput.checked   = MOON_ENABLED_DEFAULT;
+  if (moonBrightnessInput) moonBrightnessInput.value  = MOON_BRIGHTNESS_DEFAULT;
+  if (moonAuraInput)      moonAuraInput.value        = MOON_AURA_DEFAULT;
+}
+
+function applySunUI() {
+  updateSunSky();
+  markRestoreDirty();
+}
+
+function applyFogSettings() {
+  if (!fogSettings.enabled) { scene.fog = null; return; }
+  const b = THREE.MathUtils.clamp(fogSettings.brightness ?? 1, 0, 5);
+  const base = new THREE.Color(fogSettings.color);
+  const col = base.multiplyScalar(b);
+  if (fogSettings.mode === 'linear') {
+    scene.fog = new THREE.Fog(col, fogSettings.near, fogSettings.far);
+  } else {
+    scene.fog = new THREE.FogExp2(col, fogSettings.density);
+  }
+}
+
+function syncFogUI() {
+  if (fogEnabledInput) fogEnabledInput.checked = fogSettings.enabled;
+  if (fogModeInput)    fogModeInput.value      = fogSettings.mode;
+  if (fogColorInput)   fogColorInput.value     = '#' + (fogSettings.color >>> 0).toString(16).padStart(6, '0');
+  if (fogDensityInput) fogDensityInput.value   = fogSettings.density;
+  if (fogNearInput)    fogNearInput.value      = fogSettings.near;
+  if (fogFarInput)     fogFarInput.value       = fogSettings.far;
+  if (fogBrightnessInput) fogBrightnessInput.value = fogSettings.brightness;
+}
+
+function readFogUI() {
+  fogSettings.enabled    = fogEnabledInput?.checked ?? true;
+  fogSettings.mode       = fogModeInput?.value || 'exp2';
+  fogSettings.color      = parseInt((fogColorInput?.value || '#87ceeb').replace('#', ''), 16);
+  fogSettings.density    = parseFloat(fogDensityInput?.value) || 0.0008;
+  fogSettings.near       = parseFloat(fogNearInput?.value) || 10;
+  fogSettings.far        = parseFloat(fogFarInput?.value) || 500;
+  fogSettings.brightness = parseFloat(fogBrightnessInput?.value) || 1;
+  applyFogSettings();
+  updateSunSky(); // re-tint fog by sun position
+  markRestoreDirty();
+}
+
+// Initialize sky on load
+updateSunSky();
+applyFogSettings();
 
 const EDIT_SPEED = 12;
 const EDIT_VERTICAL_SPEED = 9;
@@ -1234,7 +1486,11 @@ const gridChunks  = new Map();
 const gridFillPlanes = new Map();
 let gridFillColor   = 0x1a2636;
 let gridFillEnabled = false;
-let gridFillTexture = 'none'; // none, grass, dirt, stone, sand, snow
+let gridFillTexture = 'none'; // none, grass, dirt, stone, sand, snow, custom
+let gridFillCustomImage = '';
+let gridPlayVisible = false;
+let gridPlaySolid = true;
+let gridPlayMaskTerrain = true;
 let worldBorderEnabled = false;
 let worldBorderMinX = -50;
 let worldBorderMaxX = 50;
@@ -1286,11 +1542,68 @@ function _generateGroundTexture(texName) {
 }
 
 function _getGridFillMaterial() {
+  if (gridFillTexture === 'custom' && gridFillCustomImage) {
+    const tex = new THREE.TextureLoader().load(gridFillCustomImage);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(2, 2);
+    return new THREE.MeshStandardMaterial({ map: tex, side: THREE.DoubleSide, roughness: 0.95, metalness: 0 });
+  }
   if (gridFillTexture && gridFillTexture !== 'none' && GROUND_TEXTURES[gridFillTexture]) {
     const tex = _generateGroundTexture(gridFillTexture);
     return new THREE.MeshStandardMaterial({ map: tex, side: THREE.DoubleSide, roughness: 0.95, metalness: 0 });
   }
   return new THREE.MeshStandardMaterial({ color: gridFillColor, side: THREE.DoubleSide, roughness: 1, metalness: 0 });
+}
+
+function _collectGridMaskSolidBounds() {
+  if (!state.isPlaytest || !gridPlayMaskTerrain) return [];
+  const out = [];
+  for (const mesh of sceneObjects) {
+    if (!mesh?.geometry) continue;
+    if (!mesh.userData?.solid) continue;
+    if (typeof shouldHideInPlaytest === 'function' && shouldHideInPlaytest(mesh)) continue;
+    const box = new THREE.Box3().setFromObject(mesh);
+    if (!Number.isFinite(box.min.x) || !Number.isFinite(box.max.x)) continue;
+    out.push(box);
+  }
+  return out;
+}
+
+function _isGridChunkOccluded(kx, kz, solidBounds) {
+  if (!Array.isArray(solidBounds) || !solidBounds.length) return false;
+  const minX = kx * CHUNK_SIZE;
+  const maxX = minX + CHUNK_SIZE;
+  const minZ = kz * CHUNK_SIZE;
+  const maxZ = minZ + CHUNK_SIZE;
+  const planeY = -0.01;
+  for (const box of solidBounds) {
+    if (box.max.y <= planeY) continue;
+    if (box.max.x < minX || box.min.x > maxX) continue;
+    if (box.max.z < minZ || box.min.z > maxZ) continue;
+    return true;
+  }
+  return false;
+}
+
+function _updateGridFillVisibilityForPlaytest(solidBounds = null) {
+  if (!state.isPlaytest) {
+    for (const [, plane] of gridFillPlanes) plane.visible = gridFillEnabled;
+    return;
+  }
+  if (!gridPlayVisible) {
+    for (const [, plane] of gridFillPlanes) plane.visible = false;
+    return;
+  }
+  const bounds = solidBounds || _collectGridMaskSolidBounds();
+  for (const [key, plane] of gridFillPlanes) {
+    if (!gridPlayMaskTerrain) {
+      plane.visible = true;
+      continue;
+    }
+    const [kx, kz] = key.split(',').map(Number);
+    plane.visible = !_isGridChunkOccluded(kx, kz, bounds);
+  }
 }
 
 
@@ -1314,12 +1627,14 @@ function updateGridChunks(wx, wz) {
     if (!needed.has(key)) { scene.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose(); gridFillPlanes.delete(key); }
   }
 
+  const maskSolidBounds = _collectGridMaskSolidBounds();
+
   for (const key of needed) {
     if (!gridChunks.has(key)) {
       const [kx, kz] = key.split(',').map(Number);
       const g = new THREE.GridHelper(CHUNK_SIZE, 20, 0x1e3a5f, 0x0e1f33);
       g.position.set(kx * CHUNK_SIZE + CHUNK_SIZE / 2, 0, kz * CHUNK_SIZE + CHUNK_SIZE / 2);
-      if (state.isPlaytest) g.visible = false;
+      if (state.isPlaytest) g.visible = gridPlayVisible;
       scene.add(g);
       gridChunks.set(key, g);
     }
@@ -1332,7 +1647,9 @@ function updateGridChunks(wx, wz) {
       plane.rotation.x = -Math.PI / 2;
       plane.position.set(kx * CHUNK_SIZE + CHUNK_SIZE / 2, -0.01, kz * CHUNK_SIZE + CHUNK_SIZE / 2);
       plane.receiveShadow = true;
-      if (state.isPlaytest) plane.visible = false;
+      if (state.isPlaytest) {
+        plane.visible = gridPlayVisible && (!gridPlayMaskTerrain || !_isGridChunkOccluded(kx, kz, maskSolidBounds));
+      }
       scene.add(plane);
       gridFillPlanes.set(key, plane);
     }
@@ -1342,6 +1659,8 @@ function updateGridChunks(wx, wz) {
     for (const [key, mesh] of gridFillPlanes) { scene.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose(); }
     gridFillPlanes.clear();
   }
+
+  _updateGridFillVisibilityForPlaytest(maskSolidBounds);
 }
 
 // ─── Grid axis number labels (sprites) ───────────────────────────────────────
@@ -1395,7 +1714,7 @@ function updateGridLabels(wx, wz) {
       const isMajor = x % 10 === 0;
       const sprite = _makeTextSprite(String(x), isMajor);
       sprite.position.set(x, 0.15, 0.6);
-      if (state.isPlaytest) sprite.visible = false;
+      if (state.isPlaytest) sprite.visible = gridPlayVisible;
       scene.add(sprite);
       gridLabelSprites.set(key, sprite);
     }
@@ -1408,7 +1727,7 @@ function updateGridLabels(wx, wz) {
       const isMajor = z % 10 === 0;
       const sprite = _makeTextSprite(String(z), isMajor);
       sprite.position.set(0.6, 0.15, z);
-      if (state.isPlaytest) sprite.visible = false;
+      if (state.isPlaytest) sprite.visible = gridPlayVisible;
       scene.add(sprite);
       gridLabelSprites.set(key, sprite);
     }
@@ -1428,7 +1747,11 @@ function updateGridLabels(wx, wz) {
 function setGridVisible(visible) {
   for (const [, mesh] of gridChunks) mesh.visible = visible;
   for (const [, sprite] of gridLabelSprites) sprite.visible = visible;
-  // Grid fill planes stay visible (floor color persists even when grid lines are hidden)
+  if (state.isPlaytest) {
+    _updateGridFillVisibilityForPlaytest();
+  } else {
+    for (const [, plane] of gridFillPlanes) plane.visible = visible;
+  }
 }
 
 // ─── Coordinate HUD + looked-at object ──────────────────────────────────────
@@ -1507,6 +1830,289 @@ function makeExtrudedShapeGeometry(sides, depth, radius = 1) {
   return geo;
 }
 
+function makeHollowBoxGeometry(frameThickness = 0.22) {
+  const size = 1.8;
+  const half = size * 0.5;
+  const t = THREE.MathUtils.clamp(parseFloat(frameThickness) || 0.22, 0.05, 0.9);
+  const bt = t * 0.5;
+  const lx = Math.max(0.05, size - 2 * t);
+  const lz = Math.max(0.05, size - 2 * t);
+
+  const parts = [];
+  const pushBox = (sx, sy, sz, x, y, z) => {
+    const g = new THREE.BoxGeometry(sx, sy, sz);
+    g.translate(x, y, z);
+    parts.push(g);
+  };
+
+  // Vertical corner posts
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      pushBox(t, size, t, sx * (half - bt), 0, sz * (half - bt));
+    }
+  }
+  // Top and bottom frame edges along X
+  for (const sy of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      pushBox(lx, t, t, 0, sy * (half - bt), sz * (half - bt));
+    }
+  }
+  // Top and bottom frame edges along Z
+  for (const sy of [-1, 1]) {
+    for (const sx of [-1, 1]) {
+      pushBox(t, t, lz, sx * (half - bt), sy * (half - bt), 0);
+    }
+  }
+
+  let posCount = 0;
+  let normCount = 0;
+  for (const g of parts) {
+    posCount += g.attributes.position.count;
+    normCount += g.attributes.normal.count;
+  }
+
+  const positions = new Float32Array(posCount * 3);
+  const normals = new Float32Array(normCount * 3);
+  let pOffset = 0;
+  let nOffset = 0;
+  for (const g of parts) {
+    positions.set(g.attributes.position.array, pOffset);
+    normals.set(g.attributes.normal.array, nOffset);
+    pOffset += g.attributes.position.array.length;
+    nOffset += g.attributes.normal.array.length;
+    g.dispose();
+  }
+
+  const merged = new THREE.BufferGeometry();
+  merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  merged.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+  merged.computeBoundingBox();
+  merged.computeBoundingSphere();
+  return merged;
+}
+
+// ─── Shape-editable helpers (selected object re-shaping) ───────────────────
+const SHAPE_PALETTE = [
+  'cube', 'sphere', 'cylinder', 'cone', 'pyramid', 'prism',
+  'torus', 'hollowbox', 'plane2d', 'triangle2d', 'circle2d', 'polygon2d',
+];
+
+const SHAPE_EDITABLE_TYPES = new Set([
+  'trigger', 'light', 'spawn', 'checkpoint', 'teleport', 'keypad',
+  'target', 'pivot', 'joint', 'camera', 'npc', 'commandBlock',
+  'wall', 'floor', 'screen', 'text', 'text3d',
+]);
+
+const DEFAULT_VISIBLE_IN_PLAY = new Set([
+  'wall', 'floor', 'target', 'screen', 'text', 'text3d',
+  'npc', 'camera', 'keypad', 'commandBlock',
+]);
+
+function getEffectiveShapeType(mesh) {
+  const st = mesh?.userData?.shapeType;
+  if (st && DEFS[st]) return st;
+  return mesh?.userData?.type || 'cube';
+}
+
+function getEffectiveDef(mesh) {
+  return DEFS[getEffectiveShapeType(mesh)] || DEFS[mesh?.userData?.type] || {};
+}
+
+function clampTubeRadius(v) {
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return 0.24;
+  return Math.max(0.02, Math.min(2.0, n));
+}
+
+function clampFrameThickness(v) {
+  const n = parseFloat(v);
+  if (!Number.isFinite(n)) return 0.22;
+  return Math.max(0.05, Math.min(0.9, n));
+}
+
+function shouldHideInPlaytest(mesh) {
+  if (mesh.userData.hiddenInGame) return true;
+  if (mesh.userData.visibleInPlay !== undefined) return !mesh.userData.visibleInPlay;
+
+  const t = mesh.userData.type;
+  if (t === 'light' && mesh.userData.pointLight) return true;
+  if (t === 'spawn' || t === 'trigger' || t === 'pivot') return true;
+  return false;
+}
+
+function buildShapeSelectHTML(mesh) {
+  if (!SHAPE_EDITABLE_TYPES.has(mesh.userData.type)) return '';
+  const current = mesh.userData.shapeType || '';
+  let html = '<div class="prop-row"><span class="prop-key">Shape</span><div class="prop-controls"><select id="prop-shape-type" style="flex:1;max-width:140px">';
+  html += `<option value=""${!current ? ' selected' : ''}>Default (${DEFS[mesh.userData.type]?.label || mesh.userData.type})</option>`;
+  for (const s of SHAPE_PALETTE) {
+    const label = DEFS[s]?.label || s;
+    html += `<option value="${s}"${current === s ? ' selected' : ''}>${label}</option>`;
+  }
+  html += '</select></div></div>';
+  return html;
+}
+
+function buildTubeRadiusHTML(mesh) {
+  const effectiveType = getEffectiveShapeType(mesh);
+  if (effectiveType !== 'torus') return '';
+  const sp = normalizeShapeParams(effectiveType, mesh.userData.shapeParams || {});
+  const val = r3(sp.tubeRadius ?? 0.24, 2);
+  return `<div class="prop-row"><span class="prop-key">Tube R</span><div class="prop-controls"><input id="prop-shape-tube-radius" type="number" min="0.02" max="2" step="0.01" value="${val}" style="width:64px"/></div></div>`;
+}
+
+function buildFrameThicknessHTML(mesh) {
+  const effectiveType = getEffectiveShapeType(mesh);
+  if (effectiveType !== 'hollowbox') return '';
+  const sp = normalizeShapeParams(effectiveType, mesh.userData.shapeParams || {});
+  const val = r3(sp.frameThickness ?? 0.22, 2);
+  return `<div class="prop-row"><span class="prop-key">Frame</span><div class="prop-controls"><input id="prop-shape-frame-thickness" type="number" min="0.05" max="0.9" step="0.01" value="${val}" style="width:64px"/></div></div>`;
+}
+
+function buildVisibleInPlayHTML(mesh) {
+  if (!SHAPE_EDITABLE_TYPES.has(mesh.userData.type)) return '';
+  let checked;
+  if (mesh.userData.visibleInPlay !== undefined) checked = !!mesh.userData.visibleInPlay;
+  else checked = DEFAULT_VISIBLE_IN_PLAY.has(mesh.userData.type);
+  return `<div class="prop-row"><span class="prop-key">Play Vis</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-visible-in-play" type="checkbox" ${checked ? 'checked' : ''}/> Visible in Play</label></div></div>`;
+}
+
+function buildEffectiveShapeControls(mesh) {
+  const effectiveType = getEffectiveShapeType(mesh);
+  const eDef = DEFS[effectiveType] || {};
+  const sp = normalizeShapeParams(effectiveType, mesh.userData.shapeParams || {});
+  let html = '';
+  if (eDef.usesSides) {
+    html += `<div class="prop-row"><span class="prop-key">Sides</span><div class="prop-controls"><input id="prop-shape-sides" type="number" min="3" max="64" step="1" value="${sp.sides ?? clampShapeSides(state.placeSides)}" style="width:64px"/></div></div>`;
+  }
+  if (eDef.is2D) {
+    html += `<div class="prop-row"><span class="prop-key">Depth</span><div class="prop-controls"><input id="prop-shape-depth" type="number" min="0.05" max="8" step="0.05" value="${r3(sp.depth ?? clampShapeDepth(state.place2DDepth), 2)}" style="width:64px"/></div></div>`;
+  }
+  html += buildTubeRadiusHTML(mesh);
+  html += buildFrameThicknessHTML(mesh);
+  return html;
+}
+
+function bindShapeSelectProps(mesh) {
+  const sel = document.getElementById('prop-shape-type');
+  if (!sel || state.selectedObject !== mesh) return;
+
+  sel.addEventListener('change', () => {
+    const val = sel.value || undefined;
+    const targets = getPropertyTargets(mesh).filter(t => t.userData.type === mesh.userData.type);
+    for (const t of targets) {
+      const beforeShapeType = t.userData.shapeType;
+      const beforeParams = { ...t.userData.shapeParams };
+      const beforeGeo = t.geometry.clone();
+
+      if (val) t.userData.shapeType = val;
+      else delete t.userData.shapeType;
+
+      const effectiveType = getEffectiveShapeType(t);
+      t.userData.shapeParams = normalizeShapeParams(effectiveType, {});
+
+      const afterGeo = buildTypeGeometry(effectiveType, t.userData.shapeParams);
+      setMeshGeometry(t, afterGeo);
+
+      pushUndo({
+        type: 'shapeTypeChange',
+        mesh: t,
+        beforeShapeType,
+        afterShapeType: val,
+        beforeParams,
+        afterParams: { ...t.userData.shapeParams },
+        beforeGeo,
+        afterGeo: afterGeo.clone(),
+      });
+    }
+    refreshProps();
+  });
+}
+
+function bindTubeRadiusProps(mesh) {
+  const input = document.getElementById('prop-shape-tube-radius');
+  if (!input || state.selectedObject !== mesh) return;
+
+  const effectiveType = getEffectiveShapeType(mesh);
+  if (effectiveType !== 'torus') return;
+
+  const targets = getPropertyTargets(mesh).filter(t => getEffectiveShapeType(t) === 'torus');
+  if (!targets.length) return;
+
+  input.addEventListener('change', () => {
+    const newRadius = clampTubeRadius(parseFloat(input.value));
+    for (const t of targets) {
+      const beforeParams = normalizeShapeParams(effectiveType, t.userData.shapeParams || {});
+      const nextParams = normalizeShapeParams(effectiveType, { ...beforeParams, tubeRadius: newRadius });
+      if (JSON.stringify(beforeParams) === JSON.stringify(nextParams)) continue;
+
+      const beforeGeo = t.geometry.clone();
+      const afterGeo = buildTypeGeometry(effectiveType, nextParams);
+      t.userData.shapeParams = nextParams;
+      setMeshGeometry(t, afterGeo);
+
+      pushUndo({
+        type: 'shape',
+        mesh: t,
+        beforeParams,
+        afterParams: nextParams,
+        beforeGeo,
+        afterGeo: afterGeo.clone(),
+      });
+    }
+    refreshProps();
+  });
+}
+
+function bindFrameThicknessProps(mesh) {
+  const input = document.getElementById('prop-shape-frame-thickness');
+  if (!input || state.selectedObject !== mesh) return;
+
+  const effectiveType = getEffectiveShapeType(mesh);
+  if (effectiveType !== 'hollowbox') return;
+
+  const targets = getPropertyTargets(mesh).filter(t => getEffectiveShapeType(t) === 'hollowbox');
+  if (!targets.length) return;
+
+  input.addEventListener('change', () => {
+    const newThickness = clampFrameThickness(parseFloat(input.value));
+    for (const t of targets) {
+      const beforeParams = normalizeShapeParams(effectiveType, t.userData.shapeParams || {});
+      const nextParams = normalizeShapeParams(effectiveType, { ...beforeParams, frameThickness: newThickness });
+      if (JSON.stringify(beforeParams) === JSON.stringify(nextParams)) continue;
+
+      const beforeGeo = t.geometry.clone();
+      const afterGeo = buildTypeGeometry(effectiveType, nextParams);
+      t.userData.shapeParams = nextParams;
+      setMeshGeometry(t, afterGeo);
+
+      pushUndo({
+        type: 'shape',
+        mesh: t,
+        beforeParams,
+        afterParams: nextParams,
+        beforeGeo,
+        afterGeo: afterGeo.clone(),
+      });
+    }
+    refreshProps();
+  });
+}
+
+function bindVisibleInPlayProps(mesh) {
+  const cb = document.getElementById('prop-visible-in-play');
+  if (!cb || state.selectedObject !== mesh) return;
+
+  cb.addEventListener('change', () => {
+    const targets = getPropertyTargets(mesh);
+    for (const t of targets) {
+      const before = t.userData.visibleInPlay;
+      t.userData.visibleInPlay = cb.checked;
+      pushUndo({ type: 'visibleInPlay', mesh: t, before, after: cb.checked });
+    }
+  });
+}
+
 const DEFS = {
   wall: {
     label: 'Wall',
@@ -1549,6 +2155,12 @@ const DEFS = {
     makeGeo: () => new THREE.BoxGeometry(2, 2, 2),
     makeMat: () => new THREE.MeshStandardMaterial({ color: 0xf0a020, emissive: 0xf0a020, emissiveIntensity: 0.3, transparent: true, opacity: 0.25 }),
     placedY: 1,
+  },
+  soundzone: {
+    label: 'Sound Zone',
+    makeGeo: () => new THREE.CylinderGeometry(1.5, 1.5, 1.2, 24),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x4aa3ff, emissive: 0x4aa3ff, emissiveIntensity: 0.25, transparent: true, opacity: 0.22 }),
+    placedY: 0.6,
   },
   keypad: {
     label: 'Keypad',
@@ -1606,9 +2218,15 @@ const DEFS = {
     defaultSides: 16,
     makeGeo: params => {
       const sides = clampShapeSides(params?.sides ?? 16);
-      return new THREE.TorusGeometry(0.85, 0.24, Math.max(6, Math.floor(sides * 0.75)), sides);
+      const tube = params?.tubeRadius ?? 0.24;
+      return new THREE.TorusGeometry(0.85, tube, Math.max(6, Math.floor(sides * 0.75)), sides);
     },
     makeMat: () => new THREE.MeshStandardMaterial({ color: 0x8673b8, roughness: 0.55, metalness: 0.2 }),
+  },
+  hollowbox: {
+    label: 'Hollow Box',
+    makeGeo: params => makeHollowBoxGeometry(params?.frameThickness ?? 0.22),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x6782a1, roughness: 0.75, metalness: 0.15 }),
   },
   plane2d: {
     label: 'Square 2D',
@@ -1630,7 +2248,7 @@ const DEFS = {
     is2D: true,
     usesSides: true,
     defaultSides: 20,
-    makeGeo: params => makeExtrudedShapeGeometry(Math.max(8, clampShapeSides(params?.sides ?? 20)), params?.depth ?? 0.2, 1),
+    makeGeo: params => makeExtrudedShapeGeometry(clampShapeSides(params?.sides ?? 20), params?.depth ?? 0.2, 1),
     makeMat: () => new THREE.MeshStandardMaterial({ color: 0x657b45, roughness: 0.85, side: THREE.DoubleSide }),
   },
   polygon2d: {
@@ -1697,7 +2315,27 @@ const DEFS = {
   },
   camera: {
     label: 'Camera',
-    makeGeo: () => new THREE.ConeGeometry(0.25, 0.5, 8),
+    makeGeo: () => {
+      // Blender-style camera body: box + lens cone merged via BufferGeometry merge
+      const body = new THREE.BoxGeometry(0.4, 0.3, 0.3);
+      const lens = new THREE.CylinderGeometry(0.08, 0.12, 0.2, 8);
+      lens.rotateX(Math.PI / 2);
+      lens.translate(0, 0, -0.25);
+      const merged = new THREE.BufferGeometry();
+      // Merge body and lens into one geometry
+      const bodyNI = body.toNonIndexed();
+      const lensNI = lens.toNonIndexed();
+      const positions = new Float32Array(bodyNI.attributes.position.count * 3 + lensNI.attributes.position.count * 3);
+      positions.set(bodyNI.attributes.position.array, 0);
+      positions.set(lensNI.attributes.position.array, bodyNI.attributes.position.count * 3);
+      const normals = new Float32Array(bodyNI.attributes.normal.count * 3 + lensNI.attributes.normal.count * 3);
+      normals.set(bodyNI.attributes.normal.array, 0);
+      normals.set(lensNI.attributes.normal.array, bodyNI.attributes.normal.count * 3);
+      merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      merged.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+      body.dispose(); lens.dispose(); bodyNI.dispose(); lensNI.dispose();
+      return merged;
+    },
     makeMat: () => new THREE.MeshStandardMaterial({ color: 0x3498db, emissive: 0x3498db, emissiveIntensity: 0.4 }),
     placedY: 2,
   },
@@ -1707,7 +2345,22 @@ const DEFS = {
     makeMat: () => new THREE.MeshStandardMaterial({ color: 0xf0c8a0, roughness: 0.85 }),
     placedY: 0.9,
   },
+  commandBlock: {
+    label: 'Command Block',
+    makeGeo: () => new THREE.BoxGeometry(1.2, 1.6, 0.3),
+    makeMat: () => new THREE.MeshStandardMaterial({ color: 0x1a1a2e, emissive: 0x00ccff, emissiveIntensity: 0.35, roughness: 0.3, metalness: 0.6, transparent: true, opacity: 0.85 }),
+    placedY: 0.8,
+  },
 };
+
+// @@SHAPE_EDITABLE@@
+
+function normalizeCommandBlockConfig(config = {}) {
+  const raw = Array.isArray(config.disabledCommands) ? config.disabledCommands : [];
+  return {
+    disabledCommands: raw.filter(c => typeof c === 'string').map(c => c.toLowerCase().trim()).filter(Boolean),
+  };
+}
 
 function normalizeSkinGridSize(gridSize = {}) {
   const parseDim = (value, fallback) => {
@@ -1826,6 +2479,31 @@ function normalizeKeypadConfig(config = {}) {
 function getMeshKeypadConfig(mesh) {
   const config = normalizeKeypadConfig(mesh?.userData?.keypadConfig);
   if (mesh?.userData) mesh.userData.keypadConfig = config;
+  return config;
+}
+
+function createDefaultSoundZoneConfig() {
+  return {
+    audioName: '',
+    radius: 8,
+    volume: 0.4,
+    loop: true,
+  };
+}
+
+function normalizeSoundZoneConfig(config = {}) {
+  const base = createDefaultSoundZoneConfig();
+  return {
+    audioName: String(config.audioName ?? '').trim(),
+    radius: THREE.MathUtils.clamp(parseFloat(config.radius) || base.radius, 1, 200),
+    volume: THREE.MathUtils.clamp(parseFloat(config.volume) || base.volume, 0, 1),
+    loop: config.loop !== false,
+  };
+}
+
+function getMeshSoundZoneConfig(mesh) {
+  const config = normalizeSoundZoneConfig(mesh?.userData?.soundZoneConfig);
+  if (mesh?.userData) mesh.userData.soundZoneConfig = config;
   return config;
 }
 
@@ -2134,41 +2812,40 @@ function openSkeletonEditor(definitionName) {
   // Build overlay DOM
   const overlay = document.createElement('div');
   overlay.id = 'skeleton-editor-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:20010;display:flex;background:#080c10;font-family:inherit;color:#d4d8dd';
+  overlay.className = 'overlay-modal full-inset';
   overlay.innerHTML = `
     <div id="skel-left-panel" style="width:240px;min-width:200px;background:#101418;display:flex;flex-direction:column;border-right:1px solid #222">
-      <div style="padding:8px 10px;border-bottom:1px solid #222;display:flex;align-items:center;gap:6px">
-        <span style="font-size:12px;font-weight:700;color:#ffaa22">☠ Skeleton Editor</span>
+      <div class="overlay-header">
+        <span class="overlay-title">☠ Skeleton Editor</span>
         <span id="skel-def-name" style="font-size:10px;color:#889;margin-left:auto;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${defName}">${defName}</span>
       </div>
-      <div style="padding:6px 10px;border-bottom:1px solid #222;display:flex;gap:4px;flex-wrap:wrap">
-        <button id="skel-btn-add-bone" style="font-size:10px;padding:2px 6px;background:#225;border:1px solid #447;color:#aad;border-radius:3px;cursor:pointer" title="Add child bone to selected (or root)">+ Bone</button>
-        <button id="skel-btn-del-bone" style="font-size:10px;padding:2px 6px;background:#422;border:1px solid #744;color:#daa;border-radius:3px;cursor:pointer" title="Delete selected bone (Del)">✕ Bone</button>
-        <button id="skel-btn-dup-bone" style="font-size:10px;padding:2px 6px;background:#225;border:1px solid #447;color:#aad;border-radius:3px;cursor:pointer" title="Duplicate selected bone (Ctrl+D)">⊕ Dup</button>
-        <button id="skel-btn-humanoid" style="font-size:10px;padding:2px 6px;background:#332200;border:1px solid #664;color:#ffcc66;border-radius:3px;cursor:pointer" title="Load humanoid template">🦴 Humanoid</button>
-        <button id="skel-btn-import-fbx" style="font-size:10px;padding:2px 6px;background:#223;border:1px solid #446;color:#aaf;border-radius:3px;cursor:pointer" title="Import animation from .fbx file">📁 Import FBX</button>
-        <button id="skel-btn-import-fbx-skin" style="font-size:10px;padding:2px 6px;background:#232;border:1px solid #464;color:#afa;border-radius:3px;cursor:pointer" title="Import mesh/skin from .fbx file as full-body mesh skins">🧍 Import Skin</button>
+      <div class="overlay-section">
+        <button id="skel-btn-add-bone" class="overlay-btn info" title="Add child bone to selected (or root)">+ Bone</button>
+        <button id="skel-btn-del-bone" class="overlay-btn danger" title="Delete selected bone (Del)">✕ Bone</button>
+        <button id="skel-btn-dup-bone" class="overlay-btn info" title="Duplicate selected bone (Ctrl+D)">⊕ Dup</button>
+        <button id="skel-btn-humanoid" class="overlay-btn warning" title="Load humanoid template">🦴 Humanoid</button>
+        <button id="skel-btn-import-fbx" class="overlay-btn info" title="Import animation from .fbx file">📁 Import FBX</button>
+        <button id="skel-btn-import-fbx-skin" class="overlay-btn success" title="Import mesh/skin from .fbx file as full-body mesh skins">🧍 Import Skin</button>
       </div>
       <div style="padding:4px 10px;font-size:9px;font-weight:700;color:#889;border-bottom:1px solid #1a1a1a">BONE TREE</div>
       <div id="skel-bone-tree" style="flex:1;overflow-y:auto;padding:4px 0;font-size:11px"></div>
       <div id="skel-bone-props" style="border-top:1px solid #222;padding:6px 10px;font-size:10px;display:none">
         <div style="font-size:9px;font-weight:700;color:#889;margin-bottom:4px">BONE PROPERTIES</div>
-        <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px"><span style="width:40px;color:#889">Name</span><input id="skel-bone-name" type="text" style="flex:1;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/></div>
+        <div class="overlay-row"><span style="width:40px;color:#889">Name</span><input id="skel-bone-name" type="text" class="overlay-input" style="flex:1"/></div>
         <div style="font-size:9px;color:#667;margin:4px 0 2px">Head (world)</div>
         <div style="display:flex;gap:3px;margin-bottom:3px">
-          <span style="color:#e44;font-size:9px">X</span><input id="skel-bone-hx" type="number" step="0.01" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
-          <span style="color:#4e4;font-size:9px">Y</span><input id="skel-bone-hy" type="number" step="0.01" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
-          <span style="color:#48f;font-size:9px">Z</span><input id="skel-bone-hz" type="number" step="0.01" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
+        <div class="overlay-row"><span class="axis-label x">X</span><input id="skel-bone-hx" type="number" step="0.01" class="overlay-input small-number"/>
+          <span class="axis-label y">Y</span><input id="skel-bone-hy" type="number" step="0.01" class="overlay-input small-number"/>
+          <span class="axis-label z">Z</span><input id="skel-bone-hz" type="number" step="0.01" class="overlay-input small-number"/>
         </div>
         <div style="font-size:9px;color:#667;margin:4px 0 2px">Tail (world)</div>
-        <div style="display:flex;gap:3px;margin-bottom:3px">
-          <span style="color:#e44;font-size:9px">X</span><input id="skel-bone-tx" type="number" step="0.01" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
-          <span style="color:#4e4;font-size:9px">Y</span><input id="skel-bone-ty" type="number" step="0.01" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
-          <span style="color:#48f;font-size:9px">Z</span><input id="skel-bone-tz" type="number" step="0.01" style="width:50px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/>
+        <div class="overlay-row"><span class="axis-label x">X</span><input id="skel-bone-tx" type="number" step="0.01" class="overlay-input small-number"/>
+          <span class="axis-label y">Y</span><input id="skel-bone-ty" type="number" step="0.01" class="overlay-input small-number"/>
+          <span class="axis-label z">Z</span><input id="skel-bone-tz" type="number" step="0.01" class="overlay-input small-number"/>
         </div>
-        <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px"><span style="width:40px;color:#889">Roll</span><input id="skel-bone-roll" type="number" step="1" style="width:55px;background:#1a1e24;border:1px solid #333;color:#d4d8dd;border-radius:3px;padding:2px 4px;font-size:10px"/> <span style="color:#556;font-size:9px">deg</span></div>
-        <div style="display:flex;align-items:center;gap:4px;margin-bottom:3px"><label style="color:#889;font-size:9px;display:flex;align-items:center;gap:4px"><input id="skel-bone-connected" type="checkbox" style="margin:0"/> Connected</label></div>
-        <button id="skel-bone-edit-skin" style="font-size:10px;padding:2px 6px;background:#224;border:1px solid #446;color:#aaf;border-radius:3px;cursor:pointer;margin-top:2px" title="Edit voxel skin for this bone">🎨 Edit Bone Skin</button>
+        <div class="overlay-row"><span style="width:40px;color:#889">Roll</span><input id="skel-bone-roll" type="number" step="1" class="overlay-input small-number"/> <span style="color:#556;font-size:9px">deg</span></div>
+        <div class="overlay-row"><label style="color:#889;font-size:9px;display:flex;align-items:center;gap:4px"><input id="skel-bone-connected" type="checkbox" style="margin:0"/> Connected</label></div>
+        <button id="skel-bone-edit-skin" class="overlay-btn info" style="margin-top:2px" title="Edit voxel skin for this bone">🎨 Edit Bone Skin</button>
       </div>
     </div>
     <div style="flex:1;display:flex;flex-direction:column;position:relative;overflow:hidden;min-width:0;min-height:0">
@@ -5346,6 +6023,208 @@ function tryOpenRuntimeScreenFromPointerEvent(e) {
   return false;
 }
 
+// ─── Runtime command block console overlay ────────────────────────────────────
+let _runtimeCmdBlockOverlay = null;
+let _runtimeCmdBlockMesh = null;
+const _runtimeCmdBlockHistory = [];
+let _runtimeCmdBlockHistIdx = -1;
+let _runtimeCmdBlockHistDraft = '';
+
+function closeRuntimeCommandBlockOverlay(options = {}) {
+  if (!_runtimeCmdBlockOverlay) return;
+  _runtimeCmdBlockOverlay.remove();
+  _runtimeCmdBlockOverlay = null;
+  _runtimeCmdBlockMesh = null;
+  if (options.restorePointerLock && state.isPlaytest && !runtimePauseActive && document.pointerLockElement !== renderer.domElement) {
+    renderer.domElement.requestPointerLock();
+  }
+}
+
+function _cmdBlockLog(logEl, text, cls) {
+  const div = document.createElement('div');
+  div.style.cssText = 'padding:1px 0;font-size:12px;font-family:monospace;word-break:break-all;';
+  if (cls === 'error') div.style.color = '#f85149';
+  else if (cls === 'echo') div.style.color = '#58a6ff';
+  else div.style.color = '#8be9a8';
+  div.textContent = text;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function openRuntimeCommandBlockOverlay(mesh) {
+  if (!mesh || !state.isPlaytest) return false;
+  closeRuntimeCommandBlockOverlay();
+  _runtimeCmdBlockMesh = mesh;
+
+  const cfg = normalizeCommandBlockConfig(mesh.userData.commandBlockConfig);
+  const disabledSet = new Set(cfg.disabledCommands);
+
+  // Get available commands
+  const allCmds = (window._flame3dConsole && window._flame3dConsole.commands) ? window._flame3dConsole.commands : {};
+  const availableCmdNames = Object.keys(allCmds).filter(c => !disabledSet.has(c)).sort();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'runtime-cmdblock-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:20010;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;';
+
+  const panel = document.createElement('div');
+  panel.style.cssText = 'width:520px;max-width:90vw;max-height:70vh;background:#0d1117;border:1px solid #00ccff;border-radius:8px;box-shadow:0 4px 24px rgba(0,204,255,0.3);display:flex;flex-direction:column;overflow:hidden;';
+
+  // Header
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid #21262d;background:#161b22;';
+  header.innerHTML = '<span style="color:#00ccff;font-size:12px;font-weight:700;font-family:monospace">⌨ Command Console</span>';
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '✕';
+  closeBtn.style.cssText = 'background:none;border:none;color:#8b949e;font-size:14px;cursor:pointer;padding:2px 6px;';
+  closeBtn.addEventListener('click', () => closeRuntimeCommandBlockOverlay({ restorePointerLock: true }));
+  header.appendChild(closeBtn);
+  panel.appendChild(header);
+
+  // Log area
+  const logEl = document.createElement('div');
+  logEl.style.cssText = 'flex:1;overflow-y:auto;padding:8px 12px;min-height:200px;max-height:350px;background:#0d1117;';
+  _cmdBlockLog(logEl, 'Command console ready. Type "help" for available commands.', 'result');
+  if (cfg.disabledCommands.length) {
+    _cmdBlockLog(logEl, cfg.disabledCommands.length + ' command(s) disabled on this terminal.', 'result');
+  }
+  panel.appendChild(logEl);
+
+  // Input area
+  const inputRow = document.createElement('div');
+  inputRow.style.cssText = 'display:flex;align-items:center;gap:6px;padding:6px 12px;border-top:1px solid #21262d;background:#161b22;';
+  const prompt = document.createElement('span');
+  prompt.textContent = '>';
+  prompt.style.cssText = 'color:#00ccff;font-size:14px;font-weight:700;font-family:monospace;';
+  inputRow.appendChild(prompt);
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = 'type a command...';
+  input.autocomplete = 'off';
+  input.style.cssText = 'flex:1;background:#0d1117;border:1px solid #30363d;color:#e6edf3;border-radius:4px;padding:6px 8px;font-size:12px;font-family:monospace;outline:none;';
+  inputRow.appendChild(input);
+  panel.appendChild(inputRow);
+
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+  _runtimeCmdBlockOverlay = overlay;
+
+  // Focus input
+  setTimeout(() => input.focus(), 50);
+
+  // Execute command within this overlay
+  const executeInOverlay = (text) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    _cmdBlockLog(logEl, '> ' + trimmed, 'echo');
+    const cmdName = trimmed.split(/\s+/)[0].toLowerCase();
+
+    // Check disabled
+    if (disabledSet.has(cmdName)) {
+      _cmdBlockLog(logEl, '[Error] Command "' + cmdName + '" is disabled on this terminal.', 'error');
+      return;
+    }
+
+    // Execute via the global console system
+    if (window._flame3dConsole && typeof window._flame3dConsole.execute === 'function') {
+      // Temporarily hook appendConsoleEntry to capture output for overlay display
+      const origAppend = window.appendConsoleEntry;
+      if (typeof origAppend === 'function') {
+        window.appendConsoleEntry = (level, parts) => {
+          origAppend(level, parts);
+          const msg = parts.join(' ');
+          if (level === 'error') _cmdBlockLog(logEl, msg, 'error');
+          else if (level === 'cmd') { /* already echoed */ }
+          else _cmdBlockLog(logEl, msg, 'result');
+        };
+      }
+      try {
+        window._flame3dConsole.execute(trimmed);
+      } finally {
+        if (typeof origAppend === 'function') window.appendConsoleEntry = origAppend;
+      }
+    } else {
+      _cmdBlockLog(logEl, '[Error] Console system unavailable.', 'error');
+    }
+  };
+
+  // Input event handlers
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const val = input.value;
+      if (val.trim()) {
+        _runtimeCmdBlockHistory.push(val);
+        if (_runtimeCmdBlockHistory.length > 100) _runtimeCmdBlockHistory.shift();
+        _runtimeCmdBlockHistIdx = -1;
+        _runtimeCmdBlockHistDraft = '';
+        executeInOverlay(val);
+        input.value = '';
+      }
+      e.preventDefault();
+    } else if (e.key === 'ArrowUp') {
+      if (_runtimeCmdBlockHistory.length) {
+        if (_runtimeCmdBlockHistIdx === -1) {
+          _runtimeCmdBlockHistDraft = input.value;
+          _runtimeCmdBlockHistIdx = _runtimeCmdBlockHistory.length - 1;
+        } else if (_runtimeCmdBlockHistIdx > 0) {
+          _runtimeCmdBlockHistIdx--;
+        }
+        input.value = _runtimeCmdBlockHistory[_runtimeCmdBlockHistIdx];
+      }
+      e.preventDefault();
+    } else if (e.key === 'ArrowDown') {
+      if (_runtimeCmdBlockHistIdx !== -1) {
+        _runtimeCmdBlockHistIdx++;
+        if (_runtimeCmdBlockHistIdx >= _runtimeCmdBlockHistory.length) {
+          _runtimeCmdBlockHistIdx = -1;
+          input.value = _runtimeCmdBlockHistDraft;
+        } else {
+          input.value = _runtimeCmdBlockHistory[_runtimeCmdBlockHistIdx];
+        }
+      }
+      e.preventDefault();
+    } else if (e.key === 'Tab') {
+      const partial = input.value.trim().toLowerCase();
+      if (partial) {
+        const matches = availableCmdNames.filter(n => n.startsWith(partial));
+        if (matches.length === 1) { input.value = matches[0] + ' '; }
+        else if (matches.length > 1) { _cmdBlockLog(logEl, 'Commands: ' + matches.join(', '), 'result'); }
+      }
+      e.preventDefault();
+    } else if (e.key === 'Escape') {
+      closeRuntimeCommandBlockOverlay({ restorePointerLock: true });
+      e.preventDefault();
+    }
+    e.stopPropagation();
+  });
+  input.addEventListener('keyup', e => e.stopPropagation());
+
+  // Click outside panel to close
+  overlay.addEventListener('pointerdown', e => {
+    if (!panel.contains(e.target)) closeRuntimeCommandBlockOverlay({ restorePointerLock: true });
+  });
+
+  return true;
+}
+
+function tryOpenRuntimeCommandBlockFromPointerEvent(e) {
+  if (!state.isPlaytest) return false;
+  const ndc = fpsLocked ? new THREE.Vector2(0, 0) : toNDC(e);
+  raycaster.setFromCamera(ndc, fpsCam);
+  const hits = raycaster.intersectObjects(sceneObjects, false);
+  for (const hit of hits) {
+    if (hit.object?.userData?.type === 'commandBlock') {
+      e?.preventDefault?.();
+      if (document.pointerLockElement === renderer.domElement) {
+        suppressPointerUnlockStop = true;
+        document.exitPointerLock();
+      }
+      return openRuntimeCommandBlockOverlay(hit.object);
+    }
+  }
+  return false;
+}
+
 function showKeypadContextMenu(mesh, x, y) {
   if (!mesh) return;
   closeKeypadContextMenu();
@@ -5417,6 +6296,8 @@ function normalizeShapeParams(type, params = {}) {
   const next = {};
   if (def.usesSides) next.sides = clampShapeSides(params.sides ?? def.defaultSides ?? state.placeSides);
   if (def.is2D) next.depth = clampShapeDepth(params.depth ?? state.place2DDepth);
+  if (type === 'torus') next.tubeRadius = typeof clampTubeRadius === 'function' ? clampTubeRadius(params.tubeRadius ?? 0.24) : Math.max(0.02, Math.min(2.0, parseFloat(params.tubeRadius) || 0.24));
+  if (type === 'hollowbox') next.frameThickness = typeof clampFrameThickness === 'function' ? clampFrameThickness(params.frameThickness ?? 0.22) : Math.max(0.05, Math.min(0.9, parseFloat(params.frameThickness) || 0.22));
   if (type === 'terrain') {
     next.segments = params.segments ?? 64;
     next.terrainSize = params.terrainSize ?? 20;
@@ -5424,12 +6305,21 @@ function normalizeShapeParams(type, params = {}) {
   return next;
 }
 
-function buildTypeGeometry(type, shapeParams = {}) {
-  const def = DEFS[type];
-  return def.makeGeo(normalizeShapeParams(type, shapeParams));
+function buildTypeGeometry(type, shapeParams = {}, overrideType) {
+  const effectiveType = overrideType && DEFS[overrideType] ? overrideType : type;
+  const def = DEFS[effectiveType];
+  return def.makeGeo(normalizeShapeParams(effectiveType, shapeParams));
 }
 
-const CONTROL_ACTION_TYPES = ['move', 'rotate', 'light', 'audio', 'path', 'functionControl', 'playerGroup', 'setVar', 'setBool', 'playerStats', 'teleport', 'skeleton'];
+const CONTROL_ACTION_TYPES = ['move', 'rotate', 'scale', 'light', 'audio', 'path', 'functionControl', 'playerGroup', 'setVar', 'setBool', 'playerStats', 'teleport', 'skeleton', 'command', 'delay', 'waitKey'];
+const ACTION_TYPE_META = {
+  move:{icon:'↔',color:'#58a6ff'}, rotate:{icon:'↻',color:'#d2a8ff'}, scale:{icon:'⇔',color:'#7ee787'},
+  light:{icon:'💡',color:'#e3b341'}, audio:{icon:'🔊',color:'#f0883e'}, path:{icon:'⤴',color:'#79c0ff'},
+  functionControl:{icon:'⚙',color:'#bc8cff'}, playerGroup:{icon:'👥',color:'#56d4dd'},
+  setVar:{icon:'#',color:'#ff7b72'}, setBool:{icon:'☑',color:'#ffa657'}, playerStats:{icon:'❤',color:'#ff7b72'},
+  teleport:{icon:'🌀',color:'#d2a8ff'}, skeleton:{icon:'🦴',color:'#8b949e'},
+  command:{icon:'>_',color:'#7ee787'}, delay:{icon:'⏱',color:'#8b949e'}, waitKey:{icon:'⌨',color:'#79c0ff'}
+};
 const SKELETON_ANIM_COMMANDS = ['play', 'stop', 'pause', 'resume'];
 const TELEPORT_MODES = ['coords', 'spawn', 'object'];
 const CONTROL_LIGHT_OPS = ['toggle', 'enable', 'disable', 'intensity', 'distance'];
@@ -5463,6 +6353,10 @@ const SWITCH_VAR_KEYS = [
 ];
 const SWITCH_RUN_MODES = ['oneShot', 'repeat'];
 const _controlFunctionStates = new Map();
+const _functionActionQueues = new Map(); // queueKey -> {functionName, callerMesh, context, actions[], currentIndex, startedIndices[]}
+const _activeDelayStates = new Map(); // queueKey -> {endsAt}
+const _activeWaitKeyStates = new Map(); // queueKey -> {keyCode}
+const _activeSoundZoneAudio = new Map(); // meshUuid -> HTMLAudioElement
 
 const CONTROL_FUNCTION_STOP_MODES = ['none', 'momentary', 'permanent'];
 const CHECKPOINT_INTERACTIONS = ['touch', 'shoot', 'switch'];
@@ -5474,6 +6368,9 @@ let _nextControlFunctionGroupId = 1;
 const _activeTriggerCalls = new Map(); // meshUuid -> [{functionName, condition, started, activatedAt}]
 const _momentaryFunctionStopCounts = new Map();
 const _permanentFunctionStops = new Set();
+const _cfnCollapsed = new Set();
+let _cfnCompactMode = false;
+let _cfnActionTypeFilter = '';
 
 function normalizeFunctionNameList(value) {
   const source = Array.isArray(value) ? value : String(value ?? '').split(',');
@@ -6693,16 +7590,72 @@ function _applyTextTexture(mesh) {
   mesh.material.needsUpdate = true;
 }
 
+// ─── Custom Texture Config ───────────────────────────────────────────────────
+const TEXTURE_WRAP_MODES = ['repeat', 'clamp', 'mirror'];
+function normalizeTextureConfig(config) {
+  if (!config) return null;
+  const imageData = String(config.imageData ?? '').trim();
+  if (!imageData || !imageData.startsWith('data:image')) return null;
+  return {
+    imageData,
+    repeatX: Number.isFinite(config.repeatX) ? config.repeatX : 1,
+    repeatY: Number.isFinite(config.repeatY) ? config.repeatY : 1,
+    offsetX: Number.isFinite(config.offsetX) ? config.offsetX : 0,
+    offsetY: Number.isFinite(config.offsetY) ? config.offsetY : 0,
+    rotation: Number.isFinite(config.rotation) ? config.rotation : 0,
+    wrapS: TEXTURE_WRAP_MODES.includes(config.wrapS) ? config.wrapS : 'repeat',
+    wrapT: TEXTURE_WRAP_MODES.includes(config.wrapT) ? config.wrapT : 'repeat',
+    flipY: config.flipY !== undefined ? !!config.flipY : true,
+  };
+}
+
+function _texWrapToThree(mode) {
+  if (mode === 'clamp') return THREE.ClampToEdgeWrapping;
+  if (mode === 'mirror') return THREE.MirroredRepeatWrapping;
+  return THREE.RepeatWrapping;
+}
+
+function applyTextureConfig(mesh) {
+  if (!mesh?.material) return;
+  const cfg = normalizeTextureConfig(mesh.userData.textureConfig);
+  if (!cfg) {
+    if (mesh.material.map && mesh.userData.textureConfig !== undefined) {
+      mesh.material.map.dispose();
+      mesh.material.map = null;
+      mesh.material.needsUpdate = true;
+    }
+    mesh.userData.textureConfig = null;
+    return;
+  }
+  const loader = new THREE.TextureLoader();
+  loader.load(cfg.imageData, tex => {
+    tex.wrapS = _texWrapToThree(cfg.wrapS);
+    tex.wrapT = _texWrapToThree(cfg.wrapT);
+    tex.repeat.set(cfg.repeatX, cfg.repeatY);
+    tex.offset.set(cfg.offsetX, cfg.offsetY);
+    tex.rotation = (cfg.rotation || 0) * Math.PI / 180;
+    tex.center.set(0.5, 0.5);
+    tex.flipY = cfg.flipY;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    if (mesh.material.map) mesh.material.map.dispose();
+    mesh.material.map = tex;
+    mesh.material.needsUpdate = true;
+    mesh.userData._texturePattern = null;
+  });
+}
+
 // ─── Screen/Media Config ─────────────────────────────────────────────────────
 function normalizeScreenConfig(config = {}) {
   return {
-    mediaType: ['image', 'color', 'video', 'url', 'html'].includes(config.mediaType) ? config.mediaType : 'color',
+    mediaType: ['image', 'color', 'video', 'url', 'html', 'camera'].includes(config.mediaType) ? config.mediaType : 'color',
     imageData: config.imageData || null,
     videoData: config.videoData || null,
     url: String(config.url ?? ''),
     htmlContent: String(config.htmlContent ?? ''),
     screenColor: String(config.screenColor ?? '#222222'),
     interactive: !!config.interactive,
+    cameraLabel: String(config.cameraLabel ?? ''),
   };
 }
 
@@ -6763,6 +7716,26 @@ function _applyScreenTexture(mesh) {
     mesh.material.map = tex;
     mesh.material.color.setHex(0xffffff);
     mesh.material.needsUpdate = true;
+  } else if (sc.mediaType === 'camera') {
+    // Camera feed preview placeholder (live feed rendered during playtest)
+    const canvas = document.createElement('canvas');
+    canvas.width = 512; canvas.height = 288;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#0d1117';
+    ctx.fillRect(0, 0, 512, 288);
+    ctx.fillStyle = '#58a6ff';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('📷 Camera Feed' + (sc.cameraLabel ? ': ' + sc.cameraLabel : ''), 256, 130);
+    ctx.font = '13px sans-serif';
+    ctx.fillStyle = '#8888aa';
+    ctx.fillText('Live during playtest', 256, 160);
+    const tex = new THREE.CanvasTexture(canvas);
+    if (mesh.material.map) mesh.material.map.dispose();
+    mesh.material.map = tex;
+    mesh.material.color.setHex(0xffffff);
+    mesh.material.needsUpdate = true;
   } else {
     if (mesh.material.map) { mesh.material.map.dispose(); mesh.material.map = null; }
     mesh.material.color.set(sc.screenColor);
@@ -6771,12 +7744,1293 @@ function _applyScreenTexture(mesh) {
 }
 
 // ─── Camera Object Config ────────────────────────────────────────────────────
+const CAMERA_EASING_TYPES = ['linear', 'ease-in', 'ease-out', 'ease-in-out'];
+const CAMERA_PATH_TYPES = ['centripetal', 'chordal', 'catmullrom'];
+
+function normalizeCameraKeyframe(kf = {}) {
+  const pos = Array.isArray(kf.position) ? kf.position.map(v => parseFloat(v) || 0) : [0, 2, 0];
+  const rot = Array.isArray(kf.rotation) && kf.rotation.length >= 4
+    ? kf.rotation.map(v => parseFloat(v) || 0) : null;
+  const la = Array.isArray(kf.lookAt) ? kf.lookAt.map(v => parseFloat(v) || 0) : null;
+  return {
+    time: Math.max(0, parseFloat(kf.time) || 0),
+    position: [pos[0] || 0, pos[1] || 0, pos[2] || 0],
+    rotation: rot,
+    lookAt: la,
+    easing: CAMERA_EASING_TYPES.includes(kf.easing) ? kf.easing : 'linear',
+    tension: Math.max(0, Math.min(1, parseFloat(kf.tension) || 0.5)),
+  };
+}
+
+function normalizeCameraClip(clip = {}) {
+  const keyframes = Array.isArray(clip.keyframes)
+    ? clip.keyframes.map(normalizeCameraKeyframe)
+    : [];
+  keyframes.sort((a, b) => a.time - b.time);
+  return {
+    keyframes,
+    speed: Math.max(0.1, parseFloat(clip.speed) || 2),
+    loop: clip.loop === true,
+    pathTension: Math.max(0, Math.min(1, parseFloat(clip.pathTension) || 0.5)),
+    pathType: CAMERA_PATH_TYPES.includes(clip.pathType) ? clip.pathType : 'centripetal',
+  };
+}
+
+function _computeCameraClipDuration(clip) {
+  if (!clip.keyframes || clip.keyframes.length < 2) return 0;
+  const positions = clip.keyframes.map(kf => new THREE.Vector3().fromArray(kf.position));
+  const curve = new THREE.CatmullRomCurve3(positions, clip.loop, clip.pathType || 'centripetal', clip.pathTension || 0.5);
+  const pathLength = curve.getLength();
+  return pathLength / (clip.speed || 2);
+}
+
 function normalizeCameraConfig(config = {}) {
+  const lookAtRaw = Array.isArray(config.lookAtTarget) ? config.lookAtTarget : null;
+
+  // Build clips object
+  let clips = {};
+  if (config.clips && typeof config.clips === 'object' && !Array.isArray(config.clips)) {
+    for (const [name, clipData] of Object.entries(config.clips)) {
+      clips[name] = normalizeCameraClip(clipData);
+    }
+  }
+
+  // Migration: if old-style animationKeyframes exist but no clips, create a "Default" clip
+  if (Object.keys(clips).length === 0) {
+    const legacyKfs = Array.isArray(config.animationKeyframes)
+      ? config.animationKeyframes.map(normalizeCameraKeyframe)
+      : [];
+    legacyKfs.sort((a, b) => a.time - b.time);
+    if (legacyKfs.length > 0) {
+      clips['Default'] = normalizeCameraClip({
+        keyframes: legacyKfs,
+        speed: parseFloat(config.cameraSpeed) || 2,
+        loop: config.animationLoop === true,
+        pathTension: 0.5,
+        pathType: 'centripetal',
+      });
+    }
+  }
+
+  const currentClip = (config.currentClip && clips[config.currentClip]) ? config.currentClip
+    : (Object.keys(clips).length > 0 ? Object.keys(clips)[0] : '');
+
   return {
     fov: Math.max(10, Math.min(150, parseFloat(config.fov) || 60)),
     near: Math.max(0.01, parseFloat(config.near) || 0.1),
     far: Math.max(1, parseFloat(config.far) || 1000),
+    aspectRatio: Math.max(0.1, Math.min(10, parseFloat(config.aspectRatio) || (16 / 9))),
+    lookAtEnabled: config.lookAtEnabled === true,
+    lookAtTarget: lookAtRaw ? [parseFloat(lookAtRaw[0]) || 0, parseFloat(lookAtRaw[1]) || 0, parseFloat(lookAtRaw[2]) || 0] : [0, 0, 0],
+    clips,
+    currentClip,
   };
+}
+
+// Helper to get the active clip from a config
+function _getActiveClip(cfg) {
+  return (cfg.currentClip && cfg.clips[cfg.currentClip]) ? cfg.clips[cfg.currentClip] : null;
+}
+
+// Helper to get active clip's keyframes, speed, duration, etc.
+function _getActiveClipInfo(cfg) {
+  const clip = _getActiveClip(cfg);
+  if (!clip) return { keyframes: [], speed: 2, loop: false, duration: 0, pathTension: 0.5, pathType: 'centripetal' };
+  const duration = _computeCameraClipDuration(clip);
+  return { keyframes: clip.keyframes, speed: clip.speed, loop: clip.loop, duration, pathTension: clip.pathTension, pathType: clip.pathType };
+}
+
+// ─── Camera Easing Utilities ─────────────────────────────────────────────────
+function _cameraEase(t, easing) {
+  switch (easing) {
+    case 'ease-in': return t * t;
+    case 'ease-out': return t * (2 - t);
+    case 'ease-in-out': return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+    default: return t; // linear
+  }
+}
+
+// ─── Camera Frustum Helper ───────────────────────────────────────────────────
+let _activeCameraHelper = null;
+let _activeCameraHelperCam = null;
+let _activeCameraHelperMesh = null;
+
+function _createCameraFrustumHelper(mesh) {
+  _removeCameraFrustumHelper();
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+  const helperCam = new THREE.PerspectiveCamera(cfg.fov, cfg.aspectRatio, cfg.near, Math.min(cfg.far, 20));
+  // Position camera at mesh location, orient it along mesh forward (-Z)
+  helperCam.position.set(0, 0, 0);
+  helperCam.rotation.set(0, 0, 0);
+  helperCam.updateProjectionMatrix();
+  const helper = new THREE.CameraHelper(helperCam);
+  helper.name = '__camera_frustum_helper__';
+  mesh.add(helperCam);
+  scene.add(helper);
+  _activeCameraHelper = helper;
+  _activeCameraHelperCam = helperCam;
+  _activeCameraHelperMesh = mesh;
+}
+
+function _removeCameraFrustumHelper() {
+  if (_activeCameraHelper) {
+    scene.remove(_activeCameraHelper);
+    _activeCameraHelper.dispose?.();
+    _activeCameraHelper = null;
+  }
+  if (_activeCameraHelperCam && _activeCameraHelperMesh) {
+    _activeCameraHelperMesh.remove(_activeCameraHelperCam);
+  }
+  _activeCameraHelperCam = null;
+  _activeCameraHelperMesh = null;
+}
+
+function _updateCameraFrustumHelper() {
+  if (!_activeCameraHelper || !_activeCameraHelperCam || !_activeCameraHelperMesh) return;
+  const mesh = _activeCameraHelperMesh;
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+  _activeCameraHelperCam.fov = cfg.fov;
+  _activeCameraHelperCam.aspect = cfg.aspectRatio;
+  _activeCameraHelperCam.near = cfg.near;
+  _activeCameraHelperCam.far = Math.min(cfg.far, 20);
+  _activeCameraHelperCam.updateProjectionMatrix();
+  _activeCameraHelper.update();
+}
+
+// ─── Camera Look-At Target Gizmo ────────────────────────────────────────────
+let _cameraLookAtHelper = null;
+let _cameraLookAtLine = null;
+let _cameraLookAtMesh = null;
+
+function _createCameraLookAtHelper(mesh) {
+  _removeCameraLookAtHelper();
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+  if (!cfg.lookAtEnabled) return;
+  const sphere = new THREE.Mesh(
+    new THREE.SphereGeometry(0.15, 12, 8),
+    new THREE.MeshBasicMaterial({ color: 0xff6600, transparent: true, opacity: 0.7, depthTest: false })
+  );
+  sphere.position.set(cfg.lookAtTarget[0], cfg.lookAtTarget[1], cfg.lookAtTarget[2]);
+  sphere.renderOrder = 9998;
+  sphere.name = '__camera_lookat_helper__';
+  sphere.userData._isCameraLookAtHelper = true;
+  scene.add(sphere);
+  _cameraLookAtHelper = sphere;
+  _cameraLookAtMesh = mesh;
+
+  // Dashed line from camera to target
+  const lineGeo = new THREE.BufferGeometry().setFromPoints([
+    mesh.position.clone(), sphere.position.clone()
+  ]);
+  const lineMat = new THREE.LineDashedMaterial({ color: 0xff6600, dashSize: 0.3, gapSize: 0.15, transparent: true, opacity: 0.6, depthTest: false });
+  const line = new THREE.Line(lineGeo, lineMat);
+  line.computeLineDistances();
+  line.renderOrder = 9997;
+  line.name = '__camera_lookat_line__';
+  scene.add(line);
+  _cameraLookAtLine = line;
+}
+
+function _removeCameraLookAtHelper() {
+  if (_cameraLookAtHelper) {
+    scene.remove(_cameraLookAtHelper);
+    _cameraLookAtHelper.geometry?.dispose();
+    _cameraLookAtHelper.material?.dispose();
+    _cameraLookAtHelper = null;
+  }
+  if (_cameraLookAtLine) {
+    scene.remove(_cameraLookAtLine);
+    _cameraLookAtLine.geometry?.dispose();
+    _cameraLookAtLine.material?.dispose();
+    _cameraLookAtLine = null;
+  }
+  _cameraLookAtMesh = null;
+}
+
+function _updateCameraLookAtHelper() {
+  if (!_cameraLookAtHelper || !_cameraLookAtMesh) return;
+  const cfg = normalizeCameraConfig(_cameraLookAtMesh.userData.cameraConfig);
+  _cameraLookAtHelper.position.set(cfg.lookAtTarget[0], cfg.lookAtTarget[1], cfg.lookAtTarget[2]);
+  if (_cameraLookAtLine) {
+    const pts = [_cameraLookAtMesh.position.clone(), _cameraLookAtHelper.position.clone()];
+    _cameraLookAtLine.geometry.dispose();
+    _cameraLookAtLine.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+    _cameraLookAtLine.computeLineDistances();
+  }
+}
+
+// ─── Camera Animation Path Visualization ─────────────────────────────────────
+let _cameraPathLine = null;
+let _cameraPathDiamonds = [];
+
+function _refreshCameraPathPreview(mesh) {
+  _clearCameraPathPreview();
+  if (!mesh || mesh.userData.type !== 'camera') return;
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+  const clipInfo = _getActiveClipInfo(cfg);
+  if (clipInfo.keyframes.length < 2) return;
+
+  // Build spline from keyframe positions
+  const kfPositions = clipInfo.keyframes.map(kf => new THREE.Vector3(kf.position[0], kf.position[1], kf.position[2]));
+  const curve = new THREE.CatmullRomCurve3(kfPositions, clipInfo.loop, clipInfo.pathType, clipInfo.pathTension);
+  const curvePoints = curve.getPoints(Math.max(50, clipInfo.keyframes.length * 20));
+
+  const geo = new THREE.BufferGeometry().setFromPoints(curvePoints);
+  const mat = new THREE.LineDashedMaterial({ color: 0x00ccff, dashSize: 0.4, gapSize: 0.2, transparent: true, opacity: 0.8, depthTest: false });
+  const line = new THREE.Line(geo, mat);
+  line.computeLineDistances();
+  line.renderOrder = 9996;
+  line.name = '__camera_path_line__';
+  scene.add(line);
+  _cameraPathLine = line;
+
+  // Diamond markers at each keyframe position (interactive — tagged for raycast)
+  const diamondGeo = new THREE.OctahedronGeometry(0.12, 0);
+  const diamondMat = new THREE.MeshBasicMaterial({ color: 0x00ccff, transparent: true, opacity: 0.9, depthTest: false });
+  const diamondHoverMat = new THREE.MeshBasicMaterial({ color: 0xffcc00, transparent: true, opacity: 1.0, depthTest: false });
+  clipInfo.keyframes.forEach((kf, i) => {
+    const diamond = new THREE.Mesh(diamondGeo, diamondMat.clone());
+    diamond.position.set(kf.position[0], kf.position[1], kf.position[2]);
+    diamond.renderOrder = 9995;
+    diamond.name = '__camera_path_diamond__';
+    diamond.userData._cameraKfIndex = i;
+    diamond.userData._cameraKfMesh = mesh;
+    diamond.userData._diamondBaseMat = diamond.material;
+    diamond.userData._diamondHoverMat = diamondHoverMat;
+    scene.add(diamond);
+    _cameraPathDiamonds.push(diamond);
+  });
+}
+
+function _clearCameraPathPreview() {
+  if (_cameraPathLine) {
+    scene.remove(_cameraPathLine);
+    _cameraPathLine.geometry?.dispose();
+    _cameraPathLine.material?.dispose();
+    _cameraPathLine = null;
+  }
+  for (const d of _cameraPathDiamonds) {
+    scene.remove(d);
+  }
+  _cameraPathDiamonds = [];
+}
+
+// ─── Camera Keyframe Diamond Dragging (Visual Track Editor) ──────────────────
+let _draggedDiamond = null;
+let _diamondDragPlane = new THREE.Plane();
+let _diamondDragOffset = new THREE.Vector3();
+let _diamondRaycaster = new THREE.Raycaster();
+let _diamondDragStartPos = new THREE.Vector3();   // origin position at drag start
+let _diamondDragAxisLock = null;                   // null | 'x' | 'y' | 'z' | 'xz'
+let _diamondDragTooltip = null;                    // floating tooltip element
+let _diamondSelectedSet = new Set();               // multi-selected diamond indices
+let _diamondDragGroupOffsets = new Map();           // kfIndex → offset from primary
+let _kfContextMenu = null;                         // right-click context menu element
+
+function _removeKfContextMenu() {
+  if (_kfContextMenu) { _kfContextMenu.remove(); _kfContextMenu = null; }
+}
+
+function _removeDiamondTooltip() {
+  if (_diamondDragTooltip) { _diamondDragTooltip.remove(); _diamondDragTooltip = null; }
+}
+
+function _showDiamondTooltip(x, y, pos) {
+  if (!_diamondDragTooltip) {
+    _diamondDragTooltip = document.createElement('div');
+    _diamondDragTooltip.style.cssText = 'position:fixed;z-index:100000;pointer-events:none;background:rgba(0,0,0,0.8);color:#00ccff;font:10px monospace;padding:3px 6px;border-radius:3px;white-space:nowrap;';
+    document.body.appendChild(_diamondDragTooltip);
+  }
+  _diamondDragTooltip.textContent = `X:${pos.x.toFixed(2)} Y:${pos.y.toFixed(2)} Z:${pos.z.toFixed(2)}`;
+  _diamondDragTooltip.style.left = (x + 14) + 'px';
+  _diamondDragTooltip.style.top = (y - 20) + 'px';
+}
+
+function _snapToGrid(val) {
+  const s = state.snapSize;
+  return s > 0 ? Math.round(val / s) * s : val;
+}
+
+function _hitDiamond(event) {
+  if (!_cameraPathDiamonds.length) return null;
+  const canvasEl = renderer.domElement;
+  const rect = canvasEl.getBoundingClientRect();
+  const mouse = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  _diamondRaycaster.setFromCamera(mouse, editorCam);
+  const hits = _diamondRaycaster.intersectObjects(_cameraPathDiamonds, false);
+  if (!hits.length) return null;
+  const diamond = hits[0].object;
+  return (diamond.userData._cameraKfIndex !== undefined) ? diamond : null;
+}
+
+function _onCameraPathPointerDown(event) {
+  if (!_cameraPathDiamonds.length || state.isPlaytest) return;
+  // Right-click is handled by contextmenu event
+  if (event.button === 2) return;
+  _removeKfContextMenu();
+
+  const diamond = _hitDiamond(event);
+  if (!diamond) {
+    // Clicking empty space clears multi-selection
+    if (_diamondSelectedSet.size) {
+      _diamondSelectedSet.clear();
+      _cameraPathDiamonds.forEach(d => { d.material = d.userData._diamondBaseMat; });
+    }
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  const kfIdx = diamond.userData._cameraKfIndex;
+
+  // Shift+click toggles multi-selection
+  if (event.shiftKey) {
+    if (_diamondSelectedSet.has(kfIdx)) {
+      _diamondSelectedSet.delete(kfIdx);
+      diamond.material = diamond.userData._diamondBaseMat;
+    } else {
+      _diamondSelectedSet.add(kfIdx);
+      diamond.material = diamond.userData._diamondHoverMat;
+    }
+    return;
+  }
+
+  // If this diamond is not in the selection, start fresh selection
+  if (!_diamondSelectedSet.has(kfIdx)) {
+    _diamondSelectedSet.clear();
+    _cameraPathDiamonds.forEach(d => { d.material = d.userData._diamondBaseMat; });
+    _diamondSelectedSet.add(kfIdx);
+  }
+
+  // Highlight all selected
+  _cameraPathDiamonds.forEach(d => {
+    if (_diamondSelectedSet.has(d.userData._cameraKfIndex)) d.material = d.userData._diamondHoverMat;
+  });
+
+  _draggedDiamond = diamond;
+  _diamondDragStartPos.copy(diamond.position);
+  _diamondDragAxisLock = event.ctrlKey ? 'xz' : null; // Ctrl = ground plane lock
+
+  // Store offsets for all selected diamonds relative to the dragged one
+  _diamondDragGroupOffsets.clear();
+  if (_diamondSelectedSet.size > 1) {
+    for (const d of _cameraPathDiamonds) {
+      if (_diamondSelectedSet.has(d.userData._cameraKfIndex) && d !== diamond) {
+        _diamondDragGroupOffsets.set(d.userData._cameraKfIndex, d.position.clone().sub(diamond.position));
+      }
+    }
+  }
+
+  // Create drag plane
+  if (_diamondDragAxisLock === 'xz') {
+    // Ground plane (Y = diamond Y)
+    _diamondDragPlane.setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 1, 0), diamond.position);
+  } else {
+    const camDir = new THREE.Vector3();
+    editorCam.getWorldDirection(camDir);
+    _diamondDragPlane.setFromNormalAndCoplanarPoint(camDir, diamond.position);
+  }
+
+  const canvasEl = renderer.domElement;
+  const rect = canvasEl.getBoundingClientRect();
+  const mouse = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  _diamondRaycaster.setFromCamera(mouse, editorCam);
+  const intersect = new THREE.Vector3();
+  _diamondRaycaster.ray.intersectPlane(_diamondDragPlane, intersect);
+  _diamondDragOffset.copy(diamond.position).sub(intersect);
+
+  orbitControls.enabled = false;
+  transformControls.enabled = false;
+
+  canvasEl.addEventListener('pointermove', _onCameraPathPointerMove);
+  canvasEl.addEventListener('pointerup', _onCameraPathPointerUp);
+}
+
+function _onCameraPathPointerMove(event) {
+  if (!_draggedDiamond) return;
+  const canvasEl = renderer.domElement;
+  const rect = canvasEl.getBoundingClientRect();
+  const mouse = new THREE.Vector2(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  _diamondRaycaster.setFromCamera(mouse, editorCam);
+  const intersect = new THREE.Vector3();
+  if (!_diamondRaycaster.ray.intersectPlane(_diamondDragPlane, intersect)) return;
+
+  let newPos = intersect.add(_diamondDragOffset);
+
+  // Shift = axis lock (detect dominant axis from displacement)
+  if (event.shiftKey && !_diamondDragAxisLock) {
+    const delta = newPos.clone().sub(_diamondDragStartPos);
+    const ax = Math.abs(delta.x), ay = Math.abs(delta.y), az = Math.abs(delta.z);
+    if (Math.max(ax, ay, az) > 0.05) {
+      _diamondDragAxisLock = (ax >= ay && ax >= az) ? 'x' : (ay >= ax && ay >= az) ? 'y' : 'z';
+    }
+  }
+
+  // Apply axis constraint
+  const lock = event.shiftKey ? _diamondDragAxisLock : (event.ctrlKey ? 'xz' : null);
+  if (lock === 'x') { newPos.y = _diamondDragStartPos.y; newPos.z = _diamondDragStartPos.z; }
+  else if (lock === 'y') { newPos.x = _diamondDragStartPos.x; newPos.z = _diamondDragStartPos.z; }
+  else if (lock === 'z') { newPos.x = _diamondDragStartPos.x; newPos.y = _diamondDragStartPos.y; }
+  else if (lock === 'xz') { newPos.y = _diamondDragStartPos.y; }
+
+  // Grid snap
+  if (state.snapSize > 0) {
+    newPos.x = _snapToGrid(newPos.x);
+    newPos.y = _snapToGrid(newPos.y);
+    newPos.z = _snapToGrid(newPos.z);
+  }
+
+  _draggedDiamond.position.copy(newPos);
+
+  // Move other selected diamonds by the same delta
+  if (_diamondDragGroupOffsets.size > 0) {
+    for (const d of _cameraPathDiamonds) {
+      const off = _diamondDragGroupOffsets.get(d.userData._cameraKfIndex);
+      if (off) d.position.copy(newPos.clone().add(off));
+    }
+  }
+
+  // Show floating tooltip with XYZ
+  _showDiamondTooltip(event.clientX, event.clientY, newPos);
+}
+
+function _onCameraPathPointerUp() {
+  if (!_draggedDiamond) return;
+  _removeDiamondTooltip();
+
+  // Commit all selected diamonds to their keyframe data
+  const mesh = _draggedDiamond.userData._cameraKfMesh;
+  if (mesh) {
+    const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+    const clip = _getActiveClip(cfg);
+    if (clip) {
+      for (const d of _cameraPathDiamonds) {
+        if (!_diamondSelectedSet.has(d.userData._cameraKfIndex)) continue;
+        const idx = d.userData._cameraKfIndex;
+        if (clip.keyframes[idx]) {
+          clip.keyframes[idx].position = [d.position.x, d.position.y, d.position.z];
+        }
+      }
+      mesh.userData.cameraConfig = cfg;
+      _refreshCameraPathPreview(mesh);
+      markRestoreDirty();
+      refreshProps();
+    }
+  }
+
+  // Restore materials for non-selected diamonds
+  _cameraPathDiamonds.forEach(d => {
+    d.material = _diamondSelectedSet.has(d.userData._cameraKfIndex) ? d.userData._diamondHoverMat : d.userData._diamondBaseMat;
+  });
+
+  orbitControls.enabled = true;
+  transformControls.enabled = true;
+  _draggedDiamond = null;
+  _diamondDragAxisLock = null;
+  _diamondDragGroupOffsets.clear();
+
+  const canvasEl = renderer.domElement;
+  canvasEl.removeEventListener('pointermove', _onCameraPathPointerMove);
+  canvasEl.removeEventListener('pointerup', _onCameraPathPointerUp);
+}
+
+// ─── Keyframe Right-Click Context Menu ───────────────────────────────────────
+function _onCameraPathContextMenu(event) {
+  if (!_cameraPathDiamonds.length || state.isPlaytest) return;
+  const diamond = _hitDiamond(event);
+  if (!diamond) return;
+  event.preventDefault();
+  event.stopPropagation();
+  _removeKfContextMenu();
+
+  const kfIdx = diamond.userData._cameraKfIndex;
+  const mesh = diamond.userData._cameraKfMesh;
+  if (!mesh) return;
+
+  const menu = document.createElement('div');
+  menu.style.cssText = 'position:fixed;z-index:100001;background:#161b22;border:1px solid #30363d;border-radius:6px;padding:4px 0;min-width:160px;box-shadow:0 4px 16px rgba(0,0,0,0.5);font-size:11px;color:#e6edf3;';
+  menu.innerHTML = `
+    <div class="kf-ctx-item" data-action="delete" style="padding:5px 12px;cursor:pointer;">🗑️ Delete Keyframe</div>
+    <div class="kf-ctx-item" data-action="duplicate" style="padding:5px 12px;cursor:pointer;">📋 Duplicate Keyframe</div>
+    <div style="border-top:1px solid #30363d;margin:2px 0"></div>
+    <div class="kf-ctx-item" data-action="lookat" style="padding:5px 12px;cursor:pointer;">🎯 Set as Look-At Target</div>
+    <div class="kf-ctx-item" data-action="goto" style="padding:5px 12px;cursor:pointer;">⏱️ Go to Time</div>
+    <div style="border-top:1px solid #30363d;margin:2px 0"></div>
+    <div class="kf-ctx-item" data-action="copypos" style="padding:5px 12px;cursor:pointer;">📍 Copy Position</div>
+  `;
+  menu.style.left = event.clientX + 'px';
+  menu.style.top = event.clientY + 'px';
+  document.body.appendChild(menu);
+  _kfContextMenu = menu;
+
+  // Hover effect
+  menu.querySelectorAll('.kf-ctx-item').forEach(item => {
+    item.addEventListener('mouseenter', () => { item.style.background = '#1f6feb33'; });
+    item.addEventListener('mouseleave', () => { item.style.background = 'none'; });
+  });
+
+  menu.addEventListener('click', (e) => {
+    const action = e.target.closest('.kf-ctx-item')?.dataset.action;
+    if (!action) return;
+    const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+    const clip = _getActiveClip(cfg);
+    if (!clip) { _removeKfContextMenu(); return; }
+
+    if (action === 'delete') {
+      if (clip.keyframes.length <= 1) { _removeKfContextMenu(); return; }
+      clip.keyframes.splice(kfIdx, 1);
+      mesh.userData.cameraConfig = cfg;
+      _diamondSelectedSet.delete(kfIdx);
+      _refreshCameraPathPreview(mesh);
+      markRestoreDirty();
+      refreshProps();
+    } else if (action === 'duplicate') {
+      const orig = clip.keyframes[kfIdx];
+      const copy = JSON.parse(JSON.stringify(orig));
+      // Offset duplicated keyframe slightly
+      copy.position[0] += 0.5;
+      copy.position[1] += 0.5;
+      clip.keyframes.splice(kfIdx + 1, 0, copy);
+      mesh.userData.cameraConfig = cfg;
+      _refreshCameraPathPreview(mesh);
+      markRestoreDirty();
+      refreshProps();
+    } else if (action === 'lookat') {
+      const kf = clip.keyframes[kfIdx];
+      cfg.lookAtEnabled = true;
+      cfg.lookAtTarget = [...kf.position];
+      mesh.userData.cameraConfig = cfg;
+      refreshProps();
+      markRestoreDirty();
+    } else if (action === 'goto') {
+      // Scrub timeline to this keyframe's normalized time
+      const clipInfo = _getActiveClipInfo(cfg);
+      const numKfs = clipInfo.keyframes.length;
+      const normT = numKfs > 1 ? kfIdx / (numKfs - 1) : 0;
+      const scrubber = document.getElementById('prop-camera-scrubber');
+      if (scrubber) { scrubber.value = normT; scrubber.dispatchEvent(new Event('input')); }
+    } else if (action === 'copypos') {
+      const kf = clip.keyframes[kfIdx];
+      const text = `${kf.position[0].toFixed(3)}, ${kf.position[1].toFixed(3)}, ${kf.position[2].toFixed(3)}`;
+      navigator.clipboard?.writeText(text).catch(() => {});
+    }
+
+    _removeKfContextMenu();
+  });
+
+  // Close on click outside
+  const closeHandler = (e) => {
+    if (!menu.contains(e.target)) { _removeKfContextMenu(); document.removeEventListener('pointerdown', closeHandler, true); }
+  };
+  setTimeout(() => document.addEventListener('pointerdown', closeHandler, true), 0);
+}
+
+// Attach diamond drag and context menu listeners to the canvas
+renderer.domElement.addEventListener('pointerdown', _onCameraPathPointerDown);
+renderer.domElement.addEventListener('contextmenu', _onCameraPathContextMenu);
+
+// ─── Camera Animation Interpolation Engine ───────────────────────────────────
+function _interpolateCameraAnimation(cfg, time) {
+  const clipInfo = _getActiveClipInfo(cfg);
+  const kfs = clipInfo.keyframes;
+  if (!kfs.length) return null;
+  if (kfs.length === 1) {
+    return { position: new THREE.Vector3().fromArray(kfs[0].position), rotation: null, lookAt: kfs[0].lookAt ? new THREE.Vector3().fromArray(kfs[0].lookAt) : null };
+  }
+
+  const duration = clipInfo.duration;
+  if (duration <= 0) return null;
+  let t = time;
+  if (clipInfo.loop) {
+    t = t % duration;
+    if (t < 0) t += duration;
+  } else {
+    t = Math.max(0, Math.min(duration, t));
+  }
+
+  // Position: use CatmullRomCurve3 for smooth path through all keyframe positions
+  const allPositions = kfs.map(kf => new THREE.Vector3().fromArray(kf.position));
+  const curve = new THREE.CatmullRomCurve3(allPositions, clipInfo.loop, clipInfo.pathType, clipInfo.pathTension);
+  // Map time to curve parameter (0..1) based on duration
+  const curveT = Math.max(0, Math.min(1, t / duration));
+  const position = curve.getPoint(curveT);
+
+  // Find surrounding keyframes for rotation/lookAt/easing interpolation
+  // Distribute keyframe influence evenly along the curve parameter
+  const numKfs = kfs.length;
+  const segIndex = Math.min(Math.floor(curveT * (numKfs - 1)), numKfs - 2);
+  const segT = (curveT * (numKfs - 1)) - segIndex;
+  const prevKf = kfs[segIndex];
+  const nextKf = kfs[segIndex + 1];
+
+  // Apply easing to segment progress
+  const easedT = _cameraEase(segT, nextKf.easing || 'linear');
+
+  // Rotation via slerp if both keyframes have rotation data
+  let rotation = null;
+  if (prevKf.rotation && nextKf.rotation) {
+    const q1 = new THREE.Quaternion().fromArray(prevKf.rotation);
+    const q2 = new THREE.Quaternion().fromArray(nextKf.rotation);
+    rotation = new THREE.Quaternion().slerpQuaternions(q1, q2, easedT);
+  }
+
+  // LookAt interpolation
+  let lookAt = null;
+  if (cfg.lookAtEnabled && cfg.lookAtTarget) {
+    lookAt = new THREE.Vector3().fromArray(cfg.lookAtTarget);
+  } else if (prevKf.lookAt && nextKf.lookAt) {
+    lookAt = new THREE.Vector3().fromArray(prevKf.lookAt).lerp(new THREE.Vector3().fromArray(nextKf.lookAt), easedT);
+  }
+
+  return { position, rotation, lookAt };
+}
+
+// ─── Camera Animation Preview (editor) ──────────────────────────────────────
+let _cameraPreviewActive = false;
+let _cameraPreviewStartTime = 0;
+let _cameraPreviewMesh = null;
+let _cameraPreviewSavedPos = null;
+let _cameraPreviewSavedQuat = null;
+
+function startCameraAnimationPreview(mesh) {
+  if (!mesh || mesh.userData.type !== 'camera') return;
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+  const clipInfo = _getActiveClipInfo(cfg);
+  if (clipInfo.keyframes.length < 2) return;
+  // Save mesh's original transform to restore on stop
+  _cameraPreviewSavedPos = mesh.position.clone();
+  _cameraPreviewSavedQuat = mesh.quaternion.clone();
+  _cameraPreviewActive = true;
+  _cameraPreviewStartTime = performance.now() / 1000;
+  _cameraPreviewMesh = mesh;
+  // Keep orbit controls enabled — user can orbit while watching preview
+}
+
+function stopCameraAnimationPreview() {
+  if (!_cameraPreviewActive) return;
+  // Restore mesh original transform
+  if (_cameraPreviewMesh && _cameraPreviewSavedPos) {
+    _cameraPreviewMesh.position.copy(_cameraPreviewSavedPos);
+    _cameraPreviewMesh.quaternion.copy(_cameraPreviewSavedQuat);
+  }
+  _cameraPreviewActive = false;
+  _cameraPreviewMesh = null;
+  _cameraPreviewSavedPos = null;
+  _cameraPreviewSavedQuat = null;
+}
+
+function _updateCameraAnimationPreview() {
+  if (!_cameraPreviewActive || !_cameraPreviewMesh) return;
+  const cfg = normalizeCameraConfig(_cameraPreviewMesh.userData.cameraConfig);
+  const clipInfo = _getActiveClipInfo(cfg);
+  const elapsed = performance.now() / 1000 - _cameraPreviewStartTime;
+
+  if (!clipInfo.loop && elapsed > clipInfo.duration) {
+    stopCameraAnimationPreview();
+    return;
+  }
+
+  const result = _interpolateCameraAnimation(cfg, elapsed);
+  if (!result) return;
+
+  // Move the camera mesh along the path instead of hijacking the editor camera
+  _cameraPreviewMesh.position.copy(result.position);
+  if (result.lookAt) {
+    _cameraPreviewMesh.lookAt(result.lookAt);
+  } else if (result.rotation) {
+    _cameraPreviewMesh.quaternion.copy(result.rotation);
+  }
+}
+
+// ─── Camera PiP Preview Window ───────────────────────────────────────────────
+let _cameraPipCanvas = null;
+let _cameraPipCam = null;
+let _cameraPipTarget = null;
+let _cameraPipMesh = null;
+
+function _createCameraPip(mesh) {
+  _removeCameraPip();
+  if (!mesh || mesh.userData.type !== 'camera') return;
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+
+  // Create overlay canvas
+  const canvas = document.createElement('canvas');
+  canvas.width = 320;
+  canvas.height = Math.round(320 / cfg.aspectRatio);
+  canvas.style.cssText = 'position:absolute;bottom:10px;right:10px;z-index:100;border:2px solid #00ccff;border-radius:6px;pointer-events:none;box-shadow:0 2px 12px rgba(0,204,255,0.3);';
+  document.getElementById('canvas-container')?.appendChild(canvas) || document.body.appendChild(canvas);
+  _cameraPipCanvas = canvas;
+
+  // PiP camera
+  const pipCam = new THREE.PerspectiveCamera(cfg.fov, cfg.aspectRatio, cfg.near, cfg.far);
+  _cameraPipCam = pipCam;
+
+  // Render target
+  const rt = new THREE.WebGLRenderTarget(canvas.width, canvas.height, { format: THREE.RGBAFormat });
+  _cameraPipTarget = rt;
+  _cameraPipMesh = mesh;
+}
+
+function _removeCameraPip() {
+  if (_cameraPipCanvas) {
+    _cameraPipCanvas.remove();
+    _cameraPipCanvas = null;
+  }
+  if (_cameraPipTarget) {
+    _cameraPipTarget.dispose();
+    _cameraPipTarget = null;
+  }
+  _cameraPipCam = null;
+  _cameraPipMesh = null;
+}
+
+function _renderCameraPip() {
+  if (!_cameraPipCanvas || !_cameraPipCam || !_cameraPipTarget || !_cameraPipMesh) return;
+  const mesh = _cameraPipMesh;
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+
+  // Update PiP camera from mesh transform
+  _cameraPipCam.fov = cfg.fov;
+  _cameraPipCam.aspect = cfg.aspectRatio;
+  _cameraPipCam.near = cfg.near;
+  _cameraPipCam.far = cfg.far;
+  _cameraPipCam.updateProjectionMatrix();
+
+  // Position PiP cam at mesh world position
+  mesh.updateMatrixWorld(true);
+  const worldPos = new THREE.Vector3();
+  mesh.getWorldPosition(worldPos);
+  _cameraPipCam.position.copy(worldPos);
+
+  if (cfg.lookAtEnabled) {
+    _cameraPipCam.lookAt(cfg.lookAtTarget[0], cfg.lookAtTarget[1], cfg.lookAtTarget[2]);
+  } else {
+    const worldQuat = new THREE.Quaternion();
+    mesh.getWorldQuaternion(worldQuat);
+    _cameraPipCam.quaternion.copy(worldQuat);
+  }
+
+  // Render to PiP target
+  const currentTarget = renderer.getRenderTarget();
+  // Hide camera mesh and helpers during PiP render
+  const wasVisible = mesh.visible;
+  mesh.visible = false;
+  if (_activeCameraHelper) _activeCameraHelper.visible = false;
+  if (_cameraLookAtHelper) _cameraLookAtHelper.visible = false;
+  if (_cameraLookAtLine) _cameraLookAtLine.visible = false;
+
+  // Hide objects that should be invisible in-game (same as playtest)
+  const hiddenForRender = [];
+  for (const m of sceneObjects) {
+    if (m.userData.hiddenInGame || ['light', 'spawn', 'trigger', 'pivot', 'soundzone'].includes(m.userData.type)) {
+      if (m.visible || (m.material && m.material.visible)) {
+        hiddenForRender.push({ mesh: m, wasVisible: m.visible, matWasVisible: m.material?.visible });
+        m.visible = false;
+        if (m.material) m.material.visible = false;
+        if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = false;
+      }
+    }
+  }
+
+  renderer.setRenderTarget(_cameraPipTarget);
+  renderer.render(scene, _cameraPipCam);
+  renderer.setRenderTarget(currentTarget);
+
+  mesh.visible = wasVisible;
+  if (_activeCameraHelper) _activeCameraHelper.visible = true;
+  if (_cameraLookAtHelper) _cameraLookAtHelper.visible = true;
+  if (_cameraLookAtLine) _cameraLookAtLine.visible = true;
+
+  // Restore hidden objects
+  for (const h of hiddenForRender) {
+    h.mesh.visible = h.wasVisible;
+    if (h.mesh.material) h.mesh.material.visible = h.matWasVisible;
+    if (h.mesh.userData.customSkinGroup) h.mesh.userData.customSkinGroup.visible = true;
+  }
+
+  // Copy pixels to canvas
+  const w = _cameraPipCanvas.width, h = _cameraPipCanvas.height;
+  const buf = new Uint8Array(w * h * 4);
+  renderer.readRenderTargetPixels(_cameraPipTarget, 0, 0, w, h, buf);
+  const ctx = _cameraPipCanvas.getContext('2d');
+  const imgData = ctx.createImageData(w, h);
+  // Flip vertically (WebGL is bottom-up)
+  for (let y = 0; y < h; y++) {
+    const srcRow = (h - 1 - y) * w * 4;
+    const dstRow = y * w * 4;
+    imgData.data.set(buf.subarray(srcRow, srcRow + w * 4), dstRow);
+  }
+  ctx.putImageData(imgData, 0, 0);
+  // Label overlay
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, w, 18);
+  ctx.fillStyle = '#00ccff';
+  ctx.font = '11px sans-serif';
+  const clipName = cfg.currentClip || 'Camera';
+  ctx.fillText(`📷 ${clipName}`, 6, 13);
+}
+
+// ─── Render to Video (WebM) ──────────────────────────────────────────────────
+let _renderToVideoActive = false;
+
+async function renderCameraToVideo(mesh, options = {}) {
+  if (_renderToVideoActive) return;
+  if (!mesh || mesh.userData.type !== 'camera') return;
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+  const clipInfo = _getActiveClipInfo(cfg);
+  if (clipInfo.keyframes.length < 2) { alert('Need at least 2 keyframes to render video.'); return; }
+
+  const width = (options.width || 1280) & ~1;
+  const height = (options.height || Math.round(((options.width || 1280)) / cfg.aspectRatio)) & ~1;
+  const fps = options.fps || 30;
+  const duration = clipInfo.duration;
+  const totalFrames = Math.ceil(duration * fps);
+
+  // Create camera for rendering
+  const renderCam = new THREE.PerspectiveCamera(cfg.fov, cfg.aspectRatio, cfg.near, cfg.far);
+
+  // Progress modal (covers screen so canvas resize isn't visible)
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);';
+  modal.innerHTML = `<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px 32px;min-width:340px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.5)">
+    <div style="color:#e6edf3;font-size:16px;font-weight:600;margin-bottom:12px">🎬 Rendering Video…</div>
+    <div id="render-progress-text" style="color:#8b949e;font-size:12px;margin-bottom:8px">Frame 0 / ${totalFrames}</div>
+    <div id="render-method-text" style="color:#58a6ff;font-size:11px;margin-bottom:8px"></div>
+    <div style="background:#21262d;border-radius:4px;height:8px;overflow:hidden;margin-bottom:16px"><div id="render-progress-bar" style="background:linear-gradient(90deg,#1f6feb,#388bfd);height:100%;width:0%;transition:width 0.1s"></div></div>
+    <button id="render-cancel-btn" style="background:#f85149;color:#fff;border:none;padding:6px 18px;border-radius:5px;cursor:pointer;font-size:12px">Cancel</button>
+  </div>`;
+  document.body.appendChild(modal);
+
+  const progressText = modal.querySelector('#render-progress-text');
+  const progressBar = modal.querySelector('#render-progress-bar');
+  const methodText = modal.querySelector('#render-method-text');
+
+  let cancelled = false;
+  modal.querySelector('#render-cancel-btn').addEventListener('click', () => { cancelled = true; });
+
+  _renderToVideoActive = true;
+
+  // Hide camera mesh and helpers during render
+  const wasVisible = mesh.visible;
+  mesh.visible = false;
+  if (_activeCameraHelper) _activeCameraHelper.visible = false;
+  if (_cameraLookAtHelper) _cameraLookAtHelper.visible = false;
+  if (_cameraLookAtLine) _cameraLookAtLine.visible = false;
+  if (_cameraPathLine) _cameraPathLine.visible = false;
+  for (const d of _cameraPathDiamonds) d.visible = false;
+
+  // Hide editor-only visuals: grid lines (keep fill planes), labels, transform gizmo
+  for (const [, g] of gridChunks) g.visible = false;
+  for (const [, s] of gridLabelSprites) s.visible = false;
+  const tcWasVisible = transformControls.visible;
+  transformControls.visible = false;
+
+  // Hide objects that should be invisible in-game (same as playtest)
+  const hiddenForRender = [];
+  for (const m of sceneObjects) {
+    if (m.userData.hiddenInGame || ['light', 'spawn', 'trigger', 'pivot', 'soundzone'].includes(m.userData.type)) {
+      if (m.visible || (m.material && m.material.visible)) {
+        hiddenForRender.push({ mesh: m, wasVisible: m.visible, matWasVisible: m.material?.visible, skinWasVisible: m.userData.customSkinGroup?.visible });
+        m.visible = false;
+        if (m.material) m.material.visible = false;
+        if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = false;
+      }
+    }
+  }
+
+  // Save renderer state, resize to output dimensions (modal hides visual change)
+  const savedSize = renderer.getSize(new THREE.Vector2());
+  const savedPixelRatio = renderer.getPixelRatio();
+  renderer.setPixelRatio(1);
+  renderer.setSize(width, height);
+
+  // Full-detail LOD bypass: swap all LOD proxies to full detail for rendering
+  const _renderFullDetail = !!options.fullDetail;
+  const _lodSwappedMeshes = [];
+  if (_renderFullDetail) {
+    for (const m of sceneObjects) {
+      if (m.userData._isImportedModel && m.userData._lodActive) {
+        _lodSwappedMeshes.push(m);
+        setImportedMeshLOD(m, false);
+      }
+    }
+  }
+
+  // Enable preserveDrawingBuffer so frame capture works reliably
+  const gl = renderer.getContext();
+  const glAttribs = gl.getContextAttributes();
+  const hadPreserve = glAttribs && glAttribs.preserveDrawingBuffer;
+
+  let videoBlob = null;
+
+  // ── Scene animation state: snapshot positions before render, restore after ──
+  const _renderAnimateObjects = !!options.animateObjects;
+  const _renderAnimateDaylight = !!options.animateDaylight;
+  const _renderAnimateSkeletons = !!options.animateSkeletons;
+
+  // Snapshot all object transforms so we can restore after render
+  const _renderPosSnapshots = new Map();
+  if (_renderAnimateObjects) {
+    for (const m of sceneObjects) {
+      _renderPosSnapshots.set(m.uuid, {
+        pos: m.position.clone(),
+        quat: m.quaternion.clone(),
+        scale: m.scale.clone(),
+      });
+    }
+    // Start movement paths for objects that have them
+    for (const m of sceneObjects) {
+      const pathCfg = getMeshMovementPathConfig(m);
+      if (pathCfg.enabled && pathCfg.checkpoints.length > 0) {
+        startMovementPath(m, { reset: true });
+      }
+    }
+    // Activate always-active control functions
+    for (const fn of controlFunctions) {
+      if (fn.alwaysActive) {
+        executeControlFunction(fn.name, null, true);
+      }
+    }
+  }
+
+  // Snapshot sun time for daylight restore
+  const _renderSavedSunTime = sunTimeInput ? parseFloat(sunTimeInput.value) : 14;
+  const _renderDayCycleDur = parseFloat(sunDayDurationInput?.value) || SUN_DAY_DURATION_DEFAULT;
+
+  // ── Helper: position camera and render frame to a separate canvas ──
+  // Uses a dedicated WebGL renderer for capture to avoid preserveDrawingBuffer issues.
+  const captureCanvas = document.createElement('canvas');
+  captureCanvas.width = width;
+  captureCanvas.height = height;
+  const captureRenderer = new THREE.WebGLRenderer({
+    canvas: captureCanvas,
+    antialias: width <= 1920,
+    preserveDrawingBuffer: true,
+  });
+  captureRenderer.setPixelRatio(1);
+  captureRenderer.setSize(width, height);
+  captureRenderer.shadowMap.enabled = renderer.shadowMap.enabled;
+  captureRenderer.shadowMap.type = renderer.shadowMap.type;
+  captureRenderer.toneMapping = renderer.toneMapping;
+  captureRenderer.toneMappingExposure = renderer.toneMappingExposure;
+  captureRenderer.outputColorSpace = renderer.outputColorSpace;
+
+  function _renderFrameToCanvas(frame) {
+    const t = frame / fps;
+    const renderDt = 1 / fps;
+
+    // Tick scene animations for this frame
+    if (_renderAnimateObjects) {
+      _simActive = true;
+      updateMovementPathAnimations(renderDt);
+      updateJointAnimations(renderDt);
+      _simActive = false;
+    }
+    if (_renderAnimateSkeletons) {
+      _simActive = true;
+      updateSkeletonAnimations(renderDt);
+      _simActive = false;
+    }
+    if (_renderAnimateDaylight) {
+      let curTime = parseFloat(sunTimeInput?.value) ?? 14;
+      curTime += renderDt * (24 / _renderDayCycleDur);
+      if (curTime >= 24) curTime -= 24;
+      if (sunTimeInput) sunTimeInput.value = curTime;
+      updateSunSky();
+    }
+
+    const result = _interpolateCameraAnimation(cfg, t);
+    if (result) {
+      renderCam.position.copy(result.position);
+      if (result.lookAt) {
+        renderCam.lookAt(result.lookAt);
+      } else if (result.rotation) {
+        renderCam.quaternion.copy(result.rotation);
+      } else {
+        const worldQuat = new THREE.Quaternion();
+        mesh.getWorldQuaternion(worldQuat);
+        renderCam.quaternion.copy(worldQuat);
+      }
+    }
+    renderCam.updateProjectionMatrix();
+    captureRenderer.render(scene, renderCam);
+  }
+
+  // ── Check muxer availability ──
+  if (!_WebmMuxer || !_ArrayBufferTarget) {
+    methodText.textContent = '⚠ Encoder library failed to load — check internet connection';
+    methodText.style.color = '#f85149';
+    // Wait a moment so user can read the message, then clean up
+    await new Promise(r => setTimeout(r, 2500));
+    captureRenderer.dispose();
+    renderer.setPixelRatio(savedPixelRatio);
+    renderer.setSize(savedSize.x, savedSize.y);
+    mesh.visible = wasVisible;
+    if (_activeCameraHelper) _activeCameraHelper.visible = true;
+    if (_cameraLookAtHelper) _cameraLookAtHelper.visible = true;
+    if (_cameraLookAtLine) _cameraLookAtLine.visible = true;
+    if (_cameraPathLine) _cameraPathLine.visible = true;
+    for (const d of _cameraPathDiamonds) d.visible = true;
+    for (const [, g] of gridChunks) g.visible = true;
+    for (const [, s] of gridLabelSprites) s.visible = true;
+    transformControls.visible = tcWasVisible;
+    for (const h of hiddenForRender) {
+      h.mesh.visible = h.wasVisible;
+      if (h.mesh.material) h.mesh.material.visible = h.matWasVisible;
+      if (h.mesh.userData.customSkinGroup) h.mesh.userData.customSkinGroup.visible = h.skinWasVisible !== false;
+    }
+    _renderToVideoActive = false;
+    modal.remove();
+    alert('Video rendering requires the webm-muxer library from CDN. It failed to load when the editor started. Please refresh the page and try again.');
+    return;
+  }
+
+  // ── Determine best codec ──
+  let chosenCodec = null;
+  let muxerCodecId = null;
+  if (typeof VideoEncoder !== 'undefined') {
+    // At high resolutions VP9 compresses better; at lower res VP8 is faster
+    const codecOrder = (width * height > 1920 * 1080)
+      ? [['vp09.00.10.08', 'V_VP9'], ['vp8', 'V_VP8']]
+      : [['vp8', 'V_VP8'], ['vp09.00.10.08', 'V_VP9']];
+    for (const [codec, muxId] of codecOrder) {
+      try {
+        const support = await VideoEncoder.isConfigSupported({
+          codec,
+          width, height,
+          bitrate: 8_000_000,
+          framerate: fps,
+        });
+        if (support.supported) {
+          chosenCodec = codec;
+          muxerCodecId = muxId;
+          break;
+        }
+      } catch (e) { /* try next */ }
+    }
+  }
+
+  // ── Primary path: WebCodecs VideoEncoder with explicit timestamps ──
+  if (chosenCodec) {
+    try {
+      methodText.textContent = `Encoding: WebCodecs (${chosenCodec})`;
+      console.log('[Flame3D Render] WebCodecs:', chosenCodec, width, 'x', height, '@', fps, 'fps,', totalFrames, 'frames');
+
+      const target = new _ArrayBufferTarget();
+      const muxer = new _WebmMuxer({
+        target,
+        video: { codec: muxerCodecId, width, height },
+        type: 'webm',
+      });
+
+      let encoderError = null;
+      const encoder = new VideoEncoder({
+        output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+        error: e => { encoderError = e; console.error('[Flame3D Render] VideoEncoder error:', e); },
+      });
+      encoder.configure({
+        codec: chosenCodec,
+        width, height,
+        bitrate: options.bitrate || Math.max(8_000_000, Math.round(8_000_000 * (width * height) / (1280 * 720) * fps / 30)),
+        framerate: fps,
+        latencyMode: 'quality',
+      });
+
+      const frameDurationUs = Math.round(1_000_000 / fps);
+      const keyFrameInterval = Math.max(30, fps * 2);
+
+      for (let frame = 0; frame < totalFrames; frame++) {
+        if (cancelled) break;
+        if (encoderError) throw encoderError;
+
+        _renderFrameToCanvas(frame);
+
+        // Capture VideoFrame from the dedicated capture canvas (preserveDrawingBuffer=true)
+        const vf = new VideoFrame(captureCanvas, {
+          timestamp: frame * frameDurationUs,
+          duration: frameDurationUs,
+        });
+        encoder.encode(vf, { keyFrame: frame % keyFrameInterval === 0 });
+        vf.close();
+
+        // Let encoder queue drain naturally
+        while (encoder.encodeQueueSize > 10) {
+          await new Promise(r => setTimeout(r, 1));
+        }
+
+        if (frame % 10 === 0 || frame === totalFrames - 1) {
+          progressText.textContent = `Frame ${frame + 1} / ${totalFrames}`;
+          progressBar.style.width = ((frame + 1) / totalFrames * 100) + '%';
+          await new Promise(r => setTimeout(r, 0));
+        }
+      }
+
+      if (encoderError) throw encoderError;
+      if (!cancelled) {
+        progressText.textContent = 'Finalizing…';
+        await encoder.flush();
+        encoder.close();
+        muxer.finalize();
+        videoBlob = new Blob([target.buffer], { type: 'video/webm' });
+        console.log('[Flame3D Render] WebCodecs complete. Size:', videoBlob.size, 'bytes');
+        if (videoBlob.size < 1000) {
+          console.warn('[Flame3D Render] Blob suspiciously small, discarding');
+          videoBlob = null;
+        }
+      } else {
+        encoder.close();
+      }
+    } catch (e) {
+      console.warn('[Flame3D Render] WebCodecs failed:', e);
+      methodText.textContent = '⚠ WebCodecs failed, trying fallback…';
+      methodText.style.color = '#f0883e';
+      videoBlob = null;
+    }
+  }
+
+  // ── Error handling if encoding failed ──
+  if (!videoBlob && !cancelled) {
+    if (!chosenCodec) {
+      methodText.textContent = '⚠ Browser does not support WebCodecs video encoding';
+      methodText.style.color = '#f85149';
+      await new Promise(r => setTimeout(r, 1500));
+      alert('Video rendering requires a browser with WebCodecs support (Chrome 94+, Edge 94+, or Opera 80+).');
+    } else {
+      methodText.textContent = '⚠ Encoding failed — please try again or use a different resolution';
+      methodText.style.color = '#f85149';
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+
+  // Cleanup capture renderer
+  captureRenderer.dispose();
+
+  // Restore main renderer to original size
+  renderer.setPixelRatio(savedPixelRatio);
+  renderer.setSize(savedSize.x, savedSize.y);
+
+  // Restore camera mesh and helpers visibility
+  mesh.visible = wasVisible;
+  if (_activeCameraHelper) _activeCameraHelper.visible = true;
+  if (_cameraLookAtHelper) _cameraLookAtHelper.visible = true;
+  if (_cameraLookAtLine) _cameraLookAtLine.visible = true;
+  if (_cameraPathLine) _cameraPathLine.visible = true;
+  for (const d of _cameraPathDiamonds) d.visible = true;
+
+  // Restore editor visuals
+  for (const [, g] of gridChunks) g.visible = true;
+  for (const [, s] of gridLabelSprites) s.visible = true;
+  transformControls.visible = tcWasVisible;
+
+  // Restore hidden game objects
+  for (const h of hiddenForRender) {
+    h.mesh.visible = h.wasVisible;
+    if (h.mesh.material) h.mesh.material.visible = h.matWasVisible;
+    if (h.mesh.userData.customSkinGroup) h.mesh.userData.customSkinGroup.visible = h.skinWasVisible !== false;
+  }
+
+  // Restore LOD state for meshes that were swapped to full detail for rendering
+  for (const m of _lodSwappedMeshes) {
+    setImportedMeshLOD(m, true);
+  }
+
+  // Restore scene animation state: object transforms + sun time
+  if (_renderAnimateObjects) {
+    for (const m of sceneObjects) {
+      const snap = _renderPosSnapshots.get(m.uuid);
+      if (snap) {
+        m.position.copy(snap.pos);
+        m.quaternion.copy(snap.quat);
+        m.scale.copy(snap.scale);
+      }
+    }
+    _movementPathStates.clear();
+    _controlFunctionStates.clear();
+    _functionActionQueues.clear();
+    _activeDelayStates.clear();
+    _activeWaitKeyStates.clear();
+  }
+  if (_renderAnimateDaylight) {
+    if (sunTimeInput) sunTimeInput.value = _renderSavedSunTime;
+    updateSunSky();
+  }
+
+  _renderToVideoActive = false;
+  modal.remove();
+
+  if (cancelled || !videoBlob) return;
+
+  // Trigger download
+  const url = URL.createObjectURL(videoBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `flame3d-render-${Date.now()}.webm`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+// ─── Camera Render Dialog ────────────────────────────────────────────────────
+function showRenderToVideoDialog(mesh) {
+  if (!mesh || mesh.userData.type !== 'camera') return;
+  const cfg = normalizeCameraConfig(mesh.userData.cameraConfig);
+  const clipInfo = _getActiveClipInfo(cfg);
+
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;inset:0;z-index:99998;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);';
+  modal.innerHTML = `<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px 28px;min-width:320px;box-shadow:0 8px 32px rgba(0,0,0,0.5)">
+    <div style="color:#e6edf3;font-size:15px;font-weight:600;margin-bottom:16px">🎬 Render to Video</div>
+    <div style="color:#8b949e;font-size:11px;margin-bottom:4px">Clip: ${cfg.currentClip || '—'} · ${clipInfo.keyframes.length} keyframes · Speed: ${clipInfo.speed} u/s</div>
+    <div style="color:#58a6ff;font-size:12px;font-weight:600;margin-bottom:10px">Duration: ${clipInfo.duration.toFixed(2)}s</div>
+    <div style="margin:10px 0">
+      <label style="color:#e6edf3;font-size:12px;display:block;margin-bottom:6px">Resolution</label>
+      <select id="render-res" style="background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:4px;padding:4px 8px;font-size:12px;width:100%">
+        <option value="1280" selected>720p (1280×720)</option>
+        <option value="1920">1080p (1920×1080)</option>
+        <option value="3840">4K (3840×2160)</option>
+      </select>
+    </div>
+    <div style="margin:10px 0">
+      <label style="color:#e6edf3;font-size:12px;display:block;margin-bottom:6px">FPS</label>
+      <select id="render-fps" style="background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:4px;padding:4px 8px;font-size:12px;width:100%">
+        <option value="24">24 fps</option>
+        <option value="30" selected>30 fps</option>
+        <option value="60">60 fps</option>
+      </select>
+    </div>
+    <div style="margin:10px 0;display:flex;flex-direction:column;gap:6px">
+      <label style="color:#e6edf3;font-size:12px;font-weight:600">Scene Animation</label>
+      <label style="color:#8b949e;font-size:11px;display:flex;align-items:center;gap:6px;cursor:pointer"><input id="render-animate-objects" type="checkbox" checked/> Animate objects (movement paths &amp; control functions)</label>
+      <label style="color:#8b949e;font-size:11px;display:flex;align-items:center;gap:6px;cursor:pointer"><input id="render-animate-daylight" type="checkbox" ${sunDayCycleInput?.checked ? 'checked' : ''}/> Animate daylight cycle</label>
+      <label style="color:#8b949e;font-size:11px;display:flex;align-items:center;gap:6px;cursor:pointer"><input id="render-animate-skeletons" type="checkbox" checked/> Animate skeletons</label>
+      <label style="color:#8b949e;font-size:11px;display:flex;align-items:center;gap:6px;cursor:pointer"><input id="render-full-detail" type="checkbox" checked/> Render at full detail (ignore LOD proxies)</label>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:18px;justify-content:flex-end">
+      <button id="render-cancel" style="background:#21262d;color:#e6edf3;border:1px solid #30363d;padding:6px 16px;border-radius:5px;cursor:pointer;font-size:12px">Cancel</button>
+      <button id="render-start" style="background:#1f6feb;color:#fff;border:none;padding:6px 16px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600">🎬 Render</button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+
+  modal.querySelector('#render-cancel').addEventListener('click', () => modal.remove());
+  modal.querySelector('#render-start').addEventListener('click', () => {
+    const w = parseInt(modal.querySelector('#render-res').value);
+    const fps = parseInt(modal.querySelector('#render-fps').value);
+    const animateObjects = !!modal.querySelector('#render-animate-objects')?.checked;
+    const animateDaylight = !!modal.querySelector('#render-animate-daylight')?.checked;
+    const animateSkeletons = !!modal.querySelector('#render-animate-skeletons')?.checked;
+    const fullDetail = !!modal.querySelector('#render-full-detail')?.checked;
+    modal.remove();
+    renderCameraToVideo(mesh, { width: w, fps, animateObjects, animateDaylight, animateSkeletons, fullDetail });
+  });
 }
 
 // ─── NPC Config ──────────────────────────────────────────────────────────────
@@ -7210,6 +9464,35 @@ function getMeshSwitchConfig(mesh) {
   return config;
 }
 
+function createDefaultCollectibleConfig() {
+  return {
+    enabled: false,
+    itemId: 'item',
+    displayName: '',
+    maxStack: 99,
+  };
+}
+
+function normalizeCollectibleConfig(config = {}) {
+  const base = createDefaultCollectibleConfig();
+  const itemIdRaw = String(config.itemId ?? base.itemId).trim();
+  const itemId = itemIdRaw || base.itemId;
+  const displayName = String(config.displayName ?? '').trim();
+  const maxStack = THREE.MathUtils.clamp(parseInt(config.maxStack, 10) || base.maxStack, 1, 999);
+  return {
+    enabled: !!config.enabled,
+    itemId,
+    displayName,
+    maxStack,
+  };
+}
+
+function getMeshCollectibleConfig(mesh) {
+  const config = normalizeCollectibleConfig(mesh?.userData?.collectibleConfig);
+  if (mesh?.userData) mesh.userData.collectibleConfig = config;
+  return config;
+}
+
 function normalizeControlFunctionKey(name) {
   return String(name ?? '').trim().toLowerCase();
 }
@@ -7487,15 +9770,7 @@ async function importAudioFiles(files) {
   refreshProps();
 }
 
-function setLibraryPane(name) {
-  const pane = name === 'audio' ? 'audio' : 'objects';
-  activeLibraryPane = pane;
-  if (libraryPaneObjectsEl) libraryPaneObjectsEl.classList.toggle('active', pane === 'objects');
-  if (libraryPaneAudioEl) libraryPaneAudioEl.classList.toggle('active', pane === 'audio');
-  for (const btn of libraryPaneButtons) {
-    btn.classList.toggle('active', btn.dataset.libPane === pane);
-  }
-}
+/* setLibraryPane removed — library now lives in bottom panel */
 
 function clampLightIntensity(value) {
   return THREE.MathUtils.clamp(Number.isFinite(value) ? value : state.defaultLightIntensity, 0, 100);
@@ -7608,18 +9883,19 @@ function setMeshOpacity(mesh, value) {
 function createMesh(type, ghost = false, options = {}) {
   const def = DEFS[type];
   const mat = def.makeMat();
-  const shapeParams = normalizeShapeParams(type, options.shapeParams ?? getPlacementShapeParams(type));
+  const effectiveType = options.shapeType && DEFS[options.shapeType] ? options.shapeType : type;
+  const shapeParams = normalizeShapeParams(effectiveType, options.shapeParams ?? getPlacementShapeParams(effectiveType));
   const defaultOpacity = clampMeshOpacity(
     mat.transparent ? (mat.opacity ?? 1) : (Number.isFinite(options.opacity) ? options.opacity : 1)
   );
   if (ghost) {
     mat.transparent = true; mat.opacity = GHOST_OPACITY; mat.depthWrite = false;
   }
-  const mesh = new THREE.Mesh(buildTypeGeometry(type, shapeParams), mat);
+  const mesh = new THREE.Mesh(buildTypeGeometry(effectiveType, shapeParams), mat);
   if (ghost) {
     // Add wireframe edge overlay for better visibility
     const wireMat = new THREE.MeshBasicMaterial({ color: 0x58a6ff, wireframe: true, transparent: true, opacity: 0.5, depthWrite: false });
-    const wire = new THREE.Mesh(buildTypeGeometry(type, shapeParams), wireMat);
+    const wire = new THREE.Mesh(buildTypeGeometry(effectiveType, shapeParams), wireMat);
     mesh.add(wire);
     mesh.userData._ghostWire = wire;
   }
@@ -7627,6 +9903,7 @@ function createMesh(type, ghost = false, options = {}) {
   mesh.receiveShadow = !ghost;
   mesh.userData.type = type;
   mesh.userData.shapeParams = shapeParams;
+  if (options.shapeType && DEFS[options.shapeType]) mesh.userData.shapeType = options.shapeType;
   mesh.userData.solid = isDefaultSolidType(type);
   mesh.userData.collisionMode = 'aabb';
   mesh.userData.hitboxConfig = createDefaultHitboxConfig();
@@ -7639,6 +9916,7 @@ function createMesh(type, ghost = false, options = {}) {
   mesh.userData.world = activeWorldId;
   mesh.userData.movementPath = createDefaultMovementPathConfig();
   mesh.userData.switchConfig = createDefaultSwitchConfig();
+  mesh.userData.collectibleConfig = createDefaultCollectibleConfig();
   if (type === 'keypad') {
     const keypadSwitch = createDefaultSwitchConfig();
     keypadSwitch.enabled = true;
@@ -7672,6 +9950,12 @@ function createMesh(type, ghost = false, options = {}) {
     mesh.userData.npcConfig = normalizeNpcConfig(options.npcConfig);
     mesh.userData.hitboxConfig = { mode: 'auto', offset: [0, 0.9, 0], size: [0.6, 1.8, 0.4] };
     if (!ghost) _applyNpcAppearance(mesh);
+  }
+  if (options.collectibleConfig) {
+    mesh.userData.collectibleConfig = normalizeCollectibleConfig(options.collectibleConfig);
+  }
+  if (type === 'commandBlock') {
+    mesh.userData.commandBlockConfig = normalizeCommandBlockConfig(options.commandBlockConfig);
   }
   if (type === 'terrain') {
     const seg = shapeParams.segments ?? 64;
@@ -7735,22 +10019,47 @@ let _primaryScaleBefore = new THREE.Vector3();
 let _primaryOffsetBefore = new THREE.Vector3();
 let _extraOffsetsBefore = [];
 
-function syncScaleSideUI() {
-  if (scaleSideXSelect) scaleSideXSelect.value = state.scaleSides.x;
-  if (scaleSideYSelect) scaleSideYSelect.value = state.scaleSides.y;
-  if (scaleSideZSelect) scaleSideZSelect.value = state.scaleSides.z;
+// Group gizmo helper — positions the gizmo at the center of all selected objects
+const _groupPivotHelper = new THREE.Object3D();
+_groupPivotHelper.visible = false;
+scene.add(_groupPivotHelper);
+let _isGroupGizmo = false;
+let _allTransformBefore = [];
+let _allOffsetsBefore = [];
+let _helperPosBefore = new THREE.Vector3();
+let _helperQuatBefore = new THREE.Quaternion();
+let _helperScaleBefore = new THREE.Vector3(1, 1, 1);
+
+function _attachGroupGizmo() {
+  const all = state.selectedObject ? [state.selectedObject, ...state.extraSelected] : [];
+  if (all.length <= 1) {
+    _isGroupGizmo = false;
+    if (state.selectedObject) transformControls.attach(state.selectedObject);
+    return;
+  }
+  _groupPivotHelper.position.set(0, 0, 0);
+  for (const m of all) _groupPivotHelper.position.add(m.position);
+  _groupPivotHelper.position.multiplyScalar(1 / all.length);
+  _groupPivotHelper.quaternion.identity();
+  _groupPivotHelper.scale.set(1, 1, 1);
+  transformControls.attach(_groupPivotHelper);
+  transformControls.visible = true;
+  _isGroupGizmo = true;
 }
 
-function toggleScaleSide(axisKey) {
-  const k = axisKey.toLowerCase();
-  if (!['x', 'y', 'z'].includes(k)) return;
-  state.scaleSides[k] = state.scaleSides[k] === 'pos' ? 'neg' : 'pos';
-  syncScaleSideUI();
-  refreshStatus();
-}
+
 
 transformControls.addEventListener('mouseDown', () => {
-  if (state.selectedObject) {
+  if (_isGroupGizmo && state.selectedObject) {
+    _helperPosBefore.copy(_groupPivotHelper.position);
+    _helperQuatBefore.copy(_groupPivotHelper.quaternion);
+    _helperScaleBefore.copy(_groupPivotHelper.scale);
+    const all = [state.selectedObject, ...state.extraSelected];
+    _allTransformBefore = all.map(m => ({ mesh: m, trs: captureTRS(m) }));
+    _allOffsetsBefore = all.map(m => m.position.clone().sub(_groupPivotHelper.position));
+    transformBefore = _allTransformBefore[0].trs;
+    extraTransformBefore = state.extraSelected.map(m => captureTRS(m));
+  } else if (state.selectedObject) {
     transformBefore = captureTRS(state.selectedObject);
     _pivotBefore.copy(state.selectedObject.position);
     _primaryQuatBefore.copy(state.selectedObject.quaternion);
@@ -7769,7 +10078,25 @@ transformControls.addEventListener('mouseDown', () => {
   }
 });
 transformControls.addEventListener('mouseUp', () => {
-  if (state.selectedObject && transformBefore) {
+  if (_isGroupGizmo && _allTransformBefore.length) {
+    const changes = [];
+    for (const entry of _allTransformBefore) {
+      const after = captureTRS(entry.mesh);
+      if (!trsEqual(entry.trs, after))
+        changes.push({ mesh: entry.mesh, before: entry.trs, after });
+    }
+    if (changes.length === 1) {
+      pushUndo({ type: 'transform', mesh: changes[0].mesh, before: changes[0].before, after: changes[0].after });
+    } else if (changes.length > 1) {
+      pushUndo({ type: 'multi-transform', changes });
+    }
+    _allTransformBefore = [];
+    _allOffsetsBefore = [];
+    transformBefore = null;
+    extraTransformBefore = [];
+    _attachGroupGizmo();
+    if (typeof refreshObjLib === 'function') refreshObjLib();
+  } else if (state.selectedObject && transformBefore) {
     const m = state.selectedObject;
     const after = captureTRS(m);
     const moved = !trsEqual(transformBefore, after);
@@ -7802,12 +10129,27 @@ transformControls.addEventListener('mouseUp', () => {
 
     if (moved && !m.userData._drawAnimPath)
       pushUndo({ type: 'transform', mesh: m, before: transformBefore, after });
-    // Commit extra selected undos
+    // Commit extra selected undos — group with primary if any extras moved
+    const extraChanges = [];
     for (let i = 0; i < state.extraSelected.length; i++) {
       const em = state.extraSelected[i];
       const a = captureTRS(em);
       if (extraTransformBefore[i] && !trsEqual(extraTransformBefore[i], a))
-        pushUndo({ type: 'transform', mesh: em, before: extraTransformBefore[i], after: a });
+        extraChanges.push({ mesh: em, before: extraTransformBefore[i], after: a });
+    }
+    if (extraChanges.length > 0) {
+      // Combine primary + extras into one multi-transform undo entry when extras present
+      if (moved && !m.userData._drawAnimPath) {
+        // Replace the single transform we just pushed with a combined one
+        undoStack.pop();
+        pushUndo({ type: 'multi-transform', changes: [{ mesh: m, before: transformBefore, after }, ...extraChanges] });
+      } else {
+        if (extraChanges.length === 1) {
+          pushUndo({ type: 'transform', mesh: extraChanges[0].mesh, before: extraChanges[0].before, after: extraChanges[0].after });
+        } else {
+          pushUndo({ type: 'multi-transform', changes: extraChanges });
+        }
+      }
     }
     transformBefore = null;
     extraTransformBefore = [];
@@ -7818,30 +10160,51 @@ transformControls.addEventListener('mouseUp', () => {
 transformControls.addEventListener('objectChange', () => {
   if (!state.selectedObject) return;
 
-  // Per-axis side scaling (+/- per axis)
-  if (state.transformMode === 'scale' && transformBefore && state.extraSelected.length === 0) {
-    const m = state.selectedObject;
-    if (!m.geometry.boundingBox) m.geometry.computeBoundingBox();
-    const bb = m.geometry.boundingBox;
-    const axis = transformControls.axis; // 'X','Y','Z','XY','XZ','YZ','XYZ' etc.
-    if (axis) {
-      const center = bb.getCenter(new THREE.Vector3());
-      const localAnchor = center.clone();
-      if (axis.includes('X')) localAnchor.x = state.scaleSides.x === 'pos' ? bb.min.x : bb.max.x;
-      if (axis.includes('Y')) localAnchor.y = state.scaleSides.y === 'pos' ? bb.min.y : bb.max.y;
-      if (axis.includes('Z')) localAnchor.z = state.scaleSides.z === 'pos' ? bb.min.z : bb.max.z;
-
-      const beforeM = new THREE.Matrix4().compose(transformBefore.pos, transformBefore.quat, transformBefore.sca);
-      const afterM = new THREE.Matrix4().compose(m.position, m.quaternion, m.scale);
-      const worldBefore = localAnchor.clone().applyMatrix4(beforeM);
-      const worldAfter = localAnchor.clone().applyMatrix4(afterM);
-      m.position.add(worldBefore.sub(worldAfter));
+  // Group gizmo: transform all objects from the center pivot helper
+  if (_isGroupGizmo && _allTransformBefore.length) {
+    if (state.transformMode === 'rotate') {
+      const deltaQ = _groupPivotHelper.quaternion.clone().multiply(_helperQuatBefore.clone().invert());
+      for (let i = 0; i < _allTransformBefore.length; i++) {
+        const entry = _allTransformBefore[i];
+        const off = _allOffsetsBefore[i];
+        if (!off) continue;
+        entry.mesh.position.copy(off).applyQuaternion(deltaQ).add(_helperPosBefore);
+        entry.mesh.quaternion.copy(deltaQ).multiply(entry.trs.quat);
+      }
+    } else if (state.transformMode === 'scale') {
+      let sx = _helperScaleBefore.x !== 0 ? (_groupPivotHelper.scale.x / _helperScaleBefore.x) : 1;
+      let sy = _helperScaleBefore.y !== 0 ? (_groupPivotHelper.scale.y / _helperScaleBefore.y) : 1;
+      let sz = _helperScaleBefore.z !== 0 ? (_groupPivotHelper.scale.z / _helperScaleBefore.z) : 1;
+      // Shift = uniform scale: use the axis with the largest change
+      if (editKeys.has('ShiftLeft') || editKeys.has('ShiftRight')) {
+        const u = [sx, sy, sz].reduce((a, b) => Math.abs(a - 1) >= Math.abs(b - 1) ? a : b, 1);
+        sx = sy = sz = u;
+        _groupPivotHelper.scale.set(_helperScaleBefore.x * u, _helperScaleBefore.y * u, _helperScaleBefore.z * u);
+      }
+      for (const entry of _allTransformBefore) {
+        entry.mesh.position.set(
+          _helperPosBefore.x + (entry.trs.pos.x - _helperPosBefore.x) * sx,
+          _helperPosBefore.y + (entry.trs.pos.y - _helperPosBefore.y) * sy,
+          _helperPosBefore.z + (entry.trs.pos.z - _helperPosBefore.z) * sz,
+        );
+        entry.mesh.scale.set(entry.trs.sca.x * sx, entry.trs.sca.y * sy, entry.trs.sca.z * sz);
+      }
+    } else {
+      const delta = _groupPivotHelper.position.clone().sub(_helperPosBefore);
+      for (const entry of _allTransformBefore) {
+        entry.mesh.position.copy(entry.trs.pos).add(delta);
+      }
     }
+    selBox.setFromObject(state.selectedObject);
+    rebuildExtraBoxes();
+    refreshProps();
+    refreshStatus();
+    return;
   }
 
   selBox.setFromObject(state.selectedObject);
 
-  // Apply delta to extra selected objects
+  // Apply delta to extra selected objects (non-group-gizmo fallback)
   if (state.extraSelected.length > 0 && transformBefore) {
     if (state.transformMode === 'rotate') {
       // Rotate the whole selection as one rigid block around group pivot.
@@ -7861,14 +10224,17 @@ transformControls.addEventListener('objectChange', () => {
       }
     } else if (state.transformMode === 'scale') {
       // Scale the whole selection like one block using the rendered bounds.
-      const sx = _primaryScaleBefore.x !== 0 ? (state.selectedObject.scale.x / _primaryScaleBefore.x) : 1;
-      const sy = _primaryScaleBefore.y !== 0 ? (state.selectedObject.scale.y / _primaryScaleBefore.y) : 1;
-      const sz = _primaryScaleBefore.z !== 0 ? (state.selectedObject.scale.z / _primaryScaleBefore.z) : 1;
+      let sx = _primaryScaleBefore.x !== 0 ? (state.selectedObject.scale.x / _primaryScaleBefore.x) : 1;
+      let sy = _primaryScaleBefore.y !== 0 ? (state.selectedObject.scale.y / _primaryScaleBefore.y) : 1;
+      let sz = _primaryScaleBefore.z !== 0 ? (state.selectedObject.scale.z / _primaryScaleBefore.z) : 1;
+      // Shift = uniform scale: use the axis with the largest change
+      if (editKeys.has('ShiftLeft') || editKeys.has('ShiftRight')) {
+        const u = [sx, sy, sz].reduce((a, b) => Math.abs(a - 1) >= Math.abs(b - 1) ? a : b, 1);
+        sx = sy = sz = u;
+        state.selectedObject.scale.set(_primaryScaleBefore.x * u, _primaryScaleBefore.y * u, _primaryScaleBefore.z * u);
+      }
       const axis = transformControls.axis || 'XYZ';
       const pivot = _groupBoundsBefore.getCenter(new THREE.Vector3());
-      if (axis.includes('X')) pivot.x = state.scaleSides.x === 'pos' ? _groupBoundsBefore.min.x : _groupBoundsBefore.max.x;
-      if (axis.includes('Y')) pivot.y = state.scaleSides.y === 'pos' ? _groupBoundsBefore.min.y : _groupBoundsBefore.max.y;
-      if (axis.includes('Z')) pivot.z = state.scaleSides.z === 'pos' ? _groupBoundsBefore.min.z : _groupBoundsBefore.max.z;
 
       const scaleSelectedFromPivot = (mesh, before) => {
         if (!before) return;
@@ -8053,12 +10419,20 @@ function selectObject(obj) {
   }
 
   if (state.selectedObject) unhighlight(state.selectedObject);
+  // Clean up camera helpers from previous selection
+  _removeCameraFrustumHelper();
+  _removeCameraLookAtHelper();
+  _clearCameraPathPreview();
+  _removeCameraPip();
+  stopCameraAnimationPreview();
   state.selectedObject = obj;
+  _isGroupGizmo = false;
   if (obj) {
     highlight(obj);
     selBox.setFromObject(obj); selBox.visible = true;
     transformControls.attach(obj); transformControls.visible = true;
     refreshProps();
+    if (!state.isPlaytest && state.autoSwapSidebar !== false) setTopMenu('block');
   } else {
     selBox.visible = false;
     transformControls.detach(); transformControls.visible = false;
@@ -8068,6 +10442,7 @@ function selectObject(obj) {
   refreshSelectedPathPreview();
   refreshStatus();
   if (typeof refreshObjLib === 'function') refreshObjLib();
+  if (typeof refreshOutliner === 'function') refreshOutliner();
 }
 
 function selectObjects(meshes) {
@@ -8087,8 +10462,10 @@ function selectObjects(meshes) {
   }
 
   rebuildExtraBoxes();
+  _attachGroupGizmo();
   refreshProps();
   refreshStatus();
+  if (typeof refreshOutliner === 'function') refreshOutliner();
 }
 
 function selectAllObjects() {
@@ -8109,6 +10486,7 @@ function toggleMultiSelect(obj) {
     if (extraSelBoxes[idx]) extraSelBoxes[idx].visible = false;
     // Rebuild extra box visuals
     rebuildExtraBoxes();
+    _attachGroupGizmo();
     refreshProps();
     refreshStatus();
     return;
@@ -8119,6 +10497,7 @@ function toggleMultiSelect(obj) {
   state.extraSelected.push(obj);
   highlight(obj);
   rebuildExtraBoxes();
+  _attachGroupGizmo();
   refreshProps();
   refreshStatus();
 }
@@ -8174,6 +10553,7 @@ function selectEditorGroup(obj) {
     highlight(m);
   }
   rebuildExtraBoxes();
+  _attachGroupGizmo();
 }
 
 function groupSelected() {
@@ -8193,6 +10573,189 @@ function ungroupSelected() {
   for (const e of entries) delete e.mesh.userData.editorGroupId;
   pushUndo({ type: 'editor-group', entries });
   refreshProps();
+}
+
+// ─── Merge / Unmerge Selected ────────────────────────────────────────────────
+const _MERGE_SKIP_TYPES = new Set(['light','spawn','checkpoint','trigger','keypad','pivot','joint','skeleton','teleport','npc','camera','screen','text','text3d']);
+
+function mergeSelectedObjects() {
+  const all = getAllSelected();
+  const mergeable = all.filter(m => m.isMesh && m.geometry && !_MERGE_SKIP_TYPES.has(m.userData.type));
+  if (mergeable.length < 2) return;
+
+  // Serialize originals so we can unmerge later
+  const origSerialized = mergeable.map(m => serializeSingleObject(m));
+
+  // Collect total vertex count (work with non-indexed geometry)
+  let totalVerts = 0;
+  const converted = [];
+  for (const m of mergeable) {
+    let geo = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone();
+    // Bake world transform into vertex positions
+    m.updateMatrixWorld(true);
+    geo.applyMatrix4(m.matrixWorld);
+    if (!geo.attributes.normal) geo.computeVertexNormals();
+    converted.push({ geo, color: m.material?.color ? m.material.color.clone() : new THREE.Color(0x888888) });
+    totalVerts += geo.attributes.position.count;
+  }
+
+  // Build merged arrays
+  const positions = new Float32Array(totalVerts * 3);
+  const normals   = new Float32Array(totalVerts * 3);
+  const colors    = new Float32Array(totalVerts * 3);
+  let offset = 0;
+  for (const { geo, color } of converted) {
+    const pos = geo.attributes.position;
+    const nrm = geo.attributes.normal;
+    const count = pos.count;
+    positions.set(pos.array, offset * 3);
+    if (nrm) normals.set(nrm.array, offset * 3);
+    // Fill vertex colors from the original material color
+    for (let i = 0; i < count; i++) {
+      colors[(offset + i) * 3]     = color.r;
+      colors[(offset + i) * 3 + 1] = color.g;
+      colors[(offset + i) * 3 + 2] = color.b;
+    }
+    offset += count;
+    geo.dispose();
+  }
+
+  const mergedGeo = new THREE.BufferGeometry();
+  mergedGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  mergedGeo.setAttribute('normal',   new THREE.BufferAttribute(normals, 3));
+  mergedGeo.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+  mergedGeo.computeBoundingBox();
+  mergedGeo.computeBoundingSphere();
+  // Center geometry at bounding-box centroid so the transform gizmo appears
+  // at the visual center of the merged mesh, not at the world origin.
+  const mergedCenter = new THREE.Vector3();
+  mergedGeo.boundingBox.getCenter(mergedCenter);
+  mergedGeo.translate(-mergedCenter.x, -mergedCenter.y, -mergedCenter.z);
+  mergedGeo.computeBoundingBox();
+  mergedGeo.computeBoundingSphere();
+
+  const mergedMat = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.7,
+    metalness: 0.1,
+  });
+  const mergedMesh = new THREE.Mesh(mergedGeo, mergedMat);
+  mergedMesh.castShadow = true;
+  mergedMesh.receiveShadow = true;
+  mergedMesh.userData.type = 'cube'; // treat as a generic mesh
+  mergedMesh.position.copy(mergedCenter);
+  mergedMesh.userData.solid = true;
+  mergedMesh.userData.collisionMode = 'aabb';
+  mergedMesh.userData.hitboxConfig = createDefaultHitboxConfig();
+  mergedMesh.userData.solidness = 1;
+  mergedMesh.userData._baseMaterialTransparent = false;
+  mergedMesh.userData.opacity = 1;
+  mergedMesh.userData.traction = false;
+  mergedMesh.userData.groups = ['default'];
+  mergedMesh.userData.group = 'default';
+  mergedMesh.userData.world = activeWorldId;
+  mergedMesh.userData.movementPath = createDefaultMovementPathConfig();
+  mergedMesh.userData.switchConfig = createDefaultSwitchConfig();
+  mergedMesh.userData._hasCustomGeometry = true;
+  // Store originals for unmerge
+  mergedMesh.userData._mergedOriginals = origSerialized;
+  mergedMesh.userData.label = `Merged (${mergeable.length})`;
+
+  // Build undo: remove originals + add merged
+  const ops = [];
+  selectObject(null);
+  for (const m of mergeable) {
+    removeFromScene(m);
+    ops.push({ type: 'delete', mesh: m });
+  }
+  addToScene(mergedMesh);
+  ops.push({ type: 'add', mesh: mergedMesh });
+  pushUndo({ type: 'compound', ops });
+  selectObject(mergedMesh);
+  refreshStatus();
+}
+
+function unmergeSelectedObject() {
+  const obj = state.selectedObject;
+  if (!obj || !obj.userData._mergedOriginals) return;
+
+  const origData = obj.userData._mergedOriginals;
+  const ops = [];
+  selectObject(null);
+  removeFromScene(obj);
+  ops.push({ type: 'delete', mesh: obj });
+
+  const restored = [];
+  for (const d of origData) {
+    const mesh = deserializeObject(d);
+    if (mesh) {
+      addToScene(mesh);
+      ops.push({ type: 'add', mesh });
+      restored.push(mesh);
+    }
+  }
+  pushUndo({ type: 'compound', ops });
+  if (restored.length) selectObjects(restored);
+  refreshStatus();
+}
+
+// ─── Auto-Batch (Instance Duplicates) ────────────────────────────────────────
+let _batchedInstances = [];  // track batched groups for unbatching
+
+function autoBatchScene() {
+  // Group scene objects by a strict signature so named groups and shapes are preserved.
+  const groups = new Map();
+  for (const m of sceneObjects) {
+    if (_MERGE_SKIP_TYPES.has(m.userData.type)) continue;
+    if (!m.isMesh || !m.geometry) continue;
+    if (m.userData._isBatchInstance) continue; // already batched
+    // Erased / custom-cut geometry must stay unique so holes remain visible.
+    if (m.userData._hasCustomGeometry || m.userData.collisionMode === 'geometry') continue;
+    const key = _meshBatchSignature(m);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(m);
+  }
+
+  let batchedCount = 0;
+  for (const [key, meshes] of groups) {
+    if (meshes.length < 5) continue; // not worth batching small groups
+    const batchGroupId = meshes[0].userData.batchGroupId || _nextBatchId();
+    batchedCount += _batchMeshSet(meshes, batchGroupId, key);
+  }
+
+  if (typeof refreshObjLib === 'function') refreshObjLib();
+  if (typeof refreshOutliner === 'function') refreshOutliner();
+  refreshStatus();
+  return batchedCount;
+}
+
+function unbatchAll() {
+  let restoredCount = 0;
+  for (const batch of _batchedInstances) {
+    const idx = sceneObjects.indexOf(batch.instancedMesh);
+    if (idx >= 0) sceneObjects.splice(idx, 1);
+    scene.remove(batch.instancedMesh);
+    batch.instancedMesh.dispose();
+    for (const m of batch.originals) {
+      delete m.userData.batchGroupId;
+      sceneObjects.push(m);
+      scene.add(m);
+      restoredCount++;
+    }
+  }
+  _batchedInstances.length = 0;
+  if (typeof refreshObjLib === 'function') refreshObjLib();
+  if (typeof refreshOutliner === 'function') refreshOutliner();
+  refreshStatus();
+  return restoredCount;
+}
+
+// ─── Static Object Flag ─────────────────────────────────────────────────────
+function setObjectStatic(mesh, isStatic) {
+  if (!mesh) return;
+  mesh.userData._isStatic = isStatic;
+  mesh.matrixAutoUpdate = !isStatic;
+  if (isStatic) mesh.updateMatrix();
 }
 
 function highlight(mesh) {
@@ -8261,7 +10824,9 @@ function addToScene(mesh) {
   if (!mesh.userData._placedOrder) mesh.userData._placedOrder = _nextPlacedOrder++;
   sceneObjects.push(mesh);
   scene.add(mesh);
+  markSpatialDirty();
   if (typeof refreshObjLib === 'function') refreshObjLib();
+  if (typeof refreshOutliner === 'function') refreshOutliner();
   markRestoreDirty();
 }
 function removeFromScene(mesh) {
@@ -8269,7 +10834,9 @@ function removeFromScene(mesh) {
   if (i >= 0) sceneObjects.splice(i, 1);
   if (state.selectedObject === mesh) selectObject(null);
   scene.remove(mesh);
+  markSpatialDirty();
   if (typeof refreshObjLib === 'function') refreshObjLib();
+  if (typeof refreshOutliner === 'function') refreshOutliner();
   markRestoreDirty();
 }
 
@@ -8288,6 +10855,12 @@ function applyAction(a) {
   else if (a.type === 'transform') {
     applyTRS(a.mesh, a.after);
     if (state.selectedObject === a.mesh) { selBox.setFromObject(a.mesh); transformControls.attach(a.mesh); }
+  }
+  else if (a.type === 'multi-transform') {
+    for (const ch of a.changes) {
+      applyTRS(ch.mesh, ch.after);
+      if (state.selectedObject === ch.mesh) { selBox.setFromObject(ch.mesh); transformControls.attach(ch.mesh); }
+    }
   }
   else if (a.type === 'light-intensity') {
     setMeshLightIntensity(a.mesh, a.after);
@@ -8336,9 +10909,28 @@ function applyAction(a) {
     setMeshGeometry(a.mesh, a.after.clone());
     if (state.selectedObject === a.mesh) refreshProps();
   }
-  else if (a.type === 'shape') {
-    a.mesh.userData.shapeParams = normalizeShapeParams(a.mesh.userData.type, a.afterParams);
+  else if (a.type === 'face-paint') {
     setMeshGeometry(a.mesh, a.afterGeo.clone());
+    a.mesh.material.color.setHex(a.afterMatColor);
+    a.mesh.material.vertexColors = !!(a.afterGeo.attributes.color);
+    a.mesh.material.needsUpdate = true;
+    a.mesh.userData._hasCustomGeometry = true;
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'shape') {
+    const eType = typeof getEffectiveShapeType === 'function' ? getEffectiveShapeType(a.mesh) : a.mesh.userData.type;
+    a.mesh.userData.shapeParams = normalizeShapeParams(eType, a.afterParams);
+    setMeshGeometry(a.mesh, a.afterGeo.clone());
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'shapeTypeChange') {
+    if (a.afterShapeType) a.mesh.userData.shapeType = a.afterShapeType; else delete a.mesh.userData.shapeType;
+    a.mesh.userData.shapeParams = normalizeShapeParams(typeof getEffectiveShapeType === 'function' ? getEffectiveShapeType(a.mesh) : a.mesh.userData.type, a.afterParams);
+    setMeshGeometry(a.mesh, a.afterGeo.clone());
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'visibleInPlay') {
+    a.mesh.userData.visibleInPlay = a.after;
     if (state.selectedObject === a.mesh) refreshProps();
   }
   else if (a.type === 'traction') {
@@ -8371,6 +10963,12 @@ function applyInverse(a) {
   else if (a.type === 'transform') {
     applyTRS(a.mesh, a.before);
     if (state.selectedObject === a.mesh) { selBox.setFromObject(a.mesh); transformControls.attach(a.mesh); }
+  }
+  else if (a.type === 'multi-transform') {
+    for (const ch of a.changes) {
+      applyTRS(ch.mesh, ch.before);
+      if (state.selectedObject === ch.mesh) { selBox.setFromObject(ch.mesh); transformControls.attach(ch.mesh); }
+    }
   }
   else if (a.type === 'light-intensity') {
     setMeshLightIntensity(a.mesh, a.before);
@@ -8419,9 +11017,31 @@ function applyInverse(a) {
     setMeshGeometry(a.mesh, a.before.clone());
     if (state.selectedObject === a.mesh) refreshProps();
   }
+  else if (a.type === 'face-paint') {
+    if (a.beforeGeo) {
+      setMeshGeometry(a.mesh, a.beforeGeo.clone());
+      a.mesh.userData._hasCustomGeometry = a.hadVertexColors || !!(a.beforeGeo.attributes.color);
+    }
+    a.mesh.material.color.setHex(a.beforeMatColor);
+    a.mesh.material.vertexColors = a.hadVertexColors;
+    a.mesh.material.needsUpdate = true;
+    if (!a.hadVertexColors && a.mesh.geometry) a.mesh.geometry.deleteAttribute('color');
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
   else if (a.type === 'shape') {
-    a.mesh.userData.shapeParams = normalizeShapeParams(a.mesh.userData.type, a.beforeParams);
+    const eType = typeof getEffectiveShapeType === 'function' ? getEffectiveShapeType(a.mesh) : a.mesh.userData.type;
+    a.mesh.userData.shapeParams = normalizeShapeParams(eType, a.beforeParams);
     setMeshGeometry(a.mesh, a.beforeGeo.clone());
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'shapeTypeChange') {
+    if (a.beforeShapeType) a.mesh.userData.shapeType = a.beforeShapeType; else delete a.mesh.userData.shapeType;
+    a.mesh.userData.shapeParams = normalizeShapeParams(typeof getEffectiveShapeType === 'function' ? getEffectiveShapeType(a.mesh) : a.mesh.userData.type, a.beforeParams);
+    setMeshGeometry(a.mesh, a.beforeGeo.clone());
+    if (state.selectedObject === a.mesh) refreshProps();
+  }
+  else if (a.type === 'visibleInPlay') {
+    a.mesh.userData.visibleInPlay = a.before;
     if (state.selectedObject === a.mesh) refreshProps();
   }
   else if (a.type === 'traction') {
@@ -8526,6 +11146,7 @@ function ensureGhost(type) {
   }
   if (state.cloneScale) ghost.scale.copy(state.cloneScale);
   else ghost.scale.set(1, 1, 1);
+  ghost.rotation.y = state.placeRotationY;
 }
 function removeGhost() {
   if (ghost) {
@@ -8643,6 +11264,7 @@ function placeObject(pos) {
     opacity: state.placeOpacity,
   });
   mesh.position.copy(pos);
+  if (state.placeRotationY) mesh.rotation.y = state.placeRotationY;
   if (state.cloneScale) mesh.scale.copy(state.cloneScale);
   addToScene(mesh);
   pushUndo({ type: 'add', mesh });
@@ -8655,11 +11277,99 @@ function paintMesh(mesh, colorHex) {
   if (mesh.userData.originalColor === undefined) {
     mesh.userData.originalColor = mesh.material.color.getHex();
   }
+  // Clear any face-paint vertex colors when repainting whole object
+  if (mesh.material.vertexColors && mesh.geometry) {
+    mesh.geometry.deleteAttribute('color');
+    mesh.material.vertexColors = false;
+    mesh.material.needsUpdate = true;
+  }
   const before = mesh.material.color.getHex();
   const after = colorHex;
   if (before === after) return;
   setMeshColor(mesh, after);
   pushUndo({ type: 'color', mesh, before, after });
+}
+
+/**
+ * Paint a single logical face (all co-normal triangles) of mesh using vertex colors.
+ * Unpainted faces keep their vertex color as the object's base material color.
+ */
+function paintMeshFace(mesh, hit, colorHex) {
+  if (!mesh?.geometry || !hit?.face) return;
+
+  // Clone geometry the first time face-paint is applied so we don't alias shared geometries
+  if (!mesh.userData._hasCustomGeometry) {
+    mesh.geometry = mesh.geometry.clone();
+  }
+  const geo = mesh.geometry;
+  const posAttr = geo.attributes.position;
+  if (!posAttr) return;
+
+  const beforeGeo = geo.clone();
+  const hadVertexColors = !!mesh.material.vertexColors;
+  const beforeMatColor = mesh.material.color.getHex();
+
+  // First time we use vertex colors: initialise all vertex colors to the current
+  // base material color (so unpainted faces still look the same) and whiten the
+  // material color so vertex colors become the sole source of truth.
+  if (!geo.attributes.color) {
+    const count = posAttr.count;
+    const colors = new Float32Array(count * 3);
+    const br = ((beforeMatColor >> 16) & 0xff) / 255;
+    const bg = ((beforeMatColor >> 8) & 0xff) / 255;
+    const bb = (beforeMatColor & 0xff) / 255;
+    for (let i = 0; i < count; i++) {
+      colors[i * 3]     = br;
+      colors[i * 3 + 1] = bg;
+      colors[i * 3 + 2] = bb;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    mesh.material.color.setHex(0xffffff);
+  }
+
+  const colorAttr = geo.attributes.color;
+  const indexAttr = geo.index;
+  const r = ((colorHex >> 16) & 0xff) / 255;
+  const g = ((colorHex >> 8) & 0xff) / 255;
+  const b = (colorHex & 0xff) / 255;
+
+  // hit.face.normal is in local object space – compare against each triangle's own normal
+  const targetNormal = hit.face.normal.clone().normalize();
+  const triCount = indexAttr ? indexAttr.count / 3 : posAttr.count / 3;
+  const _p0 = new THREE.Vector3(), _p1 = new THREE.Vector3(), _p2 = new THREE.Vector3();
+  const _e1 = new THREE.Vector3(), _e2 = new THREE.Vector3();
+  const triNormal = new THREE.Vector3();
+  const THRESHOLD = 0.9998; // cos(~1.1°) — catches hard-edge faces cleanly
+
+  for (let t = 0; t < triCount; t++) {
+    let vi0, vi1, vi2;
+    if (indexAttr) {
+      vi0 = indexAttr.getX(t * 3);
+      vi1 = indexAttr.getX(t * 3 + 1);
+      vi2 = indexAttr.getX(t * 3 + 2);
+    } else {
+      vi0 = t * 3; vi1 = t * 3 + 1; vi2 = t * 3 + 2;
+    }
+    _p0.fromBufferAttribute(posAttr, vi0);
+    _p1.fromBufferAttribute(posAttr, vi1);
+    _p2.fromBufferAttribute(posAttr, vi2);
+    _e1.subVectors(_p1, _p0);
+    _e2.subVectors(_p2, _p0);
+    triNormal.crossVectors(_e1, _e2).normalize();
+    if (triNormal.dot(targetNormal) > THRESHOLD) {
+      colorAttr.setXYZ(vi0, r, g, b);
+      colorAttr.setXYZ(vi1, r, g, b);
+      colorAttr.setXYZ(vi2, r, g, b);
+    }
+  }
+  colorAttr.needsUpdate = true;
+  mesh.material.vertexColors = true;
+  mesh.material.needsUpdate = true;
+  mesh.userData._hasCustomGeometry = true;
+
+  const afterGeo = geo.clone();
+  const afterMatColor = mesh.material.color.getHex();
+  pushUndo({ type: 'face-paint', mesh, beforeGeo, afterGeo, hadVertexColors, beforeMatColor, afterMatColor });
 }
 
 /** Flood-fill paint: paint all touching objects with the same color. */
@@ -8889,6 +11599,9 @@ function saveSelectionAsCustomObject(name) {
     name: templateName,
     objects,
     color: all[0].material?.color ? all[0].material.color.getHex() : 0x888888,
+    type: 'native',
+    dateAdded: Date.now(),
+    tags: [],
   };
   customObjectTemplates.push(template);
   refreshCustomObjectUI();
@@ -8931,20 +11644,49 @@ function deleteCustomTemplate(templateId) {
 }
 
 function serializeCustomObjectTemplates() {
-  return customObjectTemplates.map(t => ({ ...t, objects: t.objects.map(o => ({ ...o })) }));
+  return customObjectTemplates.map(t => {
+    const base = { ...t, objects: t.objects.map(o => ({ ...o })) };
+    // For imported models, include geometry/material data but skip non-serializable fields
+    if (t.type === 'imported') {
+      base._importedGeometries = t._importedGeometries;
+      base._importedMaterials = t._importedMaterials;
+    }
+    // Remove runtime-only fields
+    delete base._originalArrayBuffer;
+    return base;
+  });
 }
 
 function loadCustomObjectTemplates(arr) {
   customObjectTemplates.length = 0;
   if (!Array.isArray(arr)) return;
   for (const t of arr) {
-    customObjectTemplates.push({
+    const entry = {
       id: t.id || 'ct_' + (_nextCustomTemplateId++),
       name: t.name || 'Custom',
       objects: Array.isArray(t.objects) ? t.objects : [],
       color: t.color ?? 0x888888,
-    });
-    const numId = parseInt(String(t.id).replace('ct_', ''), 10);
+      type: t.type || 'native',
+      dateAdded: t.dateAdded || 0,
+      tags: Array.isArray(t.tags) ? t.tags : [],
+      triangleCount: t.triangleCount || 0,
+    };
+    // For imported models, restore additional fields
+    if (t.type === 'imported') {
+      entry.isImported = true;
+      entry.importedModelId = t.importedModelId || t.id;
+      entry.meshCount = t.meshCount || 0;
+      entry._importedGeometries = t._importedGeometries || [];
+      entry._importedMaterials = t._importedMaterials || [];
+      // Attempt to reload model blob from IndexedDB
+      if (entry.importedModelId) {
+        _loadImportedModelBlob(entry.importedModelId).then(blob => {
+          if (blob) _importedModelBlobStore.set(entry.importedModelId, blob);
+        }).catch(() => {});
+      }
+    }
+    customObjectTemplates.push(entry);
+    const numId = parseInt(String(entry.id).replace('ct_', ''), 10);
     if (Number.isFinite(numId) && numId >= _nextCustomTemplateId) _nextCustomTemplateId = numId + 1;
   }
   refreshCustomObjectUI();
@@ -8954,27 +11696,79 @@ function refreshCustomObjectUI() {
   const container = document.getElementById('custom-objects-list');
   if (!container) return;
   container.innerHTML = '';
-  if (!customObjectTemplates.length) {
-    container.innerHTML = '<div style="font-size:10px;color:var(--muted);padding:4px 8px">No custom objects saved yet.<br>Select objects and click "Save as Custom".</div>';
+
+  // Filter by search
+  const search = (_customObjectSearch || '').trim().toLowerCase();
+  let filtered = customObjectTemplates.filter(t => {
+    if (!search) return true;
+    if (t.name.toLowerCase().includes(search)) return true;
+    if (t.tags?.some(tag => tag.toLowerCase().includes(search))) return true;
+    return false;
+  });
+
+  // Sort
+  const sort = _customObjectSort;
+  filtered.sort((a, b) => {
+    switch (sort) {
+      case 'name-asc': return (a.name || '').localeCompare(b.name || '');
+      case 'name-desc': return (b.name || '').localeCompare(a.name || '');
+      case 'oldest': return (a.dateAdded || 0) - (b.dateAdded || 0);
+      case 'objects': return (b.objects?.length || b.meshCount || 0) - (a.objects?.length || a.meshCount || 0);
+      case 'triangles': return (_countTemplateTriangles(b)) - (_countTemplateTriangles(a));
+      case 'newest': default: return (b.dateAdded || 0) - (a.dateAdded || 0);
+    }
+  });
+
+  if (!filtered.length) {
+    container.innerHTML = customObjectTemplates.length
+      ? '<div style="font-size:10px;color:var(--muted);padding:4px 8px">No matching custom objects.</div>'
+      : '<div style="font-size:10px;color:var(--muted);padding:4px 8px">No custom objects saved yet.<br>Select objects and click "Save as Custom", or import a 3D model.</div>';
     return;
   }
-  for (const t of customObjectTemplates) {
+
+  for (const t of filtered) {
     const div = document.createElement('div');
     div.className = 'custom-tpl-item';
-    div.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 8px;cursor:pointer;border-radius:4px;font-size:11px;background:#111821;border:1px solid #1d2430;margin-bottom:3px;';
+    div.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 8px;cursor:pointer;border-radius:4px;font-size:11px;background:#111821;border:1px solid #1d2430;margin-bottom:3px;flex-wrap:wrap;';
     const colorHex = '#' + (t.color ?? 0x888888).toString(16).padStart(6, '0');
+    const isImported = t.type === 'imported';
+    const triCount = _countTemplateTriangles(t);
+    const countLabel = isImported
+      ? `${t.meshCount || 0} mesh${(t.meshCount || 0) !== 1 ? 'es' : ''}`
+      : `${t.objects.length} obj${t.objects.length !== 1 ? 's' : ''}`;
+    const triLabel = triCount > 0 ? ` \u00b7 ${triCount >= 1000 ? (triCount / 1000).toFixed(1) + 'k' : triCount} tris` : '';
+    const typeIcon = isImported ? '\ud83d\udce6' : '\ud83d\udd27';
+    const warnIcon = triCount >= PERF_CRITICAL_TRIANGLE_THRESHOLD ? ' \u26a0\ufe0f' : (triCount >= PERF_WARN_TRIANGLE_THRESHOLD ? ' \u26a1' : '');
+    const tagHtml = t.tags?.length ? `<div style="width:100%;display:flex;gap:3px;flex-wrap:wrap;margin-top:2px">${t.tags.map(tag => `<span style="font-size:8px;padding:1px 4px;background:#1d2a3a;border-radius:2px;color:#58a6ff">${escapeHtml(tag)}</span>`).join('')}</div>` : '';
+
     div.innerHTML = `
       <span style="display:inline-block;width:18px;height:18px;border-radius:3px;background:${colorHex};flex-shrink:0"></span>
-      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(t.name)} <span style="color:#8b949e">(${t.objects.length})</span></span>
-      <button class="ct-place-btn" title="Place this custom object" style="font-size:10px;padding:1px 5px;cursor:pointer">⊕</button>
-      <button class="ct-del-btn" title="Delete template" style="font-size:10px;padding:1px 5px;cursor:pointer;color:#f85149">✕</button>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${typeIcon} ${escapeHtml(t.name)} <span style="color:#8b949e">(${countLabel}${triLabel})${warnIcon}</span></span>
+      <button class="ct-place-btn" title="Place this object" style="font-size:10px;padding:1px 5px;cursor:pointer">\u2295</button>
+      <button class="ct-tag-btn" title="Edit tags" style="font-size:10px;padding:1px 5px;cursor:pointer">\ud83c\udff7\ufe0f</button>
+      <button class="ct-del-btn" title="Delete template" style="font-size:10px;padding:1px 5px;cursor:pointer;color:#f85149">\u2715</button>
+      ${tagHtml}
     `;
     div.querySelector('.ct-place-btn').addEventListener('click', (ev) => {
       ev.stopPropagation();
-      state._placingCustomTemplate = t.id;
-      state.mode = 'place';
-      if (modeSelect) modeSelect.value = 'place';
-      refreshStatus();
+      if (isImported) {
+        const target = new THREE.Vector3(0, 0, -5).applyQuaternion(editorCam.quaternion).add(editorCam.position);
+        placeImportedTemplate(t.id, target);
+      } else {
+        state._placingCustomTemplate = t.id;
+        state.mode = 'place';
+        if (modeSelect) modeSelect.value = 'place';
+        refreshStatus();
+      }
+    });
+    div.querySelector('.ct-tag-btn').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const currentTags = (t.tags || []).join(', ');
+      const newTags = prompt('Tags (comma-separated):', currentTags);
+      if (newTags === null) return;
+      t.tags = newTags.split(',').map(s => s.trim()).filter(Boolean);
+      refreshCustomObjectUI();
+      markRestoreDirty();
     });
     div.querySelector('.ct-del-btn').addEventListener('click', (ev) => {
       ev.stopPropagation();
@@ -8982,6 +11776,389 @@ function refreshCustomObjectUI() {
     });
     container.appendChild(div);
   }
+}
+// ─── Imported 3D Model Support ───────────────────────────────────────────────
+
+// Count triangles across all geometries in a list of serialized objects
+function _countTemplateTriangles(template) {
+  if (template.triangleCount != null) return template.triangleCount;
+  if (template.type === 'imported' && template._importedGeometries) {
+    let total = 0;
+    for (const g of template._importedGeometries) {
+      total += g.index ? g.index.length / 3 : (g.position ? g.position.length / 9 : 0);
+    }
+    return total;
+  }
+  // For native templates, estimate from object count
+  return template.objects.length * 12; // rough estimate
+}
+
+// Compute scene total triangles from renderer info
+function _getSceneTriangleCount() {
+  return renderer.info.render.triangles || 0;
+}
+
+// Generate a LOD proxy (simplified bounding-box mesh) for an imported model
+function _generateLODProxy(geometries, materials) {
+  const mergedBox = new THREE.Box3();
+  for (const geo of geometries) {
+    geo.computeBoundingBox();
+    mergedBox.union(geo.boundingBox);
+  }
+  const size = new THREE.Vector3();
+  mergedBox.getSize(size);
+  const center = new THREE.Vector3();
+  mergedBox.getCenter(center);
+
+  // Pick proxy shape based on aspect ratio
+  const maxDim = Math.max(size.x, size.y, size.z);
+  const minDim = Math.min(size.x, size.y, size.z);
+  const ratio = minDim / (maxDim || 1);
+
+  let proxyGeo;
+  if (ratio > 0.7) {
+    // Roughly cubic/spherical — use low-poly sphere
+    const radius = maxDim / 2;
+    proxyGeo = new THREE.SphereGeometry(radius, 6, 4);
+  } else {
+    // Elongated — use box
+    proxyGeo = new THREE.BoxGeometry(size.x || 0.1, size.y || 0.1, size.z || 0.1);
+  }
+
+  // Pick dominant color from first material
+  let proxyColor = 0x888888;
+  if (materials.length > 0) {
+    const mat = materials[0];
+    if (mat.color) proxyColor = mat.color.getHex();
+  }
+
+  const proxyMat = new THREE.MeshStandardMaterial({
+    color: proxyColor,
+    roughness: 0.9,
+    transparent: true,
+    opacity: 0.6,
+    wireframe: true,
+  });
+
+  const proxyMesh = new THREE.Mesh(proxyGeo, proxyMat);
+  proxyMesh.position.copy(center);
+  return { mesh: proxyMesh, triangleCount: proxyGeo.index ? proxyGeo.index.count / 3 : 0 };
+}
+
+// Performance warning dialog — returns promise resolving to 'full', 'lod', or 'cancel'
+function _showPerfWarningDialog(templateName, triCount, sceneTriCount) {
+  return new Promise(resolve => {
+    const isCritical = triCount >= PERF_CRITICAL_TRIANGLE_THRESHOLD;
+    const sceneTotalAfter = sceneTriCount + triCount;
+    const sceneExceeded = sceneTotalAfter > PERF_SCENE_WARN_THRESHOLD;
+    const severityColor = isCritical ? '#f85149' : '#d29922';
+    const severityLabel = isCritical ? '⚠️ High Poly Warning' : '⚡ Performance Notice';
+    const modal = document.createElement('div');
+    modal.style.cssText = 'position:fixed;inset:0;z-index:99998;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.6);';
+    modal.innerHTML = `<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:24px 28px;min-width:380px;max-width:460px;box-shadow:0 8px 32px rgba(0,0,0,0.5)">
+      <div style="color:${severityColor};font-size:15px;font-weight:600;margin-bottom:12px">${severityLabel}</div>
+      <div style="color:#e6edf3;font-size:12px;margin-bottom:8px"><b>${escapeHtml(templateName)}</b></div>
+      <div style="color:#8b949e;font-size:11px;margin-bottom:6px">
+        This object has <b style="color:${severityColor}">${triCount.toLocaleString()}</b> triangles.
+        ${isCritical ? '<br>This is very high and may cause significant lag on lower-end devices like Chromebooks.' : '<br>This may impact performance on lower-end devices.'}
+      </div>
+      ${sceneExceeded ? `<div style="color:#d29922;font-size:11px;margin-bottom:6px">⚠ Scene total after placement: <b>${sceneTotalAfter.toLocaleString()}</b> triangles (exceeds ${PERF_SCENE_WARN_THRESHOLD.toLocaleString()} threshold)</div>` : ''}
+      <div style="background:#21262d;border-radius:6px;padding:8px 10px;margin:10px 0;font-size:10px;color:#8b949e">
+        <div style="margin-bottom:4px"><b>Full Detail:</b> Renders the complete model. May cause lag.</div>
+        <div><b>Low Detail (LOD):</b> Renders a simplified shape. Video recording will still capture full detail.</div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end;flex-wrap:wrap">
+        <button data-choice="cancel" style="background:#21262d;color:#e6edf3;border:1px solid #30363d;padding:6px 14px;border-radius:5px;cursor:pointer;font-size:11px">Cancel</button>
+        <button data-choice="lod" style="background:#1a7f37;color:#fff;border:none;padding:6px 14px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600">🔷 Low Detail (LOD)</button>
+        <button data-choice="full" style="background:#1f6feb;color:#fff;border:none;padding:6px 14px;border-radius:5px;cursor:pointer;font-size:11px;font-weight:600">🔶 Full Detail</button>
+      </div>
+    </div>`;
+    document.body.appendChild(modal);
+    modal.querySelectorAll('button[data-choice]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        modal.remove();
+        resolve(btn.dataset.choice);
+      });
+    });
+  });
+}
+
+// Import a GLTF/GLB file and create a custom object template from it
+async function importGLTFModel(file) {
+  if (!file) return;
+  const arrayBuffer = await file.arrayBuffer();
+  const blob = new Blob([arrayBuffer]);
+  const url = URL.createObjectURL(blob);
+
+  let gltf;
+  try {
+    gltf = await new Promise((resolve, reject) => {
+      _gltfLoader.load(url, resolve, undefined, reject);
+    });
+  } catch (err) {
+    alert('Failed to load model: ' + (err.message || err));
+    return;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+
+  // Collect all meshes from the loaded scene
+  const meshes = [];
+  const geometries = [];
+  const materials = [];
+  let totalTriangles = 0;
+  let totalVertices = 0;
+
+  gltf.scene.updateMatrixWorld(true);
+  gltf.scene.traverse(child => {
+    if (child.isMesh && child.geometry) {
+      meshes.push(child);
+      geometries.push(child.geometry);
+      if (child.material) {
+        const mats = Array.isArray(child.material) ? child.material : [child.material];
+        for (const m of mats) {
+          if (!materials.includes(m)) materials.push(m);
+        }
+      }
+      const geo = child.geometry;
+      const triCount = geo.index ? geo.index.count / 3 : geo.attributes.position.count / 3;
+      totalTriangles += triCount;
+      totalVertices += geo.attributes.position.count;
+    }
+  });
+
+  if (!meshes.length) {
+    alert('No meshes found in this model file.');
+    return;
+  }
+
+  // Compute bounding box and normalize scale
+  const bbox = new THREE.Box3().setFromObject(gltf.scene);
+  const bboxSize = new THREE.Vector3();
+  bbox.getSize(bboxSize);
+  const bboxCenter = new THREE.Vector3();
+  bbox.getCenter(bboxCenter);
+
+  const maxDim = Math.max(bboxSize.x, bboxSize.y, bboxSize.z);
+  const targetSize = 2; // target size in world units
+  const scaleFactor = maxDim > 0 ? Math.min(targetSize / maxDim, IMPORTED_MODEL_MAX_SCALE) : 1;
+
+  // Center and scale the scene
+  gltf.scene.position.sub(bboxCenter).multiplyScalar(scaleFactor);
+  gltf.scene.scale.multiplyScalar(scaleFactor);
+  gltf.scene.updateMatrixWorld(true);
+
+  // Serialize geometry data for storage
+  const importedGeometries = [];
+  const importedMaterials = [];
+  for (const mesh of meshes) {
+    const geo = mesh.geometry;
+    const geoData = {
+      position: Array.from(geo.attributes.position.array),
+      index: geo.index ? Array.from(geo.index.array) : null,
+      normal: geo.attributes.normal ? Array.from(geo.attributes.normal.array) : null,
+      uv: geo.attributes.uv ? Array.from(geo.attributes.uv.array) : null,
+      // Store the world matrix so we can reconstruct position/rotation/scale
+      matrix: mesh.matrixWorld.elements.slice(),
+    };
+    importedGeometries.push(geoData);
+
+    // Serialize material
+    const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+    importedMaterials.push({
+      color: mat.color ? mat.color.getHex() : 0x888888,
+      roughness: mat.roughness ?? 0.8,
+      metalness: mat.metalness ?? 0,
+      transparent: mat.transparent || false,
+      opacity: mat.opacity ?? 1,
+    });
+  }
+
+  // Generate LOD proxy
+  const lodProxy = _generateLODProxy(geometries, materials);
+
+  // Determine dominant color
+  const dominantColor = materials.length > 0 && materials[0].color ? materials[0].color.getHex() : 0x888888;
+
+  const templateName = file.name.replace(/\.(glb|gltf|obj)$/i, '') || 'Imported Model';
+  const template = {
+    id: 'ct_' + (_nextCustomTemplateId++),
+    name: templateName,
+    type: 'imported',
+    objects: [],          // not used for imported — we use _importedGeometries
+    color: dominantColor,
+    triangleCount: totalTriangles,
+    vertexCount: totalVertices,
+    meshCount: meshes.length,
+    dateAdded: Date.now(),
+    tags: [],
+    fileSize: arrayBuffer.byteLength,
+    _importedGeometries: importedGeometries,
+    _importedMaterials: importedMaterials,
+    _lodProxyTriangles: lodProxy.triangleCount,
+    _originalArrayBuffer: arrayBuffer,
+    scaleFactor,
+  };
+
+  // Check performance threshold
+  if (totalTriangles >= PERF_WARN_TRIANGLE_THRESHOLD) {
+    const choice = await _showPerfWarningDialog(templateName, totalTriangles, _getSceneTriangleCount());
+    if (choice === 'cancel') return;
+    template._defaultLOD = choice === 'lod';
+  }
+
+  customObjectTemplates.push(template);
+  refreshCustomObjectUI();
+  refreshObjLib();
+  markRestoreDirty();
+  console.log(`[Flame3D] Imported "${templateName}": ${totalTriangles} tris, ${totalVertices} verts, ${meshes.length} meshes`);
+}
+
+// Reconstruct Three.js meshes from a stored imported template
+function _reconstructImportedMeshes(template, useLOD = false) {
+  if (template.type !== 'imported' || !template._importedGeometries) return null;
+
+  const group = new THREE.Group();
+  group.userData._isImportedModel = true;
+  group.userData._templateId = template.id;
+  group.userData._templateName = template.name;
+  group.userData._lodActive = useLOD;
+  group.userData._triangleCount = template.triangleCount;
+
+  if (useLOD) {
+    // Build LOD proxy mesh
+    const allGeos = template._importedGeometries.map(g => {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(g.position, 3));
+      if (g.index) geo.setIndex(g.index);
+      if (g.normal) geo.setAttribute('normal', new THREE.Float32BufferAttribute(g.normal, 3));
+      geo.computeBoundingBox();
+      return geo;
+    });
+    const proxy = _generateLODProxy(allGeos, template._importedMaterials.map(m => {
+      return new THREE.MeshStandardMaterial({ color: m.color });
+    }));
+    group.add(proxy.mesh);
+    group.userData._lodMesh = proxy.mesh;
+    // Dispose temp geometries
+    for (const g of allGeos) g.dispose();
+  } else {
+    // Build full-detail meshes
+    for (let i = 0; i < template._importedGeometries.length; i++) {
+      const gData = template._importedGeometries[i];
+      const mData = template._importedMaterials[i] || { color: 0x888888, roughness: 0.8, metalness: 0 };
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(gData.position), 3));
+      if (gData.index) geo.setIndex(new THREE.BufferAttribute(new Uint32Array(gData.index), 1));
+      if (gData.normal) geo.setAttribute('normal', new THREE.Float32BufferAttribute(new Float32Array(gData.normal), 3));
+      if (gData.uv) geo.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array(gData.uv), 2));
+      if (!gData.normal) geo.computeVertexNormals();
+
+      const mat = new THREE.MeshStandardMaterial({
+        color: mData.color,
+        roughness: mData.roughness,
+        metalness: mData.metalness,
+        transparent: mData.transparent,
+        opacity: mData.opacity,
+      });
+
+      const mesh = new THREE.Mesh(geo, mat);
+      // Apply stored world matrix
+      if (gData.matrix) {
+        const m4 = new THREE.Matrix4().fromArray(gData.matrix);
+        mesh.applyMatrix4(m4);
+      }
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+    }
+  }
+
+  return group;
+}
+
+// Place an imported model template into the scene
+async function placeImportedTemplate(templateId, pos, forceLOD) {
+  const template = customObjectTemplates.find(t => t.id === templateId);
+  if (!template || template.type !== 'imported') return;
+
+  let useLOD = forceLOD ?? template._defaultLOD ?? false;
+
+  // Performance check on placement
+  if (forceLOD === undefined && template.triangleCount >= PERF_WARN_TRIANGLE_THRESHOLD) {
+    const choice = await _showPerfWarningDialog(template.name, template.triangleCount, _getSceneTriangleCount());
+    if (choice === 'cancel') return;
+    useLOD = choice === 'lod';
+  }
+
+  const group = _reconstructImportedMeshes(template, useLOD);
+  if (!group) return;
+
+  // Create a wrapper mesh (invisible box) so it integrates with sceneObjects array
+  const bbox = new THREE.Box3().setFromObject(group);
+  const size = new THREE.Vector3();
+  bbox.getSize(size);
+  const wrapperGeo = new THREE.BoxGeometry(size.x || 0.1, size.y || 0.1, size.z || 0.1);
+  const wrapperMat = new THREE.MeshStandardMaterial({ visible: false, transparent: true, opacity: 0 });
+  const wrapper = new THREE.Mesh(wrapperGeo, wrapperMat);
+  wrapper.position.copy(pos);
+  wrapper.userData.type = 'imported_model';
+  wrapper.userData.label = template.name;
+  wrapper.userData._isImportedModel = true;
+  wrapper.userData._templateId = template.id;
+  wrapper.userData._lodActive = useLOD;
+  wrapper.userData._triangleCount = template.triangleCount;
+  wrapper.userData._importedGroup = group;
+  wrapper.userData._lodOverride = 'auto'; // auto | always-full | always-lod
+  wrapper.castShadow = false;
+  wrapper.receiveShadow = false;
+
+  // Offset group to center on wrapper
+  const center = new THREE.Vector3();
+  bbox.getCenter(center);
+  group.position.sub(center);
+
+  wrapper.add(group);
+  addToScene(wrapper);
+  pushUndo({ type: 'add', mesh: wrapper });
+  refreshStatus();
+  markSpatialDirty();
+  return wrapper;
+}
+
+// Toggle LOD on a placed imported model
+function setImportedMeshLOD(wrapper, useLOD) {
+  if (!wrapper?.userData?._isImportedModel) return;
+  if (wrapper.userData._lodActive === useLOD) return;
+
+  const template = customObjectTemplates.find(t => t.id === wrapper.userData._templateId);
+  if (!template || template.type !== 'imported') return;
+
+  // Remove old group
+  const oldGroup = wrapper.userData._importedGroup;
+  if (oldGroup) {
+    wrapper.remove(oldGroup);
+    oldGroup.traverse(child => {
+      if (child.geometry) child.geometry.dispose();
+      if (child.material) {
+        if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+        else child.material.dispose();
+      }
+    });
+  }
+
+  // Build new group
+  const newGroup = _reconstructImportedMeshes(template, useLOD);
+  if (newGroup) {
+    const bbox = new THREE.Box3().setFromObject(newGroup);
+    const center = new THREE.Vector3();
+    bbox.getCenter(center);
+    newGroup.position.sub(center);
+    wrapper.add(newGroup);
+    wrapper.userData._importedGroup = newGroup;
+  }
+  wrapper.userData._lodActive = useLOD;
 }
 
 // ─── Terrain Sculpting ──────────────────────────────────────────────────────
@@ -9315,45 +12492,52 @@ function applyTexturePaint(mesh, pattern, color1, color2, scale, customImg) {
   mesh.material.map = tex;
   mesh.material.needsUpdate = true;
   mesh.userData._texturePattern = { pattern, color1, color2, scale };
+  mesh.userData.textureConfig = null;
 }
 
 // ─── Save / load ─────────────────────────────────────────────────────────────
 function serializeSettings() {
   return {
     sun: {
-      intensity:   parseFloat(sunIntensityInput.value),
-      time:        parseFloat(sunTimeInput.value),
-      north:       parseFloat(sunNorthInput.value),
-      turbidity:   parseFloat(sunTurbidityInput.value),
-      shadowRange: parseFloat(sunShadowRangeInput.value),
-      dayDuration: parseFloat(sunDayDurationInput.value),
-      dayCycleEnabled: !!(sunDayCycleEnabledInput && sunDayCycleEnabledInput.checked),
-      size: parseFloat(sunSizeInput?.value) || SUN_SIZE_DEFAULT,
+      intensity:     parseFloat(sunIntensityInput?.value)  || SUN_INTENSITY_DEFAULT,
+      time:          parseFloat(sunTimeInput?.value)       || SUN_TIME_DEFAULT,
+      north:         parseFloat(sunNorthInput?.value)      || SUN_NORTH_DEFAULT,
+      turbidity:     parseFloat(sunTurbidityInput?.value)  || SUN_TURBIDITY_DEFAULT,
+      shadowRange:   parseFloat(sunShadowRangeInput?.value) || SUN_SHADOW_RANGE_DEFAULT,
+      dayDuration:   parseFloat(sunDayDurationInput?.value) || SUN_DAY_DURATION_DEFAULT,
+      dayCycleEnabled: sunDayCycleInput?.checked ?? SUN_DAY_CYCLE_DEFAULT,
+      size:          parseFloat(sunSizeInput?.value)       || SUN_SIZE_DEFAULT,
     },
-    skyColor: skyColorInput?.value || SKY_COLOR_DEFAULT,
+    skyColor:        skyColorInput?.value || SKY_COLOR_DEFAULT,
     clouds: {
-      enabled: cloudsEnabledInput ? cloudsEnabledInput.checked : CLOUDS_ENABLED_DEFAULT,
+      enabled:   cloudsEnabledInput?.checked ?? CLOUDS_ENABLED_DEFAULT,
       windSpeed: parseFloat(cloudWindSpeedInput?.value) || CLOUD_WIND_SPEED_DEFAULT,
-      windDir: parseFloat(cloudWindDirInput?.value) || CLOUD_WIND_DIR_DEFAULT,
-      opacity: parseFloat(cloudOpacityInput?.value) ?? CLOUD_OPACITY_DEFAULT,
+      windDir:   parseFloat(cloudWindDirInput?.value)   || CLOUD_WIND_DIR_DEFAULT,
+      opacity:   parseFloat(cloudOpacityInput?.value)   ?? CLOUD_OPACITY_DEFAULT,
     },
     stars: {
-      enabled: starsEnabledInput ? starsEnabledInput.checked : STARS_ENABLED_DEFAULT,
-      count: parseInt(starsCountInput?.value) || STARS_COUNT_DEFAULT,
+      enabled:    starsEnabledInput?.checked ?? STARS_ENABLED_DEFAULT,
+      count:      parseInt(starsCountInput?.value, 10) || STARS_COUNT_DEFAULT,
       brightness: parseFloat(starsBrightnessInput?.value) || STARS_BRIGHTNESS_DEFAULT,
     },
     moon: {
-      enabled: moonEnabledInput ? moonEnabledInput.checked : MOON_ENABLED_DEFAULT,
+      enabled:    moonEnabledInput?.checked ?? MOON_ENABLED_DEFAULT,
       brightness: parseFloat(moonBrightnessInput?.value) || MOON_BRIGHTNESS_DEFAULT,
-      aura: parseFloat(moonAuraInput?.value) ?? MOON_AURA_DEFAULT,
+      aura:       parseFloat(moonAuraInput?.value)       || MOON_AURA_DEFAULT,
     },
+    fog: { ...fogSettings },
     gameRules: { ...gameRules },
     gameRulesVarBinds: { ...gameRulesVarBinds },
-    gridFill: { enabled: gridFillEnabled, color: gridFillColor, texture: gridFillTexture },
+    gridFill: {
+      enabled: gridFillEnabled,
+      color: gridFillColor,
+      texture: gridFillTexture,
+      customImage: gridFillCustomImage,
+      playMaskTerrain: gridPlayMaskTerrain,
+    },
     worldBorder: { enabled: worldBorderEnabled, minX: worldBorderMinX, maxX: worldBorderMaxX, minZ: worldBorderMinZ, maxZ: worldBorderMaxZ },
     worlds: worlds.map(w => ({ ...w })),
     activeWorldId,
-    fog: { ...fogSettings },
     fov: { editor: editorFov, playtest: playtestFov },
     conditionalTriggers: conditionalTriggers.map(ct => ({
       conditionType: ct.conditionType,
@@ -9393,75 +12577,52 @@ function serializeSettings() {
   };
 }
 
-function syncSunInputs() {
-  if (!sunTimeInput.value)        sunTimeInput.value        = SUN_TIME_DEFAULT;
-  if (!sunNorthInput.value)       sunNorthInput.value       = SUN_NORTH_DEFAULT;
-  if (!sunTurbidityInput.value)   sunTurbidityInput.value   = SUN_TURBIDITY_DEFAULT;
-  if (!sunShadowRangeInput.value) sunShadowRangeInput.value = SUN_SHADOW_RANGE_DEFAULT;
-  if (!sunIntensityInput.value)   sunIntensityInput.value   = SUN_INTENSITY_DEFAULT;
-  if (!sunDayDurationInput.value) sunDayDurationInput.value = SUN_DAY_DURATION_DEFAULT;
-}
-
-function applySunUI() {
-  syncSunInputs();
-  updateSunSky();
-  refreshStatus();
-  markRestoreDirty();
-}
-
 function applySceneSettings(settings = {}) {
-  const d = settings.sun ?? settings.mainLight;
-  if (d) {
-    if (d.intensity   !== undefined) sunIntensityInput.value   = d.intensity;
-    if (d.time        !== undefined) sunTimeInput.value        = d.time;
-    if (d.north       !== undefined) sunNorthInput.value       = d.north;
-    if (d.turbidity   !== undefined) sunTurbidityInput.value   = d.turbidity;
-    if (d.shadowRange !== undefined) sunShadowRangeInput.value = d.shadowRange;
-    if (d.dayDuration !== undefined) sunDayDurationInput.value = d.dayDuration;
-    if (d.size !== undefined && sunSizeInput) sunSizeInput.value = d.size;
-    if (sunDayCycleEnabledInput) {
-      if (d.dayCycleEnabled !== undefined) {
-        sunDayCycleEnabledInput.checked = !!d.dayCycleEnabled;
-      } else if (d.dayDuration !== undefined) {
-        sunDayCycleEnabledInput.checked = Number(d.dayDuration) > 0;
-      } else {
-        sunDayCycleEnabledInput.checked = SUN_DAY_CYCLE_ENABLED_DEFAULT;
-      }
-    }
-    if (d.time === undefined && d.elevation !== undefined) {
-      const elev = THREE.MathUtils.clamp(d.elevation, -10, 89);
-      sunTimeInput.value = (12 + elev / 90 * 7).toFixed(1);
-    }
-    if (d.time === undefined && d.azimuth !== undefined) {
-      sunNorthInput.value = Math.round(d.azimuth);
-    }
+  // ─── Restore sky / atmosphere settings ───
+  if (settings.sun) {
+    const s = settings.sun;
+    if (sunIntensityInput)   sunIntensityInput.value   = s.intensity   ?? SUN_INTENSITY_DEFAULT;
+    if (sunTimeInput)        sunTimeInput.value        = s.time        ?? SUN_TIME_DEFAULT;
+    if (sunNorthInput)       sunNorthInput.value       = s.north       ?? SUN_NORTH_DEFAULT;
+    if (sunTurbidityInput)   sunTurbidityInput.value   = s.turbidity   ?? SUN_TURBIDITY_DEFAULT;
+    if (sunShadowRangeInput) sunShadowRangeInput.value = s.shadowRange ?? SUN_SHADOW_RANGE_DEFAULT;
+    if (sunDayDurationInput) sunDayDurationInput.value = s.dayDuration ?? SUN_DAY_DURATION_DEFAULT;
+    if (sunDayCycleInput)    sunDayCycleInput.checked  = s.dayCycleEnabled ?? SUN_DAY_CYCLE_DEFAULT;
+    if (sunSizeInput)        sunSizeInput.value        = s.size        ?? SUN_SIZE_DEFAULT;
+  } else {
+    syncSunInputs();
   }
-  // Sky color
   if (settings.skyColor && skyColorInput) skyColorInput.value = settings.skyColor;
-  // Clouds
   if (settings.clouds) {
-    if (cloudsEnabledInput) cloudsEnabledInput.checked = settings.clouds.enabled !== false;
-    if (cloudWindSpeedInput && settings.clouds.windSpeed !== undefined) cloudWindSpeedInput.value = settings.clouds.windSpeed;
-    if (cloudWindDirInput && settings.clouds.windDir !== undefined) cloudWindDirInput.value = settings.clouds.windDir;
-    if (cloudOpacityInput && settings.clouds.opacity !== undefined) cloudOpacityInput.value = settings.clouds.opacity;
+    const c = settings.clouds;
+    if (cloudsEnabledInput)  cloudsEnabledInput.checked = c.enabled ?? CLOUDS_ENABLED_DEFAULT;
+    if (cloudWindSpeedInput) cloudWindSpeedInput.value  = c.windSpeed ?? CLOUD_WIND_SPEED_DEFAULT;
+    if (cloudWindDirInput)   cloudWindDirInput.value    = c.windDir ?? CLOUD_WIND_DIR_DEFAULT;
+    if (cloudOpacityInput)   cloudOpacityInput.value    = c.opacity ?? CLOUD_OPACITY_DEFAULT;
   }
-  // Stars
   if (settings.stars) {
-    if (starsEnabledInput) starsEnabledInput.checked = settings.stars.enabled !== false;
-    if (starsCountInput && settings.stars.count !== undefined) {
-      starsCountInput.value = settings.stars.count;
-      _buildStars(settings.stars.count);
+    const st = settings.stars;
+    if (starsEnabledInput)    starsEnabledInput.checked  = st.enabled ?? STARS_ENABLED_DEFAULT;
+    if (starsCountInput)      starsCountInput.value      = st.count ?? STARS_COUNT_DEFAULT;
+    if (starsBrightnessInput) starsBrightnessInput.value = st.brightness ?? STARS_BRIGHTNESS_DEFAULT;
+    const newCount = parseInt(starsCountInput?.value, 10) || STARS_COUNT_DEFAULT;
+    if (_starsMesh && _starsMesh.geometry.attributes.position.count !== newCount) {
+      _buildStars(newCount);
     }
-    if (starsBrightnessInput && settings.stars.brightness !== undefined) starsBrightnessInput.value = settings.stars.brightness;
   }
-  // Moon
   if (settings.moon) {
-    if (moonEnabledInput) moonEnabledInput.checked = settings.moon.enabled !== false;
-    if (moonBrightnessInput && settings.moon.brightness !== undefined) moonBrightnessInput.value = settings.moon.brightness;
-    if (moonAuraInput && settings.moon.aura !== undefined) moonAuraInput.value = settings.moon.aura;
+    const mo = settings.moon;
+    if (moonEnabledInput)    moonEnabledInput.checked  = mo.enabled ?? MOON_ENABLED_DEFAULT;
+    if (moonBrightnessInput) moonBrightnessInput.value = mo.brightness ?? MOON_BRIGHTNESS_DEFAULT;
+    if (moonAuraInput)       moonAuraInput.value       = mo.aura ?? MOON_AURA_DEFAULT;
+  }
+  if (settings.fog) {
+    Object.assign(fogSettings, settings.fog);
+    syncFogUI();
+    applyFogSettings();
   }
   updateSunSky();
-  syncSunInputs();
+
   // Restore game rules
   if (settings.gameRules) {
     Object.assign(gameRules, settings.gameRules);
@@ -9478,8 +12639,11 @@ function applySceneSettings(settings = {}) {
     gridFillEnabled = !!settings.gridFill.enabled;
     gridFillColor = settings.gridFill.color ?? 0x1a2636;
     gridFillTexture = settings.gridFill.texture || 'none';
+    gridFillCustomImage = settings.gridFill.customImage || '';
+    if (settings.gridFill.playMaskTerrain != null) gridPlayMaskTerrain = !!settings.gridFill.playMaskTerrain;
     gridFillEnabledInput.checked = gridFillEnabled;
     gridFillColorInput.value = '#' + gridFillColor.toString(16).padStart(6, '0');
+    if (gridPlayMaskTerrainInput) gridPlayMaskTerrainInput.checked = gridPlayMaskTerrain;
     const texSel = document.getElementById('grid-fill-texture');
     if (texSel) texSel.value = gridFillTexture;
     setGridFill(gridFillEnabled, gridFillColor, gridFillTexture);
@@ -9507,18 +12671,6 @@ function applySceneSettings(settings = {}) {
   } else {
     activeWorldId = worlds[0]?.id || 'world_1';
   }
-  // Restore fog
-  if (settings.fog) {
-    fogSettings.enabled = settings.fog.enabled !== false;
-    fogSettings.mode = settings.fog.mode === 'linear' ? 'linear' : 'exp2';
-    fogSettings.color = Number.isFinite(settings.fog.color) ? settings.fog.color : 0x87ceeb;
-    fogSettings.density = Number.isFinite(settings.fog.density) ? settings.fog.density : 0.0008;
-    fogSettings.near = Number.isFinite(settings.fog.near) ? settings.fog.near : 10;
-    fogSettings.far = Number.isFinite(settings.fog.far) ? settings.fog.far : 500;
-    fogSettings.brightness = Number.isFinite(settings.fog.brightness) ? settings.fog.brightness : 1;
-  }
-  applyFogSettings();
-  syncFogUI();
   // Restore FOV
   if (settings.fov) {
     editorFov = THREE.MathUtils.clamp(Number.isFinite(settings.fov.editor) ? settings.fov.editor : 60, 30, 150);
@@ -9604,7 +12756,7 @@ function applySceneSettings(settings = {}) {
 
 function serializeScene() {
   // Serialize current scene objects (active world)
-  const currentObjs = sceneObjects.map(m => {
+  const currentObjs = getSerializableSceneObjects().map(m => {
     const o = {
       type:       m.userData.type,
       position:   m.position.toArray(),
@@ -9617,6 +12769,8 @@ function serializeScene() {
       world:      m.userData.world || 'world_1',
     };
     if (m.userData.hiddenInGame) o.hiddenInGame = true;
+    if (m.userData.shapeType) o.shapeType = m.userData.shapeType;
+    if (m.userData.visibleInPlay !== undefined) o.visibleInPlay = m.userData.visibleInPlay;
     if (m.userData.collisionMode === 'geometry') o.collisionMode = 'geometry';
     const hitboxConfig = normalizeHitboxConfig(m.userData.hitboxConfig);
     if (hitboxConfig.mode !== 'auto' || hitboxConfig.offset.some(v => Math.abs(v) > 0.0001) || hitboxConfig.size.some((v, i) => Math.abs(v - createDefaultHitboxConfig().size[i]) > 0.0001)) {
@@ -9635,6 +12789,7 @@ function serializeScene() {
     if (Array.isArray(m.userData.groups) && m.userData.groups.length) o.groups = [...m.userData.groups];
     if (m.userData.group !== undefined) o.group = m.userData.group;
     if (m.userData.editorGroupId) o.editorGroupId = m.userData.editorGroupId;
+    if (m.userData.batchGroupId) o.batchGroupId = m.userData.batchGroupId;
     if (m.userData.triggerRules) o.triggerRules = { ...m.userData.triggerRules };
     const movementPath = normalizeMovementPathConfig(m.userData.movementPath);
     if (movementPath.enabled || movementPath.checkpoints.length) {
@@ -9664,6 +12819,9 @@ function serializeScene() {
     if (m.userData.type === 'keypad') {
       o.keypadConfig = normalizeKeypadConfig(m.userData.keypadConfig);
     }
+    if (m.userData.type === 'soundzone') {
+      o.soundZoneConfig = normalizeSoundZoneConfig(m.userData.soundZoneConfig);
+    }
     if (m.userData.type === 'joint' && m.userData.jointConfig) {
       o.jointConfig = normalizeJointConfig(m.userData.jointConfig);
     }
@@ -9679,6 +12837,10 @@ function serializeScene() {
     }
     if (m.userData._texturePattern) {
       o.texturePattern = { ...m.userData._texturePattern };
+    }
+    if (m.userData.textureConfig) {
+      const tc = normalizeTextureConfig(m.userData.textureConfig);
+      if (tc) o.textureConfig = tc;
     }
     if (m.userData.textConfig) {
       o.textConfig = normalizeTextConfig(m.userData.textConfig);
@@ -9697,6 +12859,8 @@ function serializeScene() {
     if (m.userData._hasCustomGeometry) {
       o.customGeometry = _serializeBufferGeometry(m.geometry);
     }
+    if (m.userData._mergedOriginals) o.mergedOriginals = m.userData._mergedOriginals;
+    if (m.userData._isStatic) o.isStatic = true;
     return o;
   });
   // Combine with stored objects from other worlds
@@ -9727,6 +12891,7 @@ function deserializeObject(d) {
   const mesh = createMesh(d.type, false, {
     lightIntensity: d.lightIntensity,
     shapeParams: d.shapeParams,
+    shapeType: d.shapeType,
     opacity: d.opacity,
   });
   if (Array.isArray(d.position))  mesh.position.fromArray(d.position);
@@ -9735,6 +12900,7 @@ function deserializeObject(d) {
   if (d.color !== undefined) mesh.material.color.setHex(d.color);
   if (d.solid !== undefined) mesh.userData.solid = d.solid;
   if (d.world) mesh.userData.world = d.world;
+  if (d.visibleInPlay !== undefined) mesh.userData.visibleInPlay = d.visibleInPlay;
   if (d.collisionMode === 'geometry') mesh.userData.collisionMode = 'geometry';
   if (d.hitboxConfig) mesh.userData.hitboxConfig = normalizeHitboxConfig(d.hitboxConfig);
   if (d.solidness !== undefined) mesh.userData.solidness = clampMeshSolidness(parseFloat(d.solidness));
@@ -9748,6 +12914,7 @@ function deserializeObject(d) {
     setMeshGroups(mesh, d.groups ?? d.group);
   }
   if (d.editorGroupId) mesh.userData.editorGroupId = d.editorGroupId;
+  if (d.batchGroupId) mesh.userData.batchGroupId = d.batchGroupId;
   if (d.triggerRules) mesh.userData.triggerRules = { ...d.triggerRules };
   if (d.movementPath) mesh.userData.movementPath = normalizeMovementPathConfig(d.movementPath);
   if (d.checkpointConfig) mesh.userData.checkpointConfig = normalizeCheckpointConfig(d.checkpointConfig);
@@ -9765,6 +12932,7 @@ function deserializeObject(d) {
   if (d.targetMaxHealth !== undefined) mesh.userData.targetMaxHealth = d.targetMaxHealth;
   if (d.switchConfig) mesh.userData.switchConfig = normalizeSwitchConfig(d.switchConfig);
   if (d.keypadConfig && d.type === 'keypad') mesh.userData.keypadConfig = normalizeKeypadConfig(d.keypadConfig);
+  if (d.soundZoneConfig && d.type === 'soundzone') mesh.userData.soundZoneConfig = normalizeSoundZoneConfig(d.soundZoneConfig);
   if (d.jointConfig && d.type === 'joint') mesh.userData.jointConfig = normalizeJointConfig(d.jointConfig);
   if (d.skeletonConfig && d.type === 'skeleton') mesh.userData.skeletonConfig = normalizeSkeletonConfig(d.skeletonConfig);
   if (d.terrainConfig && d.type === 'terrain') {
@@ -9779,6 +12947,10 @@ function deserializeObject(d) {
   }
   if (d.texturePattern) {
     applyTexturePaint(mesh, d.texturePattern.pattern, d.texturePattern.color1, d.texturePattern.color2, d.texturePattern.scale);
+  }
+  if (d.textureConfig) {
+    mesh.userData.textureConfig = normalizeTextureConfig(d.textureConfig);
+    if (mesh.userData.textureConfig) applyTextureConfig(mesh);
   }
   if (d.textConfig && (d.type === 'text' || d.type === 'text3d')) {
     mesh.userData.textConfig = normalizeTextConfig(d.textConfig);
@@ -9800,6 +12972,17 @@ function deserializeObject(d) {
     setMeshGeometry(mesh, restoredGeo);
     mesh.userData._hasCustomGeometry = true;
     mesh.userData.collisionMode = 'geometry';
+    // Enable vertex colors if the geometry has a color attribute (merged meshes)
+    if (restoredGeo.attributes.color && mesh.material) {
+      mesh.material.vertexColors = true;
+      mesh.material.needsUpdate = true;
+    }
+  }
+  if (d.mergedOriginals) {
+    mesh.userData._mergedOriginals = d.mergedOriginals;
+  }
+  if (d.isStatic) {
+    setObjectStatic(mesh, true);
   }
   if (d.lightColor !== undefined && mesh.userData.pointLight) {
     mesh.userData.pointLight.color.setHex(d.lightColor);
@@ -9810,6 +12993,9 @@ function deserializeObject(d) {
   if (d.lightIntensity !== undefined && d.type !== 'light' && !mesh.userData.pointLight) {
     addLightToMesh(mesh, d.lightIntensity, d.lightDistance ?? LIGHT_BLOCK_DISTANCE);
     if (d.lightColor !== undefined) mesh.userData.pointLight.color.setHex(d.lightColor);
+  }
+  if (d.collectibleConfig) {
+    mesh.userData.collectibleConfig = normalizeCollectibleConfig(d.collectibleConfig);
   }
   return mesh;
 }
@@ -9932,6 +13118,7 @@ function loadLevelJSON(json, options = {}) {
   applySceneSettings(parsed.settings);
   // Distribute objects: only active world stays in scene, others go to world stores
   _distributeObjectsToWorlds();
+  rebuildBatchesFromMetadata();
   refreshWorldUI();
   // Migrate old triggerMoveActions → controlFunctions + triggerCalls
   if (!parsed.settings?.controlFunctions) {
@@ -9954,9 +13141,7 @@ function getStoredProjects() {
 
 function setStoredProjects(projects) {
   _storageCache.projects = Array.isArray(projects) ? projects : [];
-  _flushProjects().catch(err => {
-    alert('Failed to persist projects to storage: ' + err.message);
-  });
+  _flushProjects();
 }
 
 function saveEditorSettings() {
@@ -9964,6 +13149,9 @@ function saveEditorSettings() {
     renderDist: quality.renderDist,
     shadows:    quality.shadows,
     lightDist:  quality.lightDist,
+    shadowMapRes: quality.shadowMapRes,
+    resolutionScale: quality.resolutionScale,
+    showStats: quality.showStats,
     snapSize:   state.snapSize,
     placeSides: state.placeSides,
     place2DDepth: state.place2DDepth,
@@ -9971,14 +13159,25 @@ function saveEditorSettings() {
     brushColor: state.brushColor,
     eraserShape: state.eraserShape,
     eraserSize: state.eraserSize,
+    autoSwapSidebar: state.autoSwapSidebar !== false,
+    gridPlayVisible,
+    gridPlaySolid,
+    gridPlayMaskTerrain,
+    gridFillTexture,
+    gridFillCustomImage,
     sidebarWidth: sidebarState.width,
     sidebarCollapsed: sidebarState.collapsed,
     functionsPanelWidth: functionsPanelState.width,
     functionsPanelCollapsed: functionsPanelState.collapsed,
-    activeLibraryPane,
     customBlockSkins: serializeCustomBlockSkins(),
     customSculptSkins: serializeCustomSculptSkins(),
     customObjectTemplates: serializeCustomObjectTemplates(),
+    lodEnabled: quality.lodEnabled !== false,
+    lodDist: quality.lodDist || 80,
+    customObjectSort: _customObjectSort,
+    bottomHeight: bottomPanelState.height,
+    bottomCollapsed: bottomPanelState.collapsed,
+    activeBottomTab: _activeBpPane,
   }));
 }
 
@@ -9999,6 +13198,23 @@ function loadEditorSettings() {
       quality.lightDist = THREE.MathUtils.clamp(parseFloat(s.lightDist) || 60, 10, 200);
       qualityLightDistInput.value = quality.lightDist;
     }
+    if (s.shadowMapRes != null) {
+      applyShadowMapResolution(parseInt(s.shadowMapRes, 10) || 4096);
+      const resEl = document.getElementById('quality-shadow-res');
+      if (resEl) resEl.value = String(quality.shadowMapRes);
+    }
+    if (s.resolutionScale != null) {
+      applyResolutionScale(parseFloat(s.resolutionScale) || Math.min(devicePixelRatio, 2));
+      const scaleEl = document.getElementById('quality-resolution');
+      if (scaleEl) scaleEl.value = String(quality.resolutionScale);
+    }
+    if (s.showStats != null) {
+      quality.showStats = !!s.showStats;
+      const statsEl = document.getElementById('quality-show-stats');
+      if (statsEl) statsEl.checked = quality.showStats;
+      const perfEl = document.getElementById('perf-stats');
+      if (perfEl) perfEl.style.display = quality.showStats ? '' : 'none';
+    }
     if (s.snapSize != null) {
       setSnap(s.snapSize);
       snapSelect.value = String(s.snapSize);
@@ -10009,17 +13225,51 @@ function loadEditorSettings() {
     if (s.brushColor != null) state.brushColor = parseInt(s.brushColor, 10) || state.brushColor;
     if (s.eraserShape) state.eraserShape = String(s.eraserShape);
     if (s.eraserSize != null) state.eraserSize = THREE.MathUtils.clamp(parseFloat(s.eraserSize) || 1, 0.1, 12);
+    if (s.autoSwapSidebar != null) state.autoSwapSidebar = !!s.autoSwapSidebar;
+    if (autoSidebarToolsToggle) autoSidebarToolsToggle.checked = state.autoSwapSidebar !== false;
+    if (s.gridPlayVisible != null) gridPlayVisible = !!s.gridPlayVisible;
+    if (s.gridPlaySolid != null) gridPlaySolid = !!s.gridPlaySolid;
+    if (s.gridPlayMaskTerrain != null) gridPlayMaskTerrain = !!s.gridPlayMaskTerrain;
+    if (gridPlayVisibleInput) gridPlayVisibleInput.checked = gridPlayVisible;
+    if (gridPlaySolidInput) gridPlaySolidInput.checked = gridPlaySolid;
+    if (gridPlayMaskTerrainInput) gridPlayMaskTerrainInput.checked = gridPlayMaskTerrain;
+    if (s.gridFillTexture) gridFillTexture = String(s.gridFillTexture);
+    if (s.gridFillCustomImage != null) gridFillCustomImage = String(s.gridFillCustomImage || '');
+    const gridTexSel = document.getElementById('grid-fill-texture');
+    if (gridTexSel) gridTexSel.value = gridFillTexture;
+    setGridFill(gridFillEnabled, gridFillColor, gridFillTexture);
     if (s.sidebarWidth != null) sidebarState.width = parseFloat(s.sidebarWidth) || sidebarState.width;
     if (s.sidebarCollapsed != null) sidebarState.collapsed = !!s.sidebarCollapsed;
     if (s.functionsPanelWidth != null) functionsPanelState.width = parseFloat(s.functionsPanelWidth) || functionsPanelState.width;
     if (s.functionsPanelCollapsed != null) functionsPanelState.collapsed = !!s.functionsPanelCollapsed;
-    if (s.activeLibraryPane) activeLibraryPane = s.activeLibraryPane === 'audio' ? 'audio' : 'objects';
+    /* activeLibraryPane removed — library now in bottom panel */
     if (s.customBlockSkins && typeof s.customBlockSkins === 'object') {
       setCustomBlockSkinsMap(s.customBlockSkins);
     }
     if (s.customSculptSkins && typeof s.customSculptSkins === 'object') {
       setCustomSculptSkinsMap(s.customSculptSkins);
     }
+    if (s.lodEnabled != null) {
+      quality.lodEnabled = !!s.lodEnabled;
+      const lodEl = document.getElementById('quality-lod-enabled');
+      if (lodEl) lodEl.checked = quality.lodEnabled;
+    }
+    if (s.lodDist != null) {
+      quality.lodDist = THREE.MathUtils.clamp(parseFloat(s.lodDist) || 80, 20, 500);
+      const lodDistEl = document.getElementById('quality-lod-dist');
+      if (lodDistEl) lodDistEl.value = quality.lodDist;
+    }
+    if (s.customObjectSort) {
+      _customObjectSort = s.customObjectSort;
+      const sortEl = document.getElementById('custom-obj-sort');
+      if (sortEl) sortEl.value = _customObjectSort;
+    }
+    if (s.customObjectTemplates) {
+      loadCustomObjectTemplates(s.customObjectTemplates);
+    }
+    if (s.bottomHeight != null) bottomPanelState.height = parseFloat(s.bottomHeight) || 200;
+    if (s.bottomCollapsed != null) bottomPanelState.collapsed = !!s.bottomCollapsed;
+    if (s.activeBottomTab) _activeBpPane = s.activeBottomTab;
   } catch (err) { console.warn('[Settings] Failed to apply scene settings (corrupt data?):', err); }
 }
 
@@ -10093,6 +13343,44 @@ function stopFunctionsPanelResize() {
   applyFunctionsPanelState({ save: true, reflow: true });
 }
 
+const BOTTOM_PANEL_MIN_HEIGHT = 100;
+const BOTTOM_PANEL_MAX_FRACTION = 0.5;
+
+function clampBottomHeight(value) {
+  const maxHeight = Math.max(BOTTOM_PANEL_MIN_HEIGHT, Math.floor(window.innerHeight * BOTTOM_PANEL_MAX_FRACTION));
+  return Math.max(BOTTOM_PANEL_MIN_HEIGHT, Math.min(maxHeight, parseFloat(value) || bottomPanelState.height || 200));
+}
+
+function applyBottomPanelState(options = {}) {
+  const save = options.save !== false;
+  const reflow = options.reflow !== false;
+
+  bottomPanelState.height = clampBottomHeight(bottomPanelState.height);
+  document.documentElement.style.setProperty('--bottomH', `${bottomPanelState.height}px`);
+  document.body.classList.toggle('bottom-collapsed', bottomPanelState.collapsed);
+
+  if (bottomPanelEl) bottomPanelEl.setAttribute('aria-hidden', bottomPanelState.collapsed ? 'true' : 'false');
+  if (bottomToggleBtn) {
+    const collapsed = bottomPanelState.collapsed;
+    bottomToggleBtn.textContent = collapsed ? '▲' : '▼';
+    bottomToggleBtn.title = collapsed ? 'Expand bottom panel' : 'Collapse bottom panel';
+    bottomToggleBtn.setAttribute('aria-label', bottomToggleBtn.title);
+    bottomToggleBtn.setAttribute('aria-pressed', String(collapsed));
+  }
+
+  if (save) saveEditorSettings();
+  if (reflow) onResize();
+}
+
+function stopBottomResize() {
+  if (!bottomPanelState.resizing) return;
+  bottomPanelState.resizing = false;
+  document.body.classList.remove('bottom-resizing');
+  document.body.style.cursor = '';
+  document.body.style.userSelect = '';
+  applyBottomPanelState({ save: true, reflow: true });
+}
+
 function buildLevelPayload() {
   _stashCurrentWorld();
   return JSON.stringify({ version: 2, settings: serializeSettings(), objects: serializeScene() });
@@ -10116,6 +13404,402 @@ function formatProjectDate(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return 'Unknown date';
   return d.toLocaleString();
+}
+
+let _userGuideOverlayEl = null;
+
+function closeUserGuideModal() {
+  if (_userGuideOverlayEl) {
+    _userGuideOverlayEl.remove();
+    _userGuideOverlayEl = null;
+  }
+}
+
+function _buildUserGuideCommandListHtml() {
+  return Object.keys(_commands).sort().map(name => {
+    const cmd = _commands[name] || {};
+    return `
+      <div style="padding:10px 12px;border:1px solid rgba(143,180,215,0.16);border-radius:10px;background:rgba(13,19,27,0.58)">
+        <div style="display:flex;justify-content:space-between;gap:10px;align-items:baseline;flex-wrap:wrap">
+          <div style="font-size:13px;font-weight:700;color:#e6edf3">${escapeHtml(name)}</div>
+          <div style="font-size:10px;color:#8aa0b6">${escapeHtml(cmd.usage || name)}</div>
+        </div>
+        <div style="font-size:11px;color:#9eb1c3;line-height:1.55;margin-top:6px">${escapeHtml(cmd.desc || 'No description yet.')}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function _buildUserGuideSections() {
+  return [
+    {
+      id: 'getting-started',
+      title: 'Getting Started',
+      kicker: 'Editor basics',
+      html: `
+        <p style="margin:0 0 12px;color:#b8c7d6;line-height:1.65">Use Place mode to drop blocks, Select mode to work on existing objects, and Playtest to verify the level from the player view.</p>
+        <div style="display:grid;gap:10px">
+          <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16)"><b style="color:#e6edf3">Navigate</b><div style="color:#9eb1c3;font-size:11px;line-height:1.6;margin-top:4px">Orbit the editor camera, use the grid and world panels to organize space, and press <b>P</b> to jump into playtest.</div></div>
+          <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16)"><b style="color:#e6edf3">Place objects</b><div style="color:#9eb1c3;font-size:11px;line-height:1.6;margin-top:4px">Pick a type from the library, set shape sides or depth when needed, then click in the viewport to place it.</div></div>
+          <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16)"><b style="color:#e6edf3">Save often</b><div style="color:#9eb1c3;font-size:11px;line-height:1.6;margin-top:4px">Use File > Save Project for the main save and File > Save Snapshot when you want restore points while iterating.</div></div>
+        </div>
+      `,
+    },
+    {
+      id: 'objects-transforms',
+      title: 'Objects & Transforms',
+      kicker: 'Selection and editing',
+      html: `
+        <p style="margin:0 0 12px;color:#b8c7d6;line-height:1.65">Selecting an object opens its properties and, when Auto Tools is enabled, switches the left sidebar back to Tools automatically.</p>
+        <div style="display:grid;gap:10px">
+          <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16)"><b style="color:#e6edf3">Multi-select</b><div style="color:#9eb1c3;font-size:11px;line-height:1.6;margin-top:4px">Use Shift+Click to build a selection. Group transforms now undo as one action instead of forcing multiple Undo presses.</div></div>
+          <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16)"><b style="color:#e6edf3">Transform tools</b><div style="color:#9eb1c3;font-size:11px;line-height:1.6;margin-top:4px">Press <b>G</b>, <b>R</b>, or <b>S</b> for move, rotate, and scale. The properties panel exposes exact values and object-specific controls.</div></div>
+          <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16)"><b style="color:#e6edf3">Grouping</b><div style="color:#9eb1c3;font-size:11px;line-height:1.6;margin-top:4px">Use Ctrl+G to group, Ctrl+Shift+G to ungroup, and the outliner or selector tools to target names, groups, and types.</div></div>
+        </div>
+      `,
+    },
+    {
+      id: 'console-commands',
+      title: 'Console Commands',
+      kicker: 'Quick level scripting',
+      html: `
+        <p style="margin:0 0 12px;color:#b8c7d6;line-height:1.65">The console accepts multiple commands separated by semicolons, and the live suggester now fills command names plus supported arguments such as object types, selectors, and common values.</p>
+        <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16);margin-bottom:12px;color:#9eb1c3;font-size:11px;line-height:1.6">
+          Examples: <b style="color:#e6edf3">place cube</b>, <b style="color:#e6edf3">move group:doors (0 2 0)</b>, <b style="color:#e6edf3">help place; count *</b>
+        </div>
+        <div style="display:grid;gap:10px">${_buildUserGuideCommandListHtml()}</div>
+      `,
+    },
+    {
+      id: 'portals',
+      title: 'Portals',
+      kicker: 'Teleport and linked views',
+      html: `
+        <p style="margin:0 0 12px;color:#b8c7d6;line-height:1.65">Portal behavior is configured on teleport objects. Pair portals by label so each teleport knows which destination it should render and send the player toward.</p>
+        <div style="display:grid;gap:10px">
+          <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16)"><b style="color:#e6edf3">Setup</b><div style="color:#9eb1c3;font-size:11px;line-height:1.6;margin-top:4px">Place two teleport blocks, assign matching pair labels, and check playtest to verify the link direction and destination.</div></div>
+          <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16)"><b style="color:#e6edf3">Cross-world travel</b><div style="color:#9eb1c3;font-size:11px;line-height:1.6;margin-top:4px">Teleport blocks can target another world when cross-world travel is enabled in the teleport settings.</div></div>
+        </div>
+      `,
+    },
+    {
+      id: 'terrain-grid',
+      title: 'Terrain & Grid',
+      kicker: 'Ground shaping',
+      html: `
+        <p style="margin:0 0 12px;color:#b8c7d6;line-height:1.65">Grid settings control chunk rendering, floor fill, and world borders. Paint mode also includes terrain sculpt tools for raising, lowering, smoothing, and flattening terrain.</p>
+        <div style="display:grid;gap:10px">
+          <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16)"><b style="color:#e6edf3">Terrain sculpt</b><div style="color:#9eb1c3;font-size:11px;line-height:1.6;margin-top:4px">Switch to Paint mode, enable sculpt, choose a brush, then drag on terrain or empty ground to create and shape terrain blocks.</div></div>
+          <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16)"><b style="color:#e6edf3">Borders</b><div style="color:#9eb1c3;font-size:11px;line-height:1.6;margin-top:4px">Use world border min and max values to keep the player inside the intended play area during testing.</div></div>
+        </div>
+      `,
+    },
+    {
+      id: 'performance',
+      title: 'Performance',
+      kicker: 'Render quality and batching',
+      html: `
+        <p style="margin:0 0 12px;color:#b8c7d6;line-height:1.65">The dedicated Performance panel now holds render distance, shadows, resolution scale, LOD, batching, and diagnostic stats in one place.</p>
+        <div style="display:grid;gap:10px">
+          <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16)"><b style="color:#e6edf3">Batching</b><div style="color:#9eb1c3;font-size:11px;line-height:1.6;margin-top:4px">Use Batch Now to combine repeated meshes into instances and Unbatch All to restore editable originals.</div></div>
+          <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16)"><b style="color:#e6edf3">LOD and distance</b><div style="color:#9eb1c3;font-size:11px;line-height:1.6;margin-top:4px">Reduce render distance, light distance, or resolution first when the editor or playtest drops frames.</div></div>
+        </div>
+      `,
+    },
+    {
+      id: 'play-mode',
+      title: 'Play Mode',
+      kicker: 'Testing the level',
+      html: `
+        <p style="margin:0 0 12px;color:#b8c7d6;line-height:1.65">Play Mode uses the active gamerules, spawn settings, checkpoints, triggers, and runtime objects so you can test the exact behavior of the current world.</p>
+        <div style="display:grid;gap:10px">
+          <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16)"><b style="color:#e6edf3">Start and stop</b><div style="color:#9eb1c3;font-size:11px;line-height:1.6;margin-top:4px">Press <b>P</b> or use the toolbar button to start playtest. Spawn, trigger, pivot, and helper-only objects are hidden automatically.</div></div>
+          <div style="padding:10px 12px;border-radius:10px;background:rgba(13,19,27,0.58);border:1px solid rgba(143,180,215,0.16)"><b style="color:#e6edf3">Player rules</b><div style="color:#9eb1c3;font-size:11px;line-height:1.6;margin-top:4px">Tune jump, gravity, sprint, health, fall damage, and spawn protection from the Player panel before each test pass.</div></div>
+        </div>
+      `,
+    },
+  ];
+}
+
+function openUserGuideModal(initialSection = 'getting-started') {
+  closeTransientMenus();
+  closeUserGuideModal();
+
+  const sections = _buildUserGuideSections();
+  let activeSectionId = sections.some(section => section.id === initialSection) ? initialSection : sections[0].id;
+
+  const overlay = document.createElement('div');
+  overlay.style.position = 'fixed';
+  overlay.style.inset = '0';
+  overlay.style.zIndex = '20070';
+  overlay.style.background = 'rgba(6,10,14,0.62)';
+  overlay.style.backdropFilter = 'blur(4px)';
+  overlay.innerHTML = `
+    <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(1080px,calc(100vw - 28px));height:min(78vh,820px);display:grid;grid-template-columns:minmax(220px,260px) minmax(0,1fr);border-radius:16px;border:1px solid rgba(143,180,215,0.18);background:linear-gradient(180deg,rgba(10,16,22,0.98),rgba(12,18,26,0.96));box-shadow:0 26px 80px rgba(0,0,0,0.48);overflow:hidden">
+      <div style="border-right:1px solid rgba(143,180,215,0.12);display:flex;flex-direction:column;min-height:0">
+        <div style="padding:14px 16px 12px;border-bottom:1px solid rgba(143,180,215,0.12)">
+          <div style="font-size:10px;color:#89a1b5;letter-spacing:.12em;text-transform:uppercase">User Guide</div>
+          <div style="font-size:20px;font-weight:700;color:#e6edf3;margin-top:4px">Flame3D Editor</div>
+          <div style="font-size:11px;color:#9eb1c3;line-height:1.55;margin-top:6px">A curated guide for building, testing, and optimizing levels in the editor.</div>
+        </div>
+        <div id="guide-nav" style="padding:10px;overflow:auto;display:grid;gap:8px"></div>
+      </div>
+      <div style="display:flex;flex-direction:column;min-height:0">
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-bottom:1px solid rgba(143,180,215,0.12)">
+          <div>
+            <div id="guide-kicker" style="font-size:10px;color:#89a1b5;letter-spacing:.12em;text-transform:uppercase"></div>
+            <div id="guide-title" style="font-size:20px;font-weight:700;color:#e6edf3;margin-top:4px"></div>
+          </div>
+          <button id="guide-close" type="button" style="font-size:12px;padding:6px 10px">Close</button>
+        </div>
+        <div id="guide-body" style="padding:16px;overflow:auto"></div>
+      </div>
+    </div>
+  `;
+
+  const navEl = overlay.querySelector('#guide-nav');
+  const titleEl = overlay.querySelector('#guide-title');
+  const kickerEl = overlay.querySelector('#guide-kicker');
+  const bodyEl = overlay.querySelector('#guide-body');
+  const closeBtn = overlay.querySelector('#guide-close');
+
+  const render = () => {
+    const activeSection = sections.find(section => section.id === activeSectionId) || sections[0];
+    activeSectionId = activeSection.id;
+    navEl.innerHTML = sections.map(section => {
+      const active = section.id === activeSectionId;
+      return `<button type="button" data-guide-section="${section.id}" style="text-align:left;padding:10px 12px;border-radius:10px;border:1px solid ${active ? 'rgba(88,166,255,0.42)' : 'rgba(143,180,215,0.12)'};background:${active ? 'rgba(31,111,235,0.18)' : 'rgba(13,19,27,0.48)'};color:${active ? '#e6edf3' : '#b8c7d6'};cursor:pointer"><div style="font-size:12px;font-weight:700">${escapeHtml(section.title)}</div><div style="font-size:10px;color:${active ? '#a8c7ea' : '#89a1b5'};margin-top:4px">${escapeHtml(section.kicker)}</div></button>`;
+    }).join('');
+    titleEl.textContent = activeSection.title;
+    kickerEl.textContent = activeSection.kicker;
+    bodyEl.innerHTML = activeSection.html;
+  };
+
+  const close = () => {
+    closeUserGuideModal();
+  };
+
+  navEl.addEventListener('click', e => {
+    const btn = e.target.closest('[data-guide-section]');
+    if (!btn) return;
+    activeSectionId = btn.dataset.guideSection;
+    render();
+  });
+  closeBtn?.addEventListener('click', close);
+  overlay.addEventListener('pointerdown', e => {
+    if (e.target === overlay) close();
+  });
+  overlay.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      close();
+    }
+  });
+
+  document.body.appendChild(overlay);
+  overlay.tabIndex = 0;
+  overlay.focus();
+  _userGuideOverlayEl = overlay;
+  render();
+}
+
+const VERSION_HISTORY_LIMIT = 40;
+const VERSION_HISTORY_SCRATCH_KEY = '__scratch__';
+
+function _getVersionHistoryKey(projectId = currentProjectId) {
+  return projectId || VERSION_HISTORY_SCRATCH_KEY;
+}
+
+function _getVersionHistoryEntries(projectId = currentProjectId) {
+  const key = _getVersionHistoryKey(projectId);
+  const all = _storageCache.versionHistory || {};
+  const entries = all[key];
+  return Array.isArray(entries) ? entries : [];
+}
+
+function _setVersionHistoryEntries(entries, projectId = currentProjectId) {
+  const key = _getVersionHistoryKey(projectId);
+  if (!_storageCache.versionHistory || typeof _storageCache.versionHistory !== 'object') {
+    _storageCache.versionHistory = {};
+  }
+  _storageCache.versionHistory[key] = Array.isArray(entries) ? entries : [];
+  _flushVersionHistory();
+}
+
+function _promoteScratchVersionHistory(targetProjectId) {
+  if (!targetProjectId) return;
+  const scratch = _getVersionHistoryEntries(VERSION_HISTORY_SCRATCH_KEY);
+  if (!scratch.length) return;
+  const existing = _getVersionHistoryEntries(targetProjectId);
+  const merged = [...scratch, ...existing]
+    .sort((a, b) => (new Date(b.createdAt).getTime() || 0) - (new Date(a.createdAt).getTime() || 0))
+    .slice(0, VERSION_HISTORY_LIMIT);
+  _setVersionHistoryEntries(merged, targetProjectId);
+  _setVersionHistoryEntries([], VERSION_HISTORY_SCRATCH_KEY);
+}
+
+async function saveVersionSnapshot(name = '', options = {}) {
+  const silent = options.silent === true;
+  const projectId = options.projectId ?? currentProjectId;
+  const payload = buildLevelPayload();
+  const now = new Date().toISOString();
+  const label = String(name || '').trim() || `Snapshot ${new Date(now).toLocaleString()}`;
+  const entries = _getVersionHistoryEntries(projectId);
+  entries.unshift({
+    id: makeProjectId(),
+    name: label,
+    createdAt: now,
+    payload,
+  });
+  _setVersionHistoryEntries(entries.slice(0, VERSION_HISTORY_LIMIT), projectId);
+  if (!silent) alert(`Saved snapshot: ${label}`);
+  return true;
+}
+
+function openVersionHistoryManager() {
+  closeTransientMenus();
+  closeUserGuideModal();
+
+  const overlay = document.createElement('div');
+  overlay.style.position = 'fixed';
+  overlay.style.inset = '0';
+  overlay.style.zIndex = '20060';
+  overlay.style.background = 'rgba(6,10,14,0.56)';
+  overlay.style.backdropFilter = 'blur(4px)';
+  overlay.innerHTML = `
+    <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(760px,calc(100vw - 28px));max-height:min(78vh,860px);display:flex;flex-direction:column;border-radius:14px;border:1px solid rgba(143,180,215,0.22);background:linear-gradient(180deg,rgba(10,16,22,0.98),rgba(12,18,26,0.96));box-shadow:0 26px 80px rgba(0,0,0,0.48)">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid rgba(143,180,215,0.12)">
+        <div>
+          <div style="font-size:10px;color:#89a1b5;letter-spacing:.12em;text-transform:uppercase">Version History</div>
+          <div id="vh-title" style="font-size:18px;font-weight:700;color:#e6edf3">Snapshots</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select id="vh-project" style="font-size:12px;padding:5px 8px;border-radius:8px;background:#161f2a;border:1px solid rgba(143,180,215,0.22);color:#e6edf3"></select>
+          <button id="vh-save" type="button" style="font-size:12px;padding:6px 10px">Save Snapshot</button>
+          <button id="vh-close" type="button" style="font-size:12px;padding:6px 10px">Close</button>
+        </div>
+      </div>
+      <div id="vh-list" style="padding:12px;overflow:auto"></div>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+
+  const listEl = overlay.querySelector('#vh-list');
+  const titleEl = overlay.querySelector('#vh-title');
+  const projectEl = overlay.querySelector('#vh-project');
+  const saveBtn = overlay.querySelector('#vh-save');
+  const closeBtn = overlay.querySelector('#vh-close');
+
+  const render = () => {
+    const choices = _historyProjectChoices();
+    const selected = String(projectEl.value || _selectedHistoryProjectId());
+    projectEl.innerHTML = choices.map(choice => {
+      const isSelected = choice.id === selected;
+      return `<option value="${escapeHtml(choice.id)}" ${isSelected ? 'selected' : ''}>${escapeHtml(choice.name)}</option>`;
+    }).join('');
+
+    const projectId = String(projectEl.value || selected || _selectedHistoryProjectId());
+    const project = getStoredProjects().find(p => p.id === projectId);
+    const projectName = projectId === VERSION_HISTORY_SCRATCH_KEY
+      ? 'Unsaved Session'
+      : (project?.name || 'Project');
+    titleEl.textContent = `Snapshots - ${projectName}`;
+
+    const entries = _getVersionHistoryEntries(projectId);
+    if (!entries.length) {
+      listEl.innerHTML = '<div class="mm-empty">No snapshots yet.</div>';
+      return;
+    }
+
+    listEl.innerHTML = entries.map((entry, index) => `
+      <div class="mm-project" style="cursor:default;align-items:flex-start">
+        <div class="mm-project-icon">🕘</div>
+        <div class="mm-project-info">
+          <div class="mm-project-name">${escapeHtml(entry.name || `Snapshot ${index + 1}`)}</div>
+          <div class="mm-project-date">${escapeHtml(formatProjectDate(entry.createdAt))}</div>
+        </div>
+        <div class="mm-project-actions" style="gap:6px">
+          <button data-vh-restore="${escapeHtml(entry.id)}" data-vh-project="${escapeHtml(projectId)}" style="font-size:10px;padding:4px 8px">Restore</button>
+          <button data-vh-delete="${escapeHtml(entry.id)}" data-vh-project="${escapeHtml(projectId)}" style="font-size:10px;padding:4px 8px">Delete</button>
+        </div>
+      </div>
+    `).join('');
+  };
+
+  const close = () => {
+    overlay.remove();
+    renderMainMenuVersionHistory();
+  };
+
+  closeBtn?.addEventListener('click', close);
+  overlay.addEventListener('pointerdown', e => {
+    if (e.target === overlay) close();
+  });
+  overlay.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      close();
+    }
+  });
+
+  projectEl?.addEventListener('change', render);
+  saveBtn?.addEventListener('click', async () => {
+    try {
+      const projectId = String(projectEl.value || _selectedHistoryProjectId());
+      const defaultName = `Snapshot ${new Date().toLocaleString()}`;
+      const inputName = prompt('Snapshot name:', defaultName);
+      if (inputName === null) return;
+      const snapName = inputName.trim() || defaultName;
+      await saveVersionSnapshot(snapName, { projectId });
+      render();
+    } catch (err) {
+      alert('Failed to save snapshot: ' + err.message);
+    }
+  });
+
+  listEl?.addEventListener('click', e => {
+    const restoreBtn = e.target.closest('[data-vh-restore]');
+    if (restoreBtn) {
+      const projectId = String(restoreBtn.dataset.vhProject || _selectedHistoryProjectId());
+      const list = _getVersionHistoryEntries(projectId);
+      const target = list.find(entry => entry.id === restoreBtn.dataset.vhRestore);
+      if (!target) return;
+      if (!confirm(`Restore snapshot "${target.name}"? Current scene will be replaced.`)) return;
+      if (projectId === VERSION_HISTORY_SCRATCH_KEY) {
+        currentProjectId = null;
+        currentProjectName = '';
+      } else {
+        const project = getStoredProjects().find(p => p.id === projectId);
+        if (project) {
+          currentProjectId = project.id;
+          currentProjectName = project.name || '';
+        }
+      }
+      resetSceneForNewProject();
+      loadLevelJSON(target.payload, { pushHistory: true });
+      showStudio();
+      close();
+      return;
+    }
+
+    const deleteBtn = e.target.closest('[data-vh-delete]');
+    if (deleteBtn) {
+      const projectId = String(deleteBtn.dataset.vhProject || _selectedHistoryProjectId());
+      const list = _getVersionHistoryEntries(projectId);
+      const idx = list.findIndex(entry => entry.id === deleteBtn.dataset.vhDelete);
+      if (idx < 0) return;
+      const target = list[idx];
+      if (!confirm(`Delete snapshot "${target.name}"?`)) return;
+      list.splice(idx, 1);
+      _setVersionHistoryEntries(list, projectId);
+      render();
+    }
+  });
+
+  overlay.tabIndex = 0;
+  overlay.focus();
+  render();
 }
 
 function normalizePlayerProfile(profile = {}) {
@@ -10326,6 +14010,11 @@ function createDefaultFunctionAction() {
     skelAnimCommand: 'play',
     skelAnimClip: '',
     skelAnimSpeed: 1,
+    scaleOffset: [1, 1, 1],
+    scaleStartOffset: [1, 1, 1],
+    commandText: '',
+    delayDuration: 1,
+    waitKeyCode: 'Space',
   };
 }
 
@@ -10384,6 +14073,11 @@ function normalizeFunctionAction(config = {}) {
     skelAnimCommand: SKELETON_ANIM_COMMANDS.includes(config.skelAnimCommand) ? config.skelAnimCommand : 'play',
     skelAnimClip: String(config.skelAnimClip ?? '').trim(),
     skelAnimSpeed: Math.max(0, Number.isFinite(parseFloat(config.skelAnimSpeed)) ? parseFloat(config.skelAnimSpeed) : 1),
+    scaleOffset: normalizeVec(config.scaleOffset ?? [1, 1, 1]),
+    scaleStartOffset: normalizeVec(config.scaleStartOffset ?? [1, 1, 1]),
+    commandText: String(config.commandText ?? '').trim(),
+    delayDuration: Math.max(0, parseFloat(config.delayDuration) || 1),
+    waitKeyCode: String(config.waitKeyCode ?? 'Space').trim() || 'Space',
   };
 }
 
@@ -10398,12 +14092,112 @@ function createDefaultControlFunction(groupId = '') {
 
 function normalizeControlFunction(fn = {}) {
   const actions = Array.isArray(fn.actions) ? fn.actions.map(normalizeFunctionAction) : [];
-  return {
+  const nodes = Array.isArray(fn.nodes) ? fn.nodes.map(normalizeGraphNode) : [];
+  const connections = Array.isArray(fn.connections) ? fn.connections.filter(c => c && c.from && c.to) : [];
+  const result = {
     name: String(fn.name ?? '').trim(),
     groupId: String(fn.groupId ?? '').trim(),
     alwaysActive: fn.alwaysActive === true,
     actions: actions.length ? actions : [createDefaultFunctionAction()],
   };
+  // One-time migration: if saved data has nodes, flatten them to actions then discard
+  if (nodes.length) {
+    _bpSyncFnActionsFromNodes({ nodes, connections, actions: result.actions });
+    // Copy synced actions back
+    result.actions = result.actions.length ? result.actions : [createDefaultFunctionAction()];
+  }
+  return result;
+}
+
+// ── Node-based assembly helpers (kept for migration of old saves) ────────────
+let _nodeIdCounter = 0;
+function _genNodeId() { return 'n' + Date.now().toString(36) + '_' + (++_nodeIdCounter); }
+
+function normalizeGraphNode(node = {}) {
+  const type = ['target', 'condition', 'action'].includes(node.type) ? node.type : 'action';
+  const base = {
+    id: node.id || _genNodeId(),
+    type,
+    label: String(node.label ?? '').trim(),
+    graphX: Number.isFinite(node.graphX) ? node.graphX : NaN,
+    graphY: Number.isFinite(node.graphY) ? node.graphY : NaN,
+  };
+  if (type === 'target') {
+    base.refType = node.refType === 'name' ? 'name' : 'group';
+    base.refValue = String(node.refValue ?? '').trim();
+  } else if (type === 'condition') {
+    base.conditions = Array.isArray(node.conditions)
+      ? node.conditions.map(c => normalizeCondition(c))
+      : [normalizeCondition({})];
+    base.conditionLogic = node.conditionLogic === 'or' ? 'or' : 'and';
+  } else if (type === 'action') {
+    base.actions = Array.isArray(node.actions)
+      ? node.actions.map(normalizeFunctionAction)
+      : [createDefaultFunctionAction()];
+  }
+  return base;
+}
+
+// Sync fn.actions from action nodes — walks the connection graph to inherit
+// upstream target-node refs and attach condition-node chain conditions.
+function _bpSyncFnActionsFromNodes(fn) {
+  if (!fn || !Array.isArray(fn.nodes) || !fn.nodes.length) return;
+
+  const nodeMap = new Map();
+  for (const node of fn.nodes) nodeMap.set(node.id, node);
+
+  // Build incoming edges: nodeId -> [sourceNodeIds]
+  const incoming = new Map();
+  if (Array.isArray(fn.connections)) {
+    for (const conn of fn.connections) {
+      if (!incoming.has(conn.to)) incoming.set(conn.to, []);
+      incoming.get(conn.to).push(conn.from);
+    }
+  }
+
+  // Walk upstream from a node, collecting target and condition nodes
+  function walkUpstream(nodeId, visited) {
+    if (!visited) visited = new Set();
+    if (visited.has(nodeId)) return { targets: [], conditions: [] };
+    visited.add(nodeId);
+    const targets = [];
+    const conditions = [];
+    const sources = incoming.get(nodeId) || [];
+    for (const srcId of sources) {
+      const src = nodeMap.get(srcId);
+      if (!src) continue;
+      if (src.type === 'target') targets.push(src);
+      else if (src.type === 'condition') conditions.push(src);
+      const up = walkUpstream(srcId, visited);
+      targets.push(...up.targets);
+      conditions.push(...up.conditions);
+    }
+    return { targets, conditions };
+  }
+
+  const allActions = [];
+  for (const node of fn.nodes) {
+    if (node.type === 'action' && Array.isArray(node.actions)) {
+      const { targets, conditions } = walkUpstream(node.id);
+      const targetNode = targets.length ? targets[0] : null;
+      const chainConds = conditions.flatMap(cn => cn.conditions || []);
+      const chainLogic = conditions.length === 1 ? (conditions[0].conditionLogic || 'and') : 'and';
+
+      for (const a of node.actions) {
+        // Inherit target from upstream target node if action has none
+        if (!a.refValue && targetNode) {
+          a.refType = targetNode.refType;
+          a.refValue = targetNode.refValue;
+        }
+        // Attach chain conditions for runtime evaluation
+        a._chainConditions = chainConds.length ? chainConds : undefined;
+        a._chainConditionLogic = chainConds.length ? chainLogic : undefined;
+        a._nodeId = node.id;
+        allActions.push(a);
+      }
+    }
+  }
+  fn.actions = allActions.length ? allActions : [createDefaultFunctionAction()];
 }
 
 function getControlFunctionByName(name) {
@@ -10645,6 +14439,77 @@ function renderProjectLibrary() {
       </div>
     `;
   }).join('');
+
+  renderMainMenuVersionHistory(mainMenuHistoryProject?.value || '');
+}
+
+function _historyProjectChoices() {
+  const projects = getStoredProjects().slice();
+  const choices = [];
+  const seen = new Set();
+
+  const pushChoice = (id, name) => {
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    choices.push({ id, name });
+  };
+
+  if (currentProjectId) pushChoice(currentProjectId, currentProjectName || 'Current Project');
+  else pushChoice(VERSION_HISTORY_SCRATCH_KEY, 'Unsaved Session');
+
+  for (const p of projects) pushChoice(p.id, p.name || 'Untitled');
+  if (!choices.length) pushChoice(VERSION_HISTORY_SCRATCH_KEY, 'Unsaved Session');
+  return choices;
+}
+
+function _selectedHistoryProjectId() {
+  const fromSelect = String(mainMenuHistoryProject?.value || '').trim();
+  if (fromSelect) return fromSelect;
+  if (currentProjectId) return currentProjectId;
+  return VERSION_HISTORY_SCRATCH_KEY;
+}
+
+function renderMainMenuVersionHistory(selectedProjectId = '') {
+  if (!mainMenuHistoryList) return;
+
+  const choices = _historyProjectChoices();
+  const selected = selectedProjectId || _selectedHistoryProjectId();
+
+  if (mainMenuHistoryProject) {
+    mainMenuHistoryProject.innerHTML = choices.map(choice => {
+      const isSelected = choice.id === selected;
+      return `<option value="${escapeHtml(choice.id)}" ${isSelected ? 'selected' : ''}>${escapeHtml(choice.name)}</option>`;
+    }).join('');
+  }
+
+  const activeProjectId = _selectedHistoryProjectId();
+  const activeProject = getStoredProjects().find(p => p.id === activeProjectId);
+  const activeProjectName = activeProjectId === VERSION_HISTORY_SCRATCH_KEY
+    ? 'Unsaved Session'
+    : (activeProject?.name || currentProjectName || 'Project');
+
+  if (mainMenuHistoryCaption) {
+    mainMenuHistoryCaption.textContent = `Recent snapshots for ${activeProjectName}`;
+  }
+
+  const entries = _getVersionHistoryEntries(activeProjectId).slice(0, 8);
+  if (!entries.length) {
+    mainMenuHistoryList.innerHTML = '<div class="mm-empty">No snapshots yet.</div>';
+    return;
+  }
+
+  mainMenuHistoryList.innerHTML = entries.map(entry => `
+    <div class="mm-history-row">
+      <div style="flex:1;min-width:0">
+        <div class="mm-history-row-name" title="${escapeHtml(entry.name || 'Snapshot')}">${escapeHtml(entry.name || 'Snapshot')}</div>
+        <div class="mm-history-row-date">${escapeHtml(formatProjectDate(entry.createdAt))}</div>
+      </div>
+      <div class="mm-project-actions" style="gap:6px">
+        <button data-vh-restore="${escapeHtml(entry.id)}" data-vh-project="${escapeHtml(activeProjectId)}">Restore</button>
+        <button data-vh-delete="${escapeHtml(entry.id)}" data-vh-project="${escapeHtml(activeProjectId)}">Delete</button>
+      </div>
+    </div>
+  `).join('');
 }
 
 function normalizeRuntimeLibraryEntry(entry) {
@@ -10699,13 +14564,13 @@ function setRuntimeShadowQuality(level) {
 }
 
 function setRuntimeRenderDistance(value) {
-  quality.renderDist = THREE.MathUtils.clamp(parseFloat(value) || quality.renderDist, 20, 500);
+  quality.renderDist = THREE.MathUtils.clamp(parseFloat(value) || quality.renderDist, 20, 2000);
   if (qualityRenderDistInput) qualityRenderDistInput.value = quality.renderDist;
   syncRuntimeSettingsPanel();
 }
 
 function setRuntimeLightDistance(value) {
-  quality.lightDist = THREE.MathUtils.clamp(parseFloat(value) || quality.lightDist, 10, 200);
+  quality.lightDist = THREE.MathUtils.clamp(parseFloat(value) || quality.lightDist, 10, 500);
   if (qualityLightDistInput) qualityLightDistInput.value = quality.lightDist;
   syncRuntimeSettingsPanel();
 }
@@ -10931,16 +14796,10 @@ function showRuntimePauseMenu() {
   overlay.querySelector('#rp-quality-render')?.addEventListener('change', e => setRuntimeRenderDistance(e.target.value));
   overlay.querySelector('#rp-quality-light')?.addEventListener('change', e => setRuntimeLightDistance(e.target.value));
   overlay.querySelector('#rp-day-cycle')?.addEventListener('change', e => {
-    if (sunDayCycleEnabledInput) sunDayCycleEnabledInput.checked = !!e.target.checked;
-    updateSunSky();
-    syncRuntimeSettingsPanel();
+    if (sunDayCycleInput) sunDayCycleInput.checked = e.target.checked;
   });
   overlay.querySelector('#rp-day-duration')?.addEventListener('change', e => {
-    const val = clampSunDayDuration(parseFloat(e.target.value));
-    if (sunDayDurationInput) sunDayDurationInput.value = String(val);
-    e.target.value = val;
-    updateSunSky();
-    syncRuntimeSettingsPanel();
+    if (sunDayDurationInput) sunDayDurationInput.value = e.target.value;
   });
   overlay.querySelector('#rp-auto-perf')?.addEventListener('change', e => setRuntimeAutoPerformance(!!e.target.checked));
   overlay.querySelector('#rp-auto-visual')?.addEventListener('change', e => setRuntimeAutoVisual(!!e.target.checked));
@@ -10961,8 +14820,8 @@ function syncRuntimeSettingsPanel() {
     if (shadowSelect) shadowSelect.value = quality.shadows;
     if (renderInput) renderInput.value = quality.renderDist;
     if (lightInput) lightInput.value = quality.lightDist;
-    if (cycleInput && sunDayCycleEnabledInput) cycleInput.checked = !!sunDayCycleEnabledInput.checked;
-    if (dayDurInput && sunDayDurationInput) dayDurInput.value = clampSunDayDuration(parseFloat(sunDayDurationInput.value));
+    if (cycleInput) cycleInput.checked = sunDayCycleInput?.checked ?? SUN_DAY_CYCLE_DEFAULT;
+    if (dayDurInput) dayDurInput.value = sunDayDurationInput?.value ?? SUN_DAY_DURATION_DEFAULT;
     if (autoPerfInput) autoPerfInput.checked = !!runtimeOptimizer.autoPerformance;
     if (autoVisualInput) autoVisualInput.checked = !!runtimeOptimizer.autoVisual;
   }
@@ -10979,8 +14838,8 @@ function syncRuntimeSettingsPanel() {
     if (shadowSelect) shadowSelect.value = quality.shadows;
     if (renderInput) renderInput.value = quality.renderDist;
     if (lightInput) lightInput.value = quality.lightDist;
-    if (cycleInput && sunDayCycleEnabledInput) cycleInput.checked = !!sunDayCycleEnabledInput.checked;
-    if (dayDurInput && sunDayDurationInput) dayDurInput.value = clampSunDayDuration(parseFloat(sunDayDurationInput.value));
+    if (cycleInput) cycleInput.checked = sunDayCycleInput?.checked ?? SUN_DAY_CYCLE_DEFAULT;
+    if (dayDurInput) dayDurInput.value = sunDayDurationInput?.value ?? SUN_DAY_DURATION_DEFAULT;
     if (autoPerfInput) autoPerfInput.checked = !!runtimeOptimizer.autoPerformance;
     if (autoVisualInput) autoVisualInput.checked = !!runtimeOptimizer.autoVisual;
   }
@@ -11053,16 +14912,10 @@ function ensureRuntimeHud() {
   panel.querySelector('#rt-quality-render')?.addEventListener('change', e => setRuntimeRenderDistance(e.target.value));
   panel.querySelector('#rt-quality-light')?.addEventListener('change', e => setRuntimeLightDistance(e.target.value));
   panel.querySelector('#rt-day-cycle')?.addEventListener('change', e => {
-    if (sunDayCycleEnabledInput) sunDayCycleEnabledInput.checked = !!e.target.checked;
-    updateSunSky();
-    syncRuntimeSettingsPanel();
+    if (sunDayCycleInput) sunDayCycleInput.checked = e.target.checked;
   });
   panel.querySelector('#rt-day-duration')?.addEventListener('change', e => {
-    const val = clampSunDayDuration(parseFloat(e.target.value));
-    if (sunDayDurationInput) sunDayDurationInput.value = String(val);
-    e.target.value = val;
-    updateSunSky();
-    syncRuntimeSettingsPanel();
+    if (sunDayDurationInput) sunDayDurationInput.value = e.target.value;
   });
   panel.querySelector('#rt-auto-perf')?.addEventListener('change', e => {
     setRuntimeAutoPerformance(!!e.target.checked);
@@ -11286,6 +15139,7 @@ function showMainMenu() {
   if (_restoreDirty) _flushRestore();
   if (_restoreTimer) { clearTimeout(_restoreTimer); _restoreTimer = null; }
   renderProjectLibrary();
+  renderMainMenuVersionHistory();
   if (mainMenuEl) mainMenuEl.classList.remove('hidden');
   if (topbarEl) topbarEl.classList.add('studio-hidden');
   if (workspaceEl) workspaceEl.classList.add('studio-hidden');
@@ -11302,8 +15156,6 @@ function showStudio() {
   if (functionsPanelEl) functionsPanelEl.style.display = runtimeMode ? 'none' : '';
   if (functionsResizerEl) functionsResizerEl.style.display = runtimeMode ? 'none' : '';
   if (runtimeMode) applyRuntimeChrome();
-  syncSunInputs();
-  updateSunSky();
   onResize();
   refreshStatus();
   _offerRestore();
@@ -11312,6 +15164,7 @@ function showStudio() {
 function resetSceneForNewProject() {
   if (state.isPlaytest) stopPlaytest();
   selectObject(null);
+  _clearBatchRuntimeState();
   const toRemove = [...sceneObjects];
   toRemove.forEach(removeFromScene);
   undoStack.length = 0;
@@ -11319,6 +15172,9 @@ function resetSceneForNewProject() {
   // Clear project-scoped collections so nothing leaks between projects
   controlFunctions.length = 0;
   _controlFunctionStates.clear();
+  _functionActionQueues.clear();
+  _activeDelayStates.clear();
+  _activeWaitKeyStates.clear();
   conditionalTriggers.length = 0;
   gameVars.length = 0;
   gameBools.length = 0;
@@ -11341,9 +15197,6 @@ function startNewProject() {
   resetSceneForNewProject();
   _pendingRestore = null;
   clearRestoreSlot();
-  syncSunInputs();
-  updateSunSky();
-  applyFogSettings();
   showStudio();
 }
 
@@ -11422,6 +15275,8 @@ async function saveProjectToLibrary() {
     await _flushProjects();
     currentProjectId = id;
     currentProjectName = name;
+    _promoteScratchVersionHistory(id);
+    await saveVersionSnapshot(`Saved: ${name}`, { silent: true, projectId: id });
     clearRestoreSlot();
     renderProjectLibrary();
   } catch (err) {
@@ -11474,6 +15329,9 @@ const _triggerRotateQuat = new THREE.Quaternion();
 const _triggerAnimPivot = new THREE.Vector3();
 const _triggerAnimOffset = new THREE.Vector3();
 const _pathTriggerMoveOffsets = new Map(); // mesh.uuid -> Vector3 (trigger move offset for path-active meshes)
+const INVENTORY_SLOT_COUNT = 6;
+let fpsInventory = [];
+let fpsInventorySelected = 0;
 
 // ─── Editor simulation (preview without playtest) ────────────────────────────
 const _simBasePositions = new Map(); // mesh -> original Vector3
@@ -11552,9 +15410,15 @@ function updateMoveStateProgress(stateMap, nowSeconds, offsetsByMesh, options = 
     }
 
     if (rawT >= 1 && st.functionName && !st.functionMarked) {
-      markControlFunctionMet(st.functionName, st.callerUuid ? sceneObjects.find(m => m.uuid === st.callerUuid) ?? null : null);
-      st.functionMarked = true;
-      anyFunctionJustCompleted = true;
+      if (st._queueKey && _functionActionQueues.has(st._queueKey)) {
+        st.functionMarked = true;
+        _advanceFunctionQueue(st._queueKey);
+        anyFunctionJustCompleted = true;
+      } else {
+        markControlFunctionMet(st.functionName, st.callerUuid ? sceneObjects.find(m => m.uuid === st.callerUuid) ?? null : null);
+        st.functionMarked = true;
+        anyFunctionJustCompleted = true;
+      }
     }
   }
 
@@ -11675,9 +15539,15 @@ function applyAnimatedTransforms(basePositions, baseRotations, moveStateMap, rot
     }
 
     if (rawT >= 1 && st.functionName && !st.functionMarked) {
-      markControlFunctionMet(st.functionName, st.callerUuid ? sceneObjects.find(m => m.uuid === st.callerUuid) ?? null : null);
-      st.functionMarked = true;
-      anyFunctionJustCompleted = true;
+      if (st._queueKey && _functionActionQueues.has(st._queueKey)) {
+        st.functionMarked = true;
+        _advanceFunctionQueue(st._queueKey);
+        anyFunctionJustCompleted = true;
+      } else {
+        markControlFunctionMet(st.functionName, st.callerUuid ? sceneObjects.find(m => m.uuid === st.callerUuid) ?? null : null);
+        st.functionMarked = true;
+        anyFunctionJustCompleted = true;
+      }
     }
   }
 
@@ -12157,7 +16027,7 @@ function collidesWalk(pos, ignoreMeshes = null) {
 
 /** Raycast-based ground detection — works with rotated meshes / slopes. */
 function findGroundHeight(pos, ignoreMeshes = null) {
-  let ground = 0;
+  let ground = (state.isPlaytest && !gridPlaySolid) ? -Infinity : 0;
   if (!_solidColliders.length) return ground;
   const offsets = [[0,0],[PLAYER_RADIUS*.7,0],[-PLAYER_RADIUS*.7,0],[0,PLAYER_RADIUS*.7],[0,-PLAYER_RADIUS*.7]];
   for (const [ox, oz] of offsets) {
@@ -12550,37 +16420,6 @@ function syncFpsCamera() {
   fpsCam.rotation.x = fpsPitch;
 }
 
-// ─── Fog ──────────────────────────────────────────────────────────────────────
-function applyFogSettings() {
-  if (!fogSettings.enabled) {
-    scene.fog = null;
-    return;
-  }
-  const b = THREE.MathUtils.clamp(fogSettings.brightness ?? 1, 0, 5);
-  const base = new THREE.Color(fogSettings.color);
-  const col = base.multiplyScalar(b);
-  if (fogSettings.mode === 'linear') {
-    scene.fog = new THREE.Fog(col, fogSettings.near, fogSettings.far);
-  } else {
-    scene.fog = new THREE.FogExp2(col, fogSettings.density);
-  }
-}
-function syncFogUI() {
-  if (fogEnabledInput) fogEnabledInput.checked = fogSettings.enabled;
-  if (fogColorInput)   fogColorInput.value = '#' + (fogSettings.color >>> 0).toString(16).padStart(6, '0');
-  if (fogDensityInput) fogDensityInput.value = fogSettings.density;
-  if (fogBrightnessInput) fogBrightnessInput.value = fogSettings.brightness ?? 1;
-}
-
-function readFogUI() {
-  fogSettings.enabled = !!(fogEnabledInput && fogEnabledInput.checked);
-  if (fogColorInput) fogSettings.color = parseInt(fogColorInput.value.replace('#', ''), 16) || 0;
-  if (fogDensityInput) fogSettings.density = parseFloat(fogDensityInput.value) || 0.025;
-  if (fogBrightnessInput) fogSettings.brightness = parseFloat(fogBrightnessInput.value) || 1;
-  applyFogSettings();
-  markRestoreDirty();
-}
-
 function syncFovUI() {
   if (fovEditorInput) fovEditorInput.value = editorFov;
   if (fovPlaytestInput) fovPlaytestInput.value = playtestFov;
@@ -12854,6 +16693,8 @@ function _serializeBufferGeometry(geo) {
   if (norm) data.normal = Array.from(norm.array);
   const uv = geo.attributes.uv;
   if (uv) data.uv = Array.from(uv.array);
+  const col = geo.attributes.color;
+  if (col) data.color = Array.from(col.array);
   if (geo.index) data.index = Array.from(geo.index.array);
   return data;
 }
@@ -12863,6 +16704,7 @@ function _deserializeBufferGeometry(data) {
   if (data.position) geo.setAttribute('position', new THREE.Float32BufferAttribute(data.position, 3));
   if (data.normal)   geo.setAttribute('normal',   new THREE.Float32BufferAttribute(data.normal, 3));
   if (data.uv)       geo.setAttribute('uv',       new THREE.Float32BufferAttribute(data.uv, 2));
+  if (data.color)    geo.setAttribute('color',     new THREE.Float32BufferAttribute(data.color, 3));
   if (data.index)    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(data.index), 1));
   geo.computeBoundingBox();
   geo.computeBoundingSphere();
@@ -12898,6 +16740,7 @@ function serializeSingleObject(m) {
   if (Array.isArray(m.userData.groups) && m.userData.groups.length) o.groups = [...m.userData.groups];
   if (m.userData.group !== undefined) o.group = m.userData.group;
   if (m.userData.editorGroupId) o.editorGroupId = m.userData.editorGroupId;
+  if (m.userData.batchGroupId) o.batchGroupId = m.userData.batchGroupId;
   if (m.userData.triggerRules) o.triggerRules = { ...m.userData.triggerRules };
   const movementPath = normalizeMovementPathConfig(m.userData.movementPath);
   if (movementPath.enabled || movementPath.checkpoints.length) {
@@ -12926,6 +16769,9 @@ function serializeSingleObject(m) {
   if (m.userData.type === 'keypad') {
     o.keypadConfig = normalizeKeypadConfig(m.userData.keypadConfig);
   }
+  if (m.userData.type === 'soundzone') {
+    o.soundZoneConfig = normalizeSoundZoneConfig(m.userData.soundZoneConfig);
+  }
   if (m.userData.type === 'joint' && m.userData.jointConfig) {
     o.jointConfig = normalizeJointConfig(m.userData.jointConfig);
   }
@@ -12945,6 +16791,10 @@ function serializeSingleObject(m) {
   if (m.userData._texturePattern) {
     o.texturePattern = { ...m.userData._texturePattern };
   }
+  if (m.userData.textureConfig) {
+    const tc = normalizeTextureConfig(m.userData.textureConfig);
+    if (tc) o.textureConfig = tc;
+  }
   if (m.userData.textConfig) o.textConfig = normalizeTextConfig(m.userData.textConfig);
   if (m.userData.screenConfig) o.screenConfig = normalizeScreenConfig(m.userData.screenConfig);
   if (m.userData.cameraConfig) o.cameraConfig = normalizeCameraConfig(m.userData.cameraConfig);
@@ -12952,6 +16802,18 @@ function serializeSingleObject(m) {
   if (m.userData.roughness !== undefined) o.roughness = m.userData.roughness;
   if (m.userData._hasCustomGeometry) {
     o.customGeometry = _serializeBufferGeometry(m.geometry);
+  }
+  if (m.userData._mergedOriginals) {
+    o.mergedOriginals = m.userData._mergedOriginals;
+  }
+  if (m.userData._isStatic) {
+    o.isStatic = true;
+  }
+  if (m.userData.collectibleConfig) {
+    const cc = normalizeCollectibleConfig(m.userData.collectibleConfig);
+    if (cc.enabled || cc.itemId !== createDefaultCollectibleConfig().itemId || cc.displayName || cc.maxStack !== createDefaultCollectibleConfig().maxStack) {
+      o.collectibleConfig = cc;
+    }
   }
   return o;
 }
@@ -13918,6 +17780,7 @@ function applyPlayerStatsAction(action) {
   else if (op === '/') next = val === 0 ? current : current / val;
 
   if (stat === 'health') {
+    if (window._flame3dConsole && window._flame3dConsole.godMode && next < fpsHealth) return;
     fpsHealth = Math.max(0, Math.min(gameRules.maxHealth, next));
     updateHealthHud();
     if (fpsHealth <= 0) respawnPlayer();
@@ -13973,6 +17836,7 @@ function clearAllRuntimeAudio() {
   for (const instance of _activeAudioInstances.values()) stopAudioInstance(instance);
   _activeAudioInstances.clear();
   _audioHandlesByAction.clear();
+  stopAllSoundZoneAudio();
 }
 
 function updateAudioProximityVolume(instance) {
@@ -14104,6 +17968,10 @@ function stopFunctionRuntime(functionName, options = {}) {
   const key = normalizeControlFunctionKey(functionName);
   if (!key) return;
   _pausedFunctionKeys.delete(key);
+  // Clear any active action queues for this function
+  for (const [qk] of [..._functionActionQueues]) {
+    if (qk.startsWith(functionName + ':')) { _clearFunctionQueue(qk); }
+  }
   clearFunctionRuntimeStates(functionName);
   stopAudioByFunction(functionName);
   if (options.resetState) _controlFunctionStates.delete(key);
@@ -14140,6 +18008,153 @@ function applyFunctionControlAction(action, currentFunctionName, callerMesh, act
   }
 }
 
+function _executeActionImmediate(action, funcName, actionIndex, callerMesh, active, context, nowSeconds) {
+  // Dispatches a single action. Returns 'timed' if the action runs over time, 'instant' otherwise.
+  const needsTargetRef = ['move', 'rotate', 'light', 'path'].includes(action.actionType);
+  if (needsTargetRef && !action.refValue) return 'skip';
+
+  if (action.actionType === 'move') {
+    const callerKey = callerMesh?.uuid ?? 'global';
+    const stateKey = `${funcName}:${actionIndex}:${callerKey}`;
+    if (!active && !action.returnOnDeactivate) return 'skip';
+    const targetOffset = active ? action.offset : [0, 0, 0];
+    setControlMoveActionState(stateKey, funcName, action, targetOffset, callerMesh, active);
+    const st = _triggerMoveStates.get(stateKey);
+    if (st) { st.callerUuid = callerMesh?.uuid ?? null; st.startedAt = nowSeconds; }
+    return (active && action.duration > 0) ? 'timed' : 'instant';
+  } else if (action.actionType === 'rotate') {
+    const callerKey = callerMesh?.uuid ?? 'global';
+    const stateKey = `${funcName}:${actionIndex}:${callerKey}`;
+    if (!active && !action.returnOnDeactivate) return 'skip';
+    const targetRotation = active ? action.rotateOffset : [0, 0, 0];
+    setControlRotateActionState(stateKey, funcName, action, targetRotation, callerMesh, active);
+    const st = _triggerRotateStates.get(stateKey);
+    if (st) { st.callerUuid = callerMesh?.uuid ?? null; st.startedAt = nowSeconds; }
+    // Repeating rotations are fire-and-forget (don't block queue)
+    if (action.rotateRepeat) return 'instant';
+    return (active && action.duration > 0) ? 'timed' : 'instant';
+  } else if (action.actionType === 'light') {
+    const targets = triggerMoveTargets(action.refType, action.refValue);
+    for (const target of targets) applyLightActionToMesh(target, action.lightOp, action.lightValue);
+  } else if (action.actionType === 'audio') {
+    executeAudioAction(funcName, actionIndex, action, callerMesh, active);
+  } else if (action.actionType === 'path') {
+    applyPathAction(action, active);
+  } else if (action.actionType === 'functionControl') {
+    applyFunctionControlAction(action, funcName, callerMesh, active, context);
+  } else if (action.actionType === 'playerGroup') {
+    if (active) applyPlayerGroupAction(action);
+  } else if (action.actionType === 'setVar') {
+    if (active && action.setVarName) {
+      const amount = resolveValueSource(action.setVarValueType, action.setVarValue, action.setVarValueVar);
+      const current = getGameVar(action.setVarName);
+      let nextValue = amount;
+      if (action.setVarOp === '+') nextValue = current + amount;
+      else if (action.setVarOp === '-') nextValue = current - amount;
+      else if (action.setVarOp === '*') nextValue = current * amount;
+      else if (action.setVarOp === '/') nextValue = amount === 0 ? current : current / amount;
+      setGameVar(action.setVarName, nextValue);
+    }
+  } else if (action.actionType === 'setBool') {
+    if (active && action.setBoolName) {
+      if (action.setBoolValue === 'toggle') setGameBool(action.setBoolName, !getGameBool(action.setBoolName));
+      else setGameBool(action.setBoolName, !!action.setBoolValue);
+    }
+  } else if (action.actionType === 'playerStats') {
+    if (active) applyPlayerStatsAction(action);
+  } else if (action.actionType === 'teleport') {
+    if (active) executeTeleportAction(action, callerMesh);
+  } else if (action.actionType === 'skeleton') {
+    if (active) executeSkeletonAction(action);
+  } else if (action.actionType === 'command') {
+    if (active && action.commandText) {
+      if (window._flame3dConsole && typeof window._flame3dConsole.execute === 'function') {
+        window._flame3dConsole.execute(action.commandText);
+      }
+    }
+  } else if (action.actionType === 'delay') {
+    if (active) return 'delay';
+  } else if (action.actionType === 'waitKey') {
+    if (active) return 'waitKey';
+  }
+  return 'instant';
+}
+
+function _getQueueKey(funcName, callerMesh) {
+  return `${funcName}:${callerMesh?.uuid ?? 'global'}`;
+}
+
+function _startNextQueuedAction(queueKey) {
+  const q = _functionActionQueues.get(queueKey);
+  if (!q) return;
+
+  const nowSeconds = performance.now() / 1000;
+
+  while (q.currentIndex < q.actions.length) {
+    const i = q.currentIndex;
+    const action = q.actions[i];
+
+    const result = _executeActionImmediate(action, q.functionName, i, q.callerMesh, true, q.context, nowSeconds);
+
+    if (result === 'timed') {
+      // Store the queueKey on the move/rotate state so completion can advance the queue
+      const callerKey = q.callerMesh?.uuid ?? 'global';
+      const stateKey = `${q.functionName}:${i}:${callerKey}`;
+      const moveSt = _triggerMoveStates.get(stateKey);
+      if (moveSt) moveSt._queueKey = queueKey;
+      const rotSt = _triggerRotateStates.get(stateKey);
+      if (rotSt) rotSt._queueKey = queueKey;
+      q.startedIndices.push(i);
+      return; // Wait for animation to complete
+    } else if (result === 'delay') {
+      _activeDelayStates.set(queueKey, { endsAt: nowSeconds + action.delayDuration });
+      q.startedIndices.push(i);
+      return; // Wait for delay timer
+    } else if (result === 'waitKey') {
+      _activeWaitKeyStates.set(queueKey, { keyCode: action.waitKeyCode || 'Space' });
+      q.startedIndices.push(i);
+      return; // Wait for key press
+    } else {
+      // Instant or skip — advance immediately
+      q.startedIndices.push(i);
+      q.currentIndex++;
+    }
+  }
+
+  // All actions processed — mark function complete
+  _functionActionQueues.delete(queueKey);
+  markControlFunctionMet(q.functionName, q.callerMesh);
+}
+
+function _advanceFunctionQueue(queueKey) {
+  const q = _functionActionQueues.get(queueKey);
+  if (!q) return;
+  _activeDelayStates.delete(queueKey);
+  _activeWaitKeyStates.delete(queueKey);
+  q.currentIndex++;
+  if (q.currentIndex >= q.actions.length) {
+    _functionActionQueues.delete(queueKey);
+    markControlFunctionMet(q.functionName, q.callerMesh);
+  } else {
+    _startNextQueuedAction(queueKey);
+  }
+}
+
+function _clearFunctionQueue(queueKey) {
+  _functionActionQueues.delete(queueKey);
+  _activeDelayStates.delete(queueKey);
+  _activeWaitKeyStates.delete(queueKey);
+}
+
+function _resumeQueuedWaitKeys(code) {
+  for (const [queueKey, waitState] of [..._activeWaitKeyStates]) {
+    const expectedCode = waitState?.keyCode || 'Space';
+    if (expectedCode !== code) continue;
+    _activeWaitKeyStates.delete(queueKey);
+    _advanceFunctionQueue(queueKey);
+  }
+}
+
 function executeControlFunction(functionName, callerMesh, active, context = {}) {
   if ((context.depth ?? 0) > 6) return false;
   const func = getControlFunctionByName(functionName);
@@ -14147,81 +18162,74 @@ function executeControlFunction(functionName, callerMesh, active, context = {}) 
   if (active && isControlFunctionStopped(func.name)) return false;
   if (active && isFunctionPaused(func.name)) return false;
   const nowSeconds = performance.now() / 1000;
-  let hasTransformAction = false;
 
+  const queueKey = _getQueueKey(func.name, callerMesh);
+
+  if (!active) {
+    // Deactivation: clear queue and process returnOnDeactivate for all actions
+    _clearFunctionQueue(queueKey);
+    for (let i = 0; i < func.actions.length; i++) {
+      const action = normalizeFunctionAction(func.actions[i]);
+      const needsTargetRef = ['move', 'rotate', 'light', 'path'].includes(action.actionType);
+      if (needsTargetRef && !action.refValue) continue;
+      _executeActionImmediate(action, func.name, i, callerMesh, false, context, nowSeconds);
+    }
+    return true;
+  }
+
+  // Active: clear any existing queue for this function+caller and start fresh
+  _clearFunctionQueue(queueKey);
+
+  // Normalize all actions upfront
+  const normalizedActions = [];
   for (let i = 0; i < func.actions.length; i++) {
     const action = normalizeFunctionAction(func.actions[i]);
-    const needsTargetRef = ['move', 'rotate', 'light', 'path'].includes(action.actionType);
-    if (needsTargetRef && !action.refValue) continue;
+    normalizedActions.push(action);
+  }
 
-    if (action.actionType === 'move') {
-      hasTransformAction = true;
-      const callerKey = callerMesh?.uuid ?? 'global';
-      const stateKey = `${func.name}:${i}:${callerKey}`;
-      if (!active && !action.returnOnDeactivate) continue; // keep current state
-      const targetOffset = active ? action.offset : [0, 0, 0];
-      setControlMoveActionState(stateKey, func.name, action, targetOffset, callerMesh, active);
-      const st = _triggerMoveStates.get(stateKey);
-      if (st) { st.callerUuid = callerMesh?.uuid ?? null; st.startedAt = nowSeconds; }
-    } else if (action.actionType === 'rotate') {
-      hasTransformAction = true;
-      const callerKey = callerMesh?.uuid ?? 'global';
-      const stateKey = `${func.name}:${i}:${callerKey}`;
-      if (!active && !action.returnOnDeactivate) continue;
-      const targetRotation = active ? action.rotateOffset : [0, 0, 0];
-      setControlRotateActionState(stateKey, func.name, action, targetRotation, callerMesh, active);
-      const st = _triggerRotateStates.get(stateKey);
-      if (st) { st.callerUuid = callerMesh?.uuid ?? null; st.startedAt = nowSeconds; }
-    } else if (action.actionType === 'light') {
-      const targets = triggerMoveTargets(action.refType, action.refValue);
-      for (const target of targets) applyLightActionToMesh(target, action.lightOp, action.lightValue);
-    } else if (action.actionType === 'audio') {
-      executeAudioAction(func.name, i, action, callerMesh, active);
-    } else if (action.actionType === 'path') {
-      applyPathAction(action, active);
-    } else if (action.actionType === 'functionControl') {
-      applyFunctionControlAction(action, func.name, callerMesh, active, context);
-    } else if (action.actionType === 'playerGroup') {
-      if (active) applyPlayerGroupAction(action);
-    } else if (action.actionType === 'setVar') {
-      if (active && action.setVarName) {
-        const amount = resolveValueSource(action.setVarValueType, action.setVarValue, action.setVarValueVar);
-        const current = getGameVar(action.setVarName);
-        let nextValue = amount;
-        if (action.setVarOp === '+') nextValue = current + amount;
-        else if (action.setVarOp === '-') nextValue = current - amount;
-        else if (action.setVarOp === '*') nextValue = current * amount;
-        else if (action.setVarOp === '/') nextValue = amount === 0 ? current : current / amount;
-        setGameVar(action.setVarName, nextValue);
-      }
-    } else if (action.actionType === 'setBool') {
-      if (active && action.setBoolName) {
-        if (action.setBoolValue === 'toggle') setGameBool(action.setBoolName, !getGameBool(action.setBoolName));
-        else setGameBool(action.setBoolName, !!action.setBoolValue);
-      }
-    } else if (action.actionType === 'playerStats') {
-      if (active) applyPlayerStatsAction(action);
-    } else if (action.actionType === 'teleport') {
-      if (active) executeTeleportAction(action, callerMesh);
-    } else if (action.actionType === 'skeleton') {
-      if (active) executeSkeletonAction(action);
+  // Check if function has any timed/delay actions that actually need sequencing
+  const hasTimedAction = normalizedActions.some(a =>
+    ((a.actionType === 'move' || a.actionType === 'rotate') && a.duration > 0 && !(a.actionType === 'rotate' && a.rotateRepeat))
+    || a.actionType === 'delay'
+    || a.actionType === 'waitKey'
+  );
+
+  if (!hasTimedAction) {
+    // Fast path: no sequencing needed, fire all at once (original behavior)
+    let hasTransformAction = false;
+    for (let i = 0; i < normalizedActions.length; i++) {
+      const action = normalizedActions[i];
+      const result = _executeActionImmediate(action, func.name, i, callerMesh, true, context, nowSeconds);
+      if (action.actionType === 'move' || action.actionType === 'rotate') hasTransformAction = true;
     }
-  }
-
-  // When a new function with transform actions starts, un-mark all OTHER functions
-  if (active && hasTransformAction) {
-    const thisKey = normalizeControlFunctionKey(func.name);
-    for (const [key, entry] of _controlFunctionStates) {
-      if (key !== thisKey && entry.met) {
-        entry.met = false;
+    if (hasTransformAction) {
+      const thisKey = normalizeControlFunctionKey(func.name);
+      for (const [key, entry] of _controlFunctionStates) {
+        if (key !== thisKey && entry.met) entry.met = false;
       }
+    } else {
+      markControlFunctionMet(func.name, callerMesh);
     }
+    return true;
   }
 
-  // Light-only functions complete immediately
-  if (active && !hasTransformAction) {
-    markControlFunctionMet(func.name, callerMesh);
+  // Sequenced path: create a queue and execute one action at a time
+  _functionActionQueues.set(queueKey, {
+    functionName: func.name,
+    callerMesh,
+    context,
+    actions: normalizedActions,
+    currentIndex: 0,
+    startedIndices: [],
+  });
+
+  // Un-mark other functions
+  const thisKey = normalizeControlFunctionKey(func.name);
+  for (const [key, entry] of _controlFunctionStates) {
+    if (key !== thisKey && entry.met) entry.met = false;
   }
+
+  _startNextQueuedAction(queueKey);
   return true;
 }
 
@@ -14323,7 +18331,7 @@ function evaluateTriggerCalls(mesh) {
         if (call.oneShot) call.completed = true;
       } else {
         const runStartedAt = performance.now() / 1000;
-        const started = executeControlFunction(call.functionName, mesh, true);
+        const started = executeControlFunction(call.functionName, mesh, true, { activatedAt: call.activatedAt });
         if (started) {
           call.started = true;
           call.runStartedAt = runStartedAt;
@@ -14421,6 +18429,14 @@ function updateTriggerMoveAnimations(nowSeconds) {
     _triggerRotateStates,
     nowSeconds
   );
+
+  // Check active delay timers and advance queues whose delay has elapsed
+  for (const [queueKey, delay] of [..._activeDelayStates]) {
+    if (nowSeconds >= delay.endsAt) {
+      _activeDelayStates.delete(queueKey);
+      _advanceFunctionQueue(queueKey);
+    }
+  }
 
   // Re-evaluate pending calls when a function just completed
   if (anyFunctionJustCompleted) {
@@ -14676,6 +18692,7 @@ function updateMovementPathAnimations(dt) {
 }
 
 function applyFallDamage(fallDistance) {
+  if (window._flame3dConsole && window._flame3dConsole.godMode) return;
   if (!gameRules.fallDamage) return;
   // Spawn protect: untilLanded blocks fall damage until first ground touch
   if (gameRules.spawnProtectCondition === 'untilLanded' && !fpsSpawnLanded) return;
@@ -14747,6 +18764,99 @@ function checkTriggerBlocks() {
       _activeTriggers.delete(m);
       // Clear teleport cooldown once player has left the trigger
       _teleportCooldowns.delete(m.uuid);
+    }
+  }
+}
+
+function checkCollectiblePickups() {
+  const PICKUP_RANGE = 2.0; // world units
+  const PICKUP_RANGE_SQ = PICKUP_RANGE * PICKUP_RANGE;
+  
+  for (const m of sceneObjects) {
+    const config = getMeshCollectibleConfig(m);
+    if (!config.enabled) continue;
+    if ((m.userData.world || 'world_1') !== _playtestWorldId) continue;
+    
+    // Check distance to player
+    const dx = m.position.x - fpsPos.x;
+    const dz = m.position.z - fpsPos.z;
+    const distSq = dx * dx + dz * dz;
+    
+    if (distSq < PICKUP_RANGE_SQ) {
+      // Pickup the collectible
+      const slotIdx = fpsInventory.length;
+      if (slotIdx < INVENTORY_SLOT_COUNT) {
+        fpsInventory.push({
+          itemId: config.itemId,
+          displayName: config.displayName,
+          maxStack: config.maxStack,
+          count: 1,
+        });
+        m.userData._collectedByPlayer = true;
+        m.visible = false;
+      }
+    }
+  }
+}
+
+function checkKeyPressTriggers(code) {
+  if (!code) return;
+  for (const m of sceneObjects) {
+    if (m.userData.type !== 'trigger') continue;
+    if ((m.userData.world || 'world_1') !== _playtestWorldId) continue;
+    const rules = m.userData.triggerRules || {};
+    if (rules.keyPress !== code) continue;
+    activateControlMesh(m, { oneShot: true });
+  }
+}
+
+function stopAllSoundZoneAudio() {
+  for (const audio of _activeSoundZoneAudio.values()) {
+    try {
+      audio.pause();
+      audio.currentTime = 0;
+    } catch {
+      // ignore cleanup errors
+    }
+  }
+  _activeSoundZoneAudio.clear();
+}
+
+function updateSoundZones() {
+  if (!state.isPlaytest) return;
+
+  for (const m of sceneObjects) {
+    if (m.userData.type !== 'soundzone') continue;
+    if ((m.userData.world || 'world_1') !== _playtestWorldId) continue;
+
+    const cfg = getMeshSoundZoneConfig(m);
+    const entry = cfg.audioName ? getAudioLibraryEntryByName(cfg.audioName) : null;
+    const inRange = fpsPos.distanceTo(m.position) <= cfg.radius;
+    const existing = _activeSoundZoneAudio.get(m.uuid);
+
+    if (!entry || !inRange) {
+      if (existing) {
+        try {
+          existing.pause();
+          existing.currentTime = 0;
+        } catch {
+          // ignore cleanup errors
+        }
+        _activeSoundZoneAudio.delete(m.uuid);
+      }
+      continue;
+    }
+
+    if (!existing) {
+      const audio = new Audio(entry.dataUrl);
+      audio.loop = !!cfg.loop;
+      audio.volume = cfg.volume;
+      audio.play().catch(() => {});
+      _activeSoundZoneAudio.set(m.uuid, audio);
+    } else {
+      existing.loop = !!cfg.loop;
+      existing.volume = cfg.volume;
+      if (existing.paused) existing.play().catch(() => {});
     }
   }
 }
@@ -15195,6 +19305,7 @@ function applyCtAction(ruleKey, expr) {
   }
   const val = resolveCtValue(ruleKey, expr);
   if (ruleKey === 'health') {
+    if (window._flame3dConsole && window._flame3dConsole.godMode && val < fpsHealth) return;
     fpsHealth = Math.max(0, Math.min(gameRules.maxHealth, val));
     updateHealthHud();
     if (fpsHealth <= 0) respawnPlayer();
@@ -15269,6 +19380,8 @@ function startPlaytest() {
   fpsAirDashRemaining = 0;
   fpsAirDashUsed = false;
   fpsFallStartY = null;
+  fpsInventory = [];
+  fpsInventorySelected = 0;
   fpsCrouching = false;
   _fpsCurrentHeight = gameRules.height;
   _fpsCurrentEyeHeight = gameRules.eyeHeight;
@@ -15288,12 +19401,16 @@ function startPlaytest() {
   clearSkeletonRuntimeStates();
   clearNpcRuntimeState();
   _activeTriggerCalls.clear();
+  _functionActionQueues.clear();
+  _activeDelayStates.clear();
+  _activeWaitKeyStates.clear();
   _teleportCooldowns.clear();
   _runtimeFovOverride = null;
   _playtestWorldId = activeWorldId;
   _prePlaytestWorldId = activeWorldId;
   clearRuntimeFunctionStops();
   clearAllRuntimeAudio();
+  stopAllSoundZoneAudio();
   _pausedFunctionKeys.clear();
   activeCheckpointMeshUuid = null;
   _activeTouchCheckpoints.clear();
@@ -15317,36 +19434,18 @@ function startPlaytest() {
     }
   }
 
-  // Hide dedicated light blocks (PointLight stays active); keep emitting walls/floors visible
+  // Hide objects that should not be visible during playtest
   for (const m of sceneObjects) {
-    if (m.userData.type === 'light' && m.userData.pointLight) {
+    if (typeof shouldHideInPlaytest === 'function' ? shouldHideInPlaytest(m) : (m.userData.hiddenInGame || (m.userData.type === 'light' && m.userData.pointLight) || m.userData.type === 'spawn' || m.userData.type === 'trigger' || m.userData.type === 'pivot' || m.userData.type === 'soundzone')) {
       m.material.visible = false;
       if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = false;
-      m.castShadow = false;
-      m.userData._playtestHidden = true;
-    }
-  }
-
-  // Hide spawn and trigger blocks during playtest
-  for (const m of sceneObjects) {
-    if (m.userData.type === 'spawn' || m.userData.type === 'trigger' || m.userData.type === 'pivot') {
-      m.material.visible = false;
-      if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = false;
-      m.userData._playtestHidden = true;
-    }
-  }
-
-  // Hide objects marked as hidden in game
-  for (const m of sceneObjects) {
-    if (m.userData.hiddenInGame) {
-      m.material.visible = false;
-      if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = false;
+      if (m.userData.type === 'light') m.castShadow = false;
       m.userData._playtestHidden = true;
     }
   }
 
   setPlaytestDevView(false);
-  setGridVisible(false);
+  setGridVisible(gridPlayVisible);
   _groundTouchFnActive = false;
 
   // Find spawn point from spawn blocks
@@ -15369,7 +19468,12 @@ function startPlaytest() {
 
   healthHud.style.display = 'block';
   if (sprintHud) sprintHud.style.display = gameRules.sprintDuration > 0 ? 'flex' : 'none';
+  if (inventoryHud) inventoryHud.style.display = 'flex';
   updateHealthHud();
+
+  // Shift perf-stats below health HUD so they don't overlap
+  const _perfEl = document.getElementById('perf-stats');
+  if (_perfEl) _perfEl.style.top = '60px';
 
   renderer.domElement.requestPointerLock();
   syncFpsCamera();
@@ -15387,6 +19491,7 @@ function startPlaytest() {
 function _cleanupPlaytest() {
   closeRuntimeKeypadOverlay();
   closeRuntimeScreenOverlay();
+  closeRuntimeCommandBlockOverlay();
   // Remove portal discs from teleport meshes
   for (const m of sceneObjects) {
     if (m.userData._portalDisc) {
@@ -15404,6 +19509,11 @@ function _cleanupPlaytest() {
       m.userData._screenVideo.src = '';
       m.userData._screenVideo = null;
     }
+    // Restore camera screen textures to editor preview
+    if (m.userData._camScreenActive) {
+      delete m.userData._camScreenActive;
+      _applyScreenTexture(m);
+    }
   }
   // Restore dedicated light block visibility
   for (const m of sceneObjects) {
@@ -15414,7 +19524,7 @@ function _cleanupPlaytest() {
   }
   // Restore spawn/trigger visibility
   for (const m of sceneObjects) {
-    if (m.userData.type === 'spawn' || m.userData.type === 'trigger' || m.userData.type === 'pivot') {
+    if (m.userData.type === 'spawn' || m.userData.type === 'trigger' || m.userData.type === 'pivot' || m.userData.type === 'soundzone') {
       m.material.visible = true;
     }
   }
@@ -15425,7 +19535,22 @@ function _cleanupPlaytest() {
       m.userData._dead = false;
     }
   }
-  // Clear all playtest-hidden flags
+  // Restore collected items visibility
+  for (const m of sceneObjects) {
+    if (m.userData._collectedByPlayer) {
+      m.visible = true;
+      m.userData._collectedByPlayer = false;
+    }
+  }
+  // Restore all object visibility after playtest
+  for (const m of sceneObjects) {
+    if (m.userData._playtestHidden) {
+      m.material.visible = true;
+      if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = true;
+      if (m.userData.type === 'light' && m.userData.pointLight) m.castShadow = true;
+    }
+  }
+  // Clear all playtest-hidden flags and restore positions
   for (const m of sceneObjects) {
     const basePos = _playtestBasePositions.get(m);
     if (basePos) m.position.copy(basePos);
@@ -15447,10 +19572,14 @@ function _cleanupPlaytest() {
   clearSkeletonRuntimeStates();
   clearNpcRuntimeState();
   _activeTriggerCalls.clear();
+  _functionActionQueues.clear();
+  _activeDelayStates.clear();
+  _activeWaitKeyStates.clear();
   _teleportCooldowns.clear();
   _runtimeFovOverride = null;
   clearRuntimeFunctionStops();
   clearAllRuntimeAudio();
+  stopAllSoundZoneAudio();
   _pausedFunctionKeys.clear();
   activeCheckpointMeshUuid = null;
   _activeTouchCheckpoints.clear();
@@ -15469,8 +19598,13 @@ function _cleanupPlaytest() {
   playHint.style.display  = 'none';
   healthHud.style.display = 'none';
   if (sprintHud) sprintHud.style.display = 'none';
+  if (inventoryHud) inventoryHud.style.display = 'none';
   document.getElementById('btn-stop').style.display = 'none';
   document.getElementById('btn-playtest').style.display = 'inline-flex';
+
+  // Reset perf-stats position
+  const _perfEl = document.getElementById('perf-stats');
+  if (_perfEl) _perfEl.style.top = '10px';
   fpsDevView = false;
   updatePlayHint();
   setGridVisible(true);
@@ -15551,30 +19685,51 @@ document.addEventListener('mousemove', e => {
 });
 // ─── Canvas pointer events ────────────────────────────────────────────────────
 let pDownPos = null;
+let pDownPosR = null;   // right-button
+
 renderer.domElement.addEventListener('pointerdown', e => {
-  if (e.button !== 0) return;
-  pDownPos = { x: e.clientX, y: e.clientY };
+  if (e.button === 0) pDownPos = { x: e.clientX, y: e.clientY };
+  if (e.button === 2) pDownPosR = { x: e.clientX, y: e.clientY };
 });
 renderer.domElement.addEventListener('pointerup', e => {
-  if (e.button !== 0) return;
-  if (!pDownPos) return;
-  const dx = e.clientX - pDownPos.x;
-  const dy = e.clientY - pDownPos.y;
-  pDownPos = null;
-  if (Math.hypot(dx, dy) > 5) return;          // drag -> not a click
-  if (state.isPlaytest) {                       // playtest: lock or shoot
-    if (runtimeMode && runtimePauseActive) return;
-    if (tryOpenRuntimeKeypadFromPointerEvent(e)) return;
-    if (tryOpenRuntimeScreenFromPointerEvent(e)) return;
-    if (!fpsLocked) renderer.domElement.requestPointerLock();
-    else fpsShoot();
-    return;
+  if (e.button === 0) {
+    if (!pDownPos) return;
+    const dx = e.clientX - pDownPos.x;
+    const dy = e.clientY - pDownPos.y;
+    pDownPos = null;
+    if (Math.hypot(dx, dy) > 5) return;          // drag -> not a click
+    if (state.isPlaytest) {                       // playtest: lock or shoot
+      if (runtimeMode && runtimePauseActive) return;
+      if (tryOpenRuntimeKeypadFromPointerEvent(e)) return;
+      if (tryOpenRuntimeScreenFromPointerEvent(e)) return;
+      if (tryOpenRuntimeCommandBlockFromPointerEvent(e)) return;
+      if (!fpsLocked) renderer.domElement.requestPointerLock();
+      else fpsShoot();
+      return;
+    }
+    if (transformControls.dragging) return;
+    handleEditorClick(e);
   }
-  if (transformControls.dragging) return;
-  handleEditorClick(e);
+  // ── Right-click select ───────────────────────────────────
+  if (e.button === 2) {
+    if (!pDownPosR) return;
+    const dx = e.clientX - pDownPosR.x;
+    const dy = e.clientY - pDownPosR.y;
+    pDownPosR = null;
+    if (Math.hypot(dx, dy) > 5) return;          // was a drag (orbit pan)
+    if (state.isPlaytest || runtimeMode) return;
+    const ndc = toNDC(e);
+    const obj = hitObject(ndc);
+    if (obj) {
+      setMode('select');
+      selectObject(obj);
+      selectEditorGroup(obj);
+    }
+  }
 });
 
 renderer.domElement.addEventListener('contextmenu', e => {
+  if (!state.isPlaytest) { e.preventDefault(); return; }
   if (state.isPlaytest && pickKeypadMeshFromPointerEvent(e)) e.preventDefault();
 });
 
@@ -15630,6 +19785,8 @@ function handleEditorClick(e) {
         applyTexturePaint(hit.object, pat, state.brushColor, texturePaintState.color2, texturePaintState.scale, texturePaintState.customImage);
         const afterPattern = { ...hit.object.userData._texturePattern };
         pushUndo({ type: 'texture-paint', mesh: hit.object, beforePattern, afterPattern });
+      } else if (state.paintSubMode === 'face') {
+        paintMeshFace(hit.object, hit, state.brushColor);
       } else if (state.paintSubMode === 'erase-paint') {
         paintMesh(hit.object, hit.object.userData.originalColor ?? 0xcccccc);
       } else if (state.paintSubMode === 'fill') {
@@ -15641,9 +19798,31 @@ function handleEditorClick(e) {
   } else if (state.mode === 'select') {
     if (tryApplyPathCheckpointViewportPick(ndc)) return;
     const obj = hitObject(ndc);
-    if (e.shiftKey) {
-      toggleMultiSelect(obj);
-    } else {
+      if (e.ctrlKey && e.shiftKey) {
+        // Ctrl+Shift+Click: add entire editor group to multi-selection
+        if (obj) {
+          const members = getEditorGroupMembers(obj);
+          if (members.length > 0) {
+            for (const m of members) {
+              if (m === state.selectedObject || state.extraSelected.includes(m)) continue;
+              if (!state.selectedObject) {
+                selectObject(m);
+              } else {
+                state.extraSelected.push(m);
+                highlight(m);
+              }
+            }
+            rebuildExtraBoxes();
+            _attachGroupGizmo();
+            refreshProps();
+            refreshStatus();
+          } else {
+            toggleMultiSelect(obj); // ungrouped: behave like Shift-click
+          }
+        }
+      } else if (e.shiftKey) {
+        toggleMultiSelect(obj);
+      } else {
       selectObject(obj);
       if (obj) selectEditorGroup(obj);
     }
@@ -15669,7 +19848,9 @@ renderer.domElement.addEventListener('pointermove', e => {
   if (state.mode === 'paint' && (e.buttons & 1) === 1) {
     const hit = surfaceHit(ndc);
     if (hit?.object) {
-      if (state.paintSubMode === 'erase-paint') {
+      if (state.paintSubMode === 'face') {
+        paintMeshFace(hit.object, hit, state.brushColor);
+      } else if (state.paintSubMode === 'erase-paint') {
         paintMesh(hit.object, hit.object.userData.originalColor ?? 0xcccccc);
       } else if (state.paintSubMode !== 'fill') {
         paintMesh(hit.object, state.brushColor);
@@ -15830,6 +20011,9 @@ function toggleShortcutsHelp() {
 // ─── Keyboard ────────────────────────────────────────────────────────────────
 window.addEventListener('keydown', e => {
   if (state.isPlaytest) {
+    _resumeQueuedWaitKeys(e.code);
+    if (!e.repeat) checkKeyPressTriggers(e.code);
+
     if (runtimeMode) {
       if (e.code === 'KeyP' && !e.repeat) {
         e.preventDefault();
@@ -15896,6 +20080,14 @@ window.addEventListener('keydown', e => {
     if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space'].includes(e.code)) e.preventDefault();
   }
 
+  // Arrow keys rotate ghost preview by 15°
+  if (state.mode === 'place' && (e.code === 'ArrowLeft' || e.code === 'ArrowRight')) {
+    e.preventDefault();
+    const step = Math.PI / 12;   // 15°
+    state.placeRotationY += e.code === 'ArrowLeft' ? step : -step;
+    if (ghost) ghost.rotation.y = state.placeRotationY;
+  }
+
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'c') { e.preventDefault(); copySelected(); return; }
@@ -15908,11 +20100,7 @@ window.addEventListener('keydown', e => {
   }
 
   if (state.mode === 'select' && !e.ctrlKey && !e.metaKey) {
-    if (state.transformMode === 'scale') {
-      if (e.code === 'KeyX') { e.preventDefault(); toggleScaleSide('x'); return; }
-      if (e.code === 'KeyY') { e.preventDefault(); toggleScaleSide('y'); return; }
-      if (e.code === 'KeyZ') { e.preventDefault(); toggleScaleSide('z'); return; }
-    }
+
     if (e.code === 'Digit1') { setTransformMode('translate'); return; }
     if (e.code === 'Digit2') { setTransformMode('rotate');    return; }
     if (e.code === 'Digit3') { setTransformMode('scale');     return; }
@@ -15920,11 +20108,22 @@ window.addEventListener('keydown', e => {
 
   if ((k === 'delete' || k === 'backspace') && state.mode === 'select' && state.selectedObject) {
     const all = getAllSelected();
-    for (const m of all) deleteObject(m);
+    if (all.length === 1) {
+      deleteObject(all[0]);
+    } else {
+      selectObject(null);
+      const ops = all.map(m => { removeFromScene(m); return { type: 'delete', mesh: m }; });
+      pushUndo({ type: 'compound', ops });
+      refreshStatus();
+    }
     return;
   }
   if (k === 'p') { startPlaytest(); return; }
-  if (k === 'escape') { if (editorFreeLook) { stopEditorFreeLook(); return; } stopPlaytest(); }
+  if (k === 'escape') {
+    if (_cameraPreviewActive) { stopCameraAnimationPreview(); refreshProps(); return; }
+    if (editorFreeLook) { stopEditorFreeLook(); return; }
+    stopPlaytest();
+  }
   if (k === 'f' && !e.ctrlKey && !e.metaKey) {
     e.preventDefault();
     if (editorFreeLook) stopEditorFreeLook(); else startEditorFreeLook();
@@ -15965,10 +20164,15 @@ function setMode(mode) {
   if (mode !== 'paint') state.colorPickArmed = false;
   if (mode !== 'place') state._placingCustomTemplate = null;
   if (modeSelect) modeSelect.value = mode;
+  // highlight sidebar mode button
+  document.querySelectorAll('.tool-btn[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
   if (mode !== 'select') selectObject(null);
-  transformGroup.style.opacity       = mode === 'select' ? '1'    : '.4';
-  transformGroup.style.pointerEvents = mode === 'select' ? ''     : 'none';
   if (!['place', 'erase'].includes(mode)) removeGhost();
+  // context-sensitive settings panels
+  document.querySelectorAll('[data-settings-for]').forEach(el => {
+    const modes = el.dataset.settingsFor.split(',');
+    el.style.display = modes.includes(mode) ? '' : 'none';
+  });
   refreshStatus();
 }
 
@@ -15976,6 +20180,8 @@ function setTransformMode(tm) {
   state.transformMode = tm;
   transformControls.setMode(tm);
   if (gizmoSelect) gizmoSelect.value = tm;
+  // highlight sidebar transform button
+  document.querySelectorAll('.tool-btn[data-transform]').forEach(b => b.classList.toggle('active', b.dataset.transform === tm));
   refreshStatus();
 }
 
@@ -15983,7 +20189,7 @@ function setPlacingType(type) {
   state.placingType = type;
   state.cloneScale = null;
   state.cloneShapeParams = null;
-  document.querySelectorAll('.lib-btn').forEach(b => b.classList.toggle('active', b.dataset.type === type));
+  document.querySelectorAll('.bp-asset-card').forEach(c => c.classList.toggle('active', c.dataset.assetId === type));
   refreshStatus();
 }
 
@@ -16063,7 +20269,7 @@ function activeCameraPosition() {
 }
 
 function setChunkRange(val) {
-  const range = THREE.MathUtils.clamp(parseInt(val, 10) || 1, 1, 5);
+  const range = THREE.MathUtils.clamp(parseInt(val, 10) || 1, 1, 20);
   state.chunkRenderRadius = range;
   chunkRangeSelect.value = String(range);
   lastChunkX = Infinity;
@@ -16076,7 +20282,7 @@ function setChunkRange(val) {
 
 function setTopMenu(panelName) {
   const selected = panelName || 'block';
-  topMenuSelect.value = selected;
+  if (topMenuSelect) topMenuSelect.value = selected;
   topPanels.forEach(panel => panel.classList.toggle('active', panel.dataset.panel === selected));
   // Switch sidebar sections
   document.querySelectorAll('.sidebar-section').forEach(s => s.classList.remove('active'));
@@ -16112,18 +20318,182 @@ function moveEditorCamera(dt) {
 
 if (modeSelect) modeSelect.addEventListener('change', () => setMode(modeSelect.value));
 if (gizmoSelect) gizmoSelect.addEventListener('change', () => setTransformMode(gizmoSelect.value));
-document.querySelectorAll('.lib-btn').forEach(b => {
-  b.addEventListener('click', () => setPlacingType(b.dataset.type));
-  b.addEventListener('contextmenu', e => {
-    if (runtimeMode || state.isPlaytest) return;
-    e.preventDefault();
-    const type = b.dataset.type;
-    showLibraryContextMenu(type, e.clientX, e.clientY);
-  });
+
+// ─── Sidebar tool-button wiring ──────────────────────────────────────────────
+document.querySelectorAll('.tool-btn[data-mode]').forEach(b => {
+  b.addEventListener('click', () => setMode(b.dataset.mode));
 });
-libraryPaneButtons.forEach(btn => {
-  btn.addEventListener('click', () => setLibraryPane(btn.dataset.libPane));
+document.querySelectorAll('.tool-btn[data-transform]').forEach(b => {
+  b.addEventListener('click', () => setTransformMode(b.dataset.transform));
 });
+
+// ─── Menu-bar dropdown system ────────────────────────────────────────────────
+{
+  let _activeMenu = null;  // currently open dropdown element
+  const _menuHandlers = new Map(); // btnEl → items-function, for hover-switch
+
+  function closeActiveMenu() {
+    if (_activeMenu) {
+      _activeMenu._menuBtn.classList.remove('open');
+      _activeMenu.remove();
+      _activeMenu = null;
+    }
+    document.removeEventListener('pointerdown', _menuOutsideHandler, true);
+  }
+
+  function _menuOutsideHandler(e) {
+    if (_activeMenu && !_activeMenu.contains(e.target) && !e.target.classList.contains('menu-bar-btn')) {
+      closeActiveMenu();
+    }
+  }
+
+  function openMenuDropdown(btnEl, items) {
+    // If clicking the same button again, just close
+    if (_activeMenu && _activeMenu._menuBtn === btnEl) { closeActiveMenu(); return; }
+    closeActiveMenu();
+
+    const dd = document.createElement('div');
+    dd.className = 'menu-dropdown open';
+    dd._menuBtn = btnEl;
+    btnEl.classList.add('open');
+
+    items.forEach(item => {
+      if (item === '---') {
+        const hr = document.createElement('div');
+        hr.className = 'menu-divider';
+        dd.appendChild(hr);
+        return;
+      }
+      const mi = document.createElement('div');
+      mi.className = 'menu-item';
+      const labelSpan = document.createElement('span');
+      labelSpan.textContent = item.label;
+      mi.appendChild(labelSpan);
+      if (item.shortcut) {
+        const scSpan = document.createElement('span');
+        scSpan.className = 'shortcut';
+        scSpan.textContent = item.shortcut;
+        mi.appendChild(scSpan);
+      }
+      if (item.disabled) { mi.style.opacity = '.4'; mi.style.pointerEvents = 'none'; }
+      mi.addEventListener('click', () => { closeActiveMenu(); if (item.action) item.action(); });
+      dd.appendChild(mi);
+    });
+
+    // Position below the button
+    const r = btnEl.getBoundingClientRect();
+    dd.style.position = 'fixed';
+    dd.style.left = r.left + 'px';
+    dd.style.top = r.bottom + 'px';
+    document.body.appendChild(dd);
+    _activeMenu = dd;
+    setTimeout(() => document.addEventListener('pointerdown', _menuOutsideHandler, true), 0);
+  }
+
+  function _registerMenu(id, itemsFn) {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    _menuHandlers.set(btn, itemsFn);
+    btn.addEventListener('click', () => openMenuDropdown(btn, itemsFn()));
+    // GIMP-style hover-switch: hovering another button while a menu is open switches instantly
+    btn.addEventListener('mouseenter', () => {
+      if (_activeMenu && _activeMenu._menuBtn !== btn) {
+        openMenuDropdown(btn, itemsFn());
+      }
+    });
+  }
+
+  // ── File menu ──
+  _registerMenu('menu-file', () => [
+    { label: '💾 Save Project',       shortcut: '',              action: () => saveProjectToLibrary() },
+    { label: '🕘 Save Snapshot',      shortcut: '',              action: () => { saveVersionSnapshot().catch(err => alert('Failed to save snapshot: ' + err.message)); } },
+    { label: '📜 Version History',    shortcut: '',              action: () => openVersionHistoryManager() },
+    { label: '📤 Export JSON',        shortcut: '',              action: () => saveLevel() },
+    { label: '📂 Load JSON',          shortcut: '',              action: () => loadInput.click() },
+    '---',
+    { label: '🎮 Export Game HTML',   shortcut: '',              action: () => exportStandaloneGameHtml() },
+    { label: '🧩 Export Loader HTML', shortcut: '',              action: () => exportRuntimeLoaderHtml() },
+    '---',
+    { label: '🗑 Clear All',          shortcut: '',              action: () => clearAll() },
+    '---',
+    { label: '🏠 Back to Menu',       shortcut: '',              action: () => showMainMenu() },
+  ]);
+
+  // ── Edit menu ──
+  _registerMenu('menu-edit', () => [
+    { label: '↩ Undo',               shortcut: 'Ctrl+Z',       action: () => undo() },
+    { label: '↪ Redo',               shortcut: 'Ctrl+Y',       action: () => redo() },
+    '---',
+    { label: '📋 Copy',              shortcut: 'Ctrl+C',       action: () => copySelectedObjects() },
+    { label: '📄 Paste',             shortcut: 'Ctrl+V',       action: () => pasteObjects() },
+    { label: '⧉ Duplicate',          shortcut: 'Ctrl+D',       action: () => duplicateSelectedObjects() },
+    '---',
+    { label: '☷ Select All',         shortcut: 'Ctrl+A',       action: () => selectAllObjects() },
+    { label: '⊞ Group',              shortcut: 'Ctrl+G',       action: () => groupSelected() },
+    { label: '⊟ Ungroup',            shortcut: 'Ctrl+Shift+G', action: () => ungroupSelected() },
+    '---',
+    { label: '⊕ Merge',              shortcut: '',              action: () => mergeSelectedObjects() },
+    { label: '⊖ Unmerge',            shortcut: '',              action: () => unmergeSelectedObject() },
+  ]);
+
+  // ── View menu ──
+  _registerMenu('menu-view', () => [
+    { label: '🔧 Tools',             shortcut: '',              action: () => setTopMenu('block') },
+    { label: '💡 Light',             shortcut: '',              action: () => setTopMenu('light') },
+    { label: '⊞ Grid',              shortcut: '',              action: () => setTopMenu('grid') },
+    { label: '⚡ Performance',       shortcut: '',              action: () => setTopMenu('performance') },
+    { label: '🏃 Player',            shortcut: '',              action: () => setTopMenu('player') },
+    '---',
+    { label: '🔢 Vars',             shortcut: '',              action: () => setTopMenu('vars') },
+    { label: '☑ Bools',             shortcut: '',              action: () => setTopMenu('bools') },
+    { label: '🌍 Worlds',           shortcut: '',              action: () => setTopMenu('worlds') },
+    '---',
+    { label: '📁 Files',            shortcut: '',              action: () => setTopMenu('files') },
+  ]);
+
+  // ── Tools menu ──
+  _registerMenu('menu-tools', () => [
+    { label: '⊕ Place',              shortcut: '',              action: () => setMode('place') },
+    { label: '↗ Select',             shortcut: '',              action: () => setMode('select') },
+    { label: '✕ Delete',             shortcut: '',              action: () => setMode('delete') },
+    { label: '🖌 Paint',             shortcut: '',              action: () => setMode('paint') },
+    { label: '◫ Erase',              shortcut: '',              action: () => setMode('erase') },
+    '---',
+    { label: '↔ Move',               shortcut: 'G',             action: () => { setMode('select'); setTransformMode('translate'); } },
+    { label: '↻ Rotate',             shortcut: 'R',             action: () => { setMode('select'); setTransformMode('rotate'); } },
+    { label: '⤡ Scale',              shortcut: 'S',             action: () => { setMode('select'); setTransformMode('scale'); } },
+  ]);
+
+  // ── Help menu ──
+  _registerMenu('menu-help', () => [
+    { label: '📘 User Guide',         shortcut: '',              action: () => openUserGuideModal() },
+    '---',
+    { label: '⌨ Keyboard Shortcuts', shortcut: '',              action: () => {
+      alert(
+        'Flame3D Keyboard Shortcuts\n' +
+        '─────────────────────────\n' +
+        'Ctrl+Z / Ctrl+Y — Undo / Redo\n' +
+        'Ctrl+C / Ctrl+V / Ctrl+D — Copy / Paste / Duplicate\n' +
+        'Ctrl+A — Select All\n' +
+        'Ctrl+G / Ctrl+Shift+G — Group / Ungroup\n' +
+        'Delete / Backspace — Delete selected\n' +
+        'G / R / S — Move / Rotate / Scale\n' +
+        'P — Toggle Playtest\n' +
+        'B — Toggle Blueprint\n' +
+        'F — Focus on selected\n' +
+        'Arrow Keys — Rotate placement ghost\n' +
+        'Shift+Click — Multi-select\n' +
+        'Ctrl+Click — Toggle selection'
+      );
+    }},
+    '---',
+    { label: 'ℹ About Flame3D',      shortcut: '',              action: () => {
+      alert('Flame3D — 3D Game Editor\nBuilt with Three.js v0.161.0');
+    }},
+  ]);
+}
+
+/* Library tooltips & sidebar .lib-btn handlers removed — library now lives in bottom panel */
 
 /* Collapsible .sf-sub headers */
 document.querySelectorAll('.sf-sub').forEach(sub => {
@@ -16137,36 +20507,9 @@ document.querySelectorAll('.sf-sub').forEach(sub => {
   });
 });
 
-/* Collapsible sidebar library categories */
-document.querySelectorAll('.lib-category-title').forEach(title => {
-  title.addEventListener('click', () => {
-    const body = title.nextElementSibling;
-    if (!body || !body.classList.contains('lib-category-body')) return;
-    const collapsed = title.classList.toggle('collapsed');
-    body.classList.toggle('collapsed', collapsed);
-  });
-});
+/* Sidebar library categories removed — library now lives in bottom panel */
 
-// --- Object library search filter ---
-const libSearchInput = document.getElementById('lib-search');
-if (libSearchInput) {
-  libSearchInput.addEventListener('input', () => {
-    const q = libSearchInput.value.trim().toLowerCase();
-    const cats = document.querySelectorAll('#library-pane-objects .lib-category');
-    for (const cat of cats) {
-      const btns = cat.querySelectorAll('.lib-btn');
-      let anyVisible = false;
-      for (const btn of btns) {
-        const text = (btn.textContent || '').toLowerCase();
-        const type = (btn.dataset.type || '').toLowerCase();
-        const match = !q || text.includes(q) || type.includes(q);
-        btn.style.display = match ? '' : 'none';
-        if (match) anyVisible = true;
-      }
-      cat.style.display = anyVisible ? '' : 'none';
-    }
-  });
-}
+/* Sidebar library search removed — search lives in bottom panel asset browser */
 
 document.addEventListener('pointerdown', e => {
   const target = e.target;
@@ -16192,32 +20535,58 @@ if (audioImportBtn && audioImportInput) {
   });
 }
 
+if (autoSidebarToolsToggle) {
+  autoSidebarToolsToggle.checked = state.autoSwapSidebar !== false;
+  autoSidebarToolsToggle.addEventListener('change', () => {
+    state.autoSwapSidebar = !!autoSidebarToolsToggle.checked;
+    saveEditorSettings();
+  });
+}
+
 snapSelect.addEventListener('change', () => { setSnap(snapSelect.value); saveEditorSettings(); });
 lightIntensityInput.addEventListener('change', () => setDefaultLightIntensity(lightIntensityInput.value));
-sunIntensityInput.addEventListener('change', applySunUI);
-[sunTimeInput, sunNorthInput, sunTurbidityInput, sunShadowRangeInput].forEach(el => el.addEventListener('change', applySunUI));
+// ─── Sky / atmosphere event listeners ────────────────────────────────────────
+if (sunTimeInput)        sunTimeInput.addEventListener('input', applySunUI);
+if (sunNorthInput)       sunNorthInput.addEventListener('input', applySunUI);
+if (sunIntensityInput)   sunIntensityInput.addEventListener('change', applySunUI);
+if (sunTurbidityInput)   sunTurbidityInput.addEventListener('input', applySunUI);
+if (sunShadowRangeInput) sunShadowRangeInput.addEventListener('change', applySunUI);
+if (sunSizeInput)        sunSizeInput.addEventListener('change', applySunUI);
+if (sunDayCycleInput)    sunDayCycleInput.addEventListener('change', applySunUI);
 if (sunDayDurationInput) sunDayDurationInput.addEventListener('change', applySunUI);
-if (sunDayCycleEnabledInput) sunDayCycleEnabledInput.addEventListener('change', applySunUI);
-// New sky/cloud/star/moon listeners
-if (sunSizeInput) sunSizeInput.addEventListener('change', applySunUI);
-if (skyColorInput) skyColorInput.addEventListener('input', applySunUI);
-if (cloudsEnabledInput) cloudsEnabledInput.addEventListener('change', applySunUI);
+if (skyColorInput)       skyColorInput.addEventListener('input', applySunUI);
+if (cloudsEnabledInput)  cloudsEnabledInput.addEventListener('change', applySunUI);
 if (cloudWindSpeedInput) cloudWindSpeedInput.addEventListener('change', applySunUI);
-if (cloudWindDirInput) cloudWindDirInput.addEventListener('change', applySunUI);
-if (cloudOpacityInput) cloudOpacityInput.addEventListener('change', applySunUI);
-if (starsEnabledInput) starsEnabledInput.addEventListener('change', applySunUI);
-if (starsCountInput) starsCountInput.addEventListener('change', () => { _buildStars(parseInt(starsCountInput.value) || STARS_COUNT_DEFAULT); applySunUI(); });
+if (cloudWindDirInput)   cloudWindDirInput.addEventListener('change', applySunUI);
+if (cloudOpacityInput)   cloudOpacityInput.addEventListener('input', applySunUI);
+if (starsEnabledInput)   starsEnabledInput.addEventListener('change', applySunUI);
+if (starsCountInput)     starsCountInput.addEventListener('change', () => {
+  const c = THREE.MathUtils.clamp(parseInt(starsCountInput.value, 10) || STARS_COUNT_DEFAULT, 100, 5000);
+  _buildStars(c);
+  applySunUI();
+});
 if (starsBrightnessInput) starsBrightnessInput.addEventListener('change', applySunUI);
-if (moonEnabledInput) moonEnabledInput.addEventListener('change', applySunUI);
+if (moonEnabledInput)    moonEnabledInput.addEventListener('change', applySunUI);
 if (moonBrightnessInput) moonBrightnessInput.addEventListener('change', applySunUI);
-if (moonAuraInput) moonAuraInput.addEventListener('change', applySunUI);
+if (moonAuraInput)       moonAuraInput.addEventListener('change', applySunUI);
+if (fogEnabledInput)     fogEnabledInput.addEventListener('change', readFogUI);
+if (fogModeInput)        fogModeInput.addEventListener('change', readFogUI);
+if (fogColorInput)       fogColorInput.addEventListener('input', readFogUI);
+if (fogDensityInput)     fogDensityInput.addEventListener('change', readFogUI);
+if (fogNearInput)        fogNearInput.addEventListener('change', readFogUI);
+if (fogFarInput)         fogFarInput.addEventListener('change', readFogUI);
+if (fogBrightnessInput)  fogBrightnessInput.addEventListener('change', readFogUI);
 chunkRangeSelect.addEventListener('change', () => setChunkRange(chunkRangeSelect.value));
-topMenuSelect.addEventListener('change', () => setTopMenu(topMenuSelect.value));
-if (scaleSideXSelect) scaleSideXSelect.addEventListener('change', () => { state.scaleSides.x = scaleSideXSelect.value === 'neg' ? 'neg' : 'pos'; refreshStatus(); });
-if (scaleSideYSelect) scaleSideYSelect.addEventListener('change', () => { state.scaleSides.y = scaleSideYSelect.value === 'neg' ? 'neg' : 'pos'; refreshStatus(); });
-if (scaleSideZSelect) scaleSideZSelect.addEventListener('change', () => { state.scaleSides.z = scaleSideZSelect.value === 'neg' ? 'neg' : 'pos'; refreshStatus(); });
-if (shapeSidesInput) shapeSidesInput.addEventListener('change', () => setPlacementSides(shapeSidesInput.value));
-if (shapeDepthInput) shapeDepthInput.addEventListener('change', () => setPlacementDepth(shapeDepthInput.value));
+if (topMenuSelect) topMenuSelect.addEventListener('change', () => setTopMenu(topMenuSelect.value));
+
+if (shapeSidesInput) {
+  shapeSidesInput.addEventListener('input', () => setPlacementSides(shapeSidesInput.value));
+  shapeSidesInput.addEventListener('change', () => setPlacementSides(shapeSidesInput.value));
+}
+if (shapeDepthInput) {
+  shapeDepthInput.addEventListener('input', () => setPlacementDepth(shapeDepthInput.value));
+  shapeDepthInput.addEventListener('change', () => setPlacementDepth(shapeDepthInput.value));
+}
 if (placeOpacityInput) placeOpacityInput.addEventListener('change', () => setPlacementOpacity(placeOpacityInput.value));
 if (paintColorInput) paintColorInput.addEventListener('input', () => setBrushColor(paintColorInput.value));
 if (paintModeInput) paintModeInput.addEventListener('change', () => { state.paintSubMode = paintModeInput.value; refreshStatus(); });
@@ -16317,7 +20686,76 @@ if (btnSaveCustom) btnSaveCustom.addEventListener('click', () => {
   saveSelectionAsCustomObject(name || undefined);
 });
 
-syncScaleSideUI();
+// Import 3D Model button
+const btnImportModel = document.getElementById('btn-import-model');
+const importModelInput = document.getElementById('import-model-input');
+if (btnImportModel && importModelInput) {
+  btnImportModel.addEventListener('click', () => importModelInput.click());
+  importModelInput.addEventListener('change', async () => {
+    const file = importModelInput.files[0];
+    if (file) await importGLTFModel(file);
+    importModelInput.value = '';
+  });
+}
+
+// ── Bottom-panel asset import buttons ──
+const bpImportModelBtn   = document.getElementById('bp-import-model');
+const bpImportModelInput = document.getElementById('bp-import-model-input');
+if (bpImportModelBtn && bpImportModelInput) {
+  bpImportModelBtn.addEventListener('click', () => bpImportModelInput.click());
+  bpImportModelInput.addEventListener('change', async () => {
+    for (const file of bpImportModelInput.files) {
+      await importGLTFModel(file);
+    }
+    bpImportModelInput.value = '';
+    if (typeof refreshBpAssets === 'function') refreshBpAssets();
+  });
+}
+const bpImportAudioBtn   = document.getElementById('bp-import-audio');
+const bpImportAudioInput = document.getElementById('bp-import-audio-input');
+if (bpImportAudioBtn && bpImportAudioInput) {
+  bpImportAudioBtn.addEventListener('click', () => bpImportAudioInput.click());
+  bpImportAudioInput.addEventListener('change', async () => {
+    await importAudioFiles(bpImportAudioInput.files);
+    bpImportAudioInput.value = '';
+    if (typeof refreshBpAssets === 'function') refreshBpAssets();
+    saveEditorSettings();
+  });
+}
+
+// Drag-and-drop 3D model import on canvas
+canvasContainer.addEventListener('dragover', (e) => {
+  if ([...e.dataTransfer.types].includes('Files')) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    canvasContainer.style.outline = '2px dashed var(--accent)';
+  }
+});
+canvasContainer.addEventListener('dragleave', () => {
+  canvasContainer.style.outline = '';
+});
+canvasContainer.addEventListener('drop', async (e) => {
+  canvasContainer.style.outline = '';
+  const files = [...e.dataTransfer.files];
+  const modelFile = files.find(f => /\.(glb|gltf)$/i.test(f.name));
+  if (modelFile) {
+    e.preventDefault();
+    await importGLTFModel(modelFile);
+  }
+});
+
+// Custom object search and sort controls
+const customObjSearchInput = document.getElementById('custom-obj-search');
+const customObjSortSelect = document.getElementById('custom-obj-sort');
+if (customObjSearchInput) customObjSearchInput.addEventListener('input', () => {
+  _customObjectSearch = customObjSearchInput.value;
+  refreshCustomObjectUI();
+});
+if (customObjSortSelect) customObjSortSelect.addEventListener('change', () => {
+  _customObjectSort = customObjSortSelect.value;
+  refreshCustomObjectUI();
+  saveEditorSettings();
+});
 
 // Gamerule inputs — support variable names in number fields
 function bindVarAwareGrInput(inputEl, ruleKey, parseFn, fallback) {
@@ -16416,6 +20854,7 @@ function setGridFill(enabled, color, texture) {
   gridFillEnabled = enabled;
   if (color !== undefined) gridFillColor = color;
   if (texture !== undefined) gridFillTexture = texture;
+  if (gridFillTexture !== 'custom') gridFillCustomImage = '';
   // Rebuild fill planes with new material when texture changes
   if (texture !== undefined) {
     for (const [key, mesh] of gridFillPlanes) {
@@ -16432,6 +20871,20 @@ function setGridFill(enabled, color, texture) {
   updateGridChunks(camPos.x, camPos.z);
 }
 gridFillEnabledInput.addEventListener('change', () => setGridFill(gridFillEnabledInput.checked));
+if (gridPlayVisibleInput) gridPlayVisibleInput.addEventListener('change', () => {
+  gridPlayVisible = !!gridPlayVisibleInput.checked;
+  if (state.isPlaytest) setGridVisible(gridPlayVisible);
+  saveEditorSettings();
+});
+if (gridPlaySolidInput) gridPlaySolidInput.addEventListener('change', () => {
+  gridPlaySolid = !!gridPlaySolidInput.checked;
+  saveEditorSettings();
+});
+if (gridPlayMaskTerrainInput) gridPlayMaskTerrainInput.addEventListener('change', () => {
+  gridPlayMaskTerrain = !!gridPlayMaskTerrainInput.checked;
+  if (state.isPlaytest) _updateGridFillVisibilityForPlaytest();
+  saveEditorSettings();
+});
 gridFillColorInput.addEventListener('input', () => {
   gridFillColor = parseInt(gridFillColorInput.value.replace('#', ''), 16);
   gridFillTexture = 'none';
@@ -16444,6 +20897,25 @@ gridFillColorInput.addEventListener('input', () => {
   if (texSel) texSel.addEventListener('change', () => {
     setGridFill(gridFillEnabled, undefined, texSel.value);
   });
+  if (gridFillUploadBtn && gridFillUploadFile) {
+    gridFillUploadBtn.addEventListener('click', () => gridFillUploadFile.click());
+    gridFillUploadFile.addEventListener('change', () => {
+      const file = gridFillUploadFile.files && gridFillUploadFile.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        gridFillCustomImage = String(reader.result || '');
+        if (gridFillCustomImage) {
+          if (texSel) texSel.value = 'custom';
+          setGridFill(gridFillEnabled, undefined, 'custom');
+          saveEditorSettings();
+        }
+      };
+      reader.readAsDataURL(file);
+      gridFillUploadFile.value = '';
+    });
+  }
+
 }
 
 // World border controls
@@ -16471,8 +20943,11 @@ undoBtn.addEventListener('click', undo);
 redoBtn.addEventListener('click', redo);
 document.getElementById('btn-group').addEventListener('click', groupSelected);
 document.getElementById('btn-ungroup').addEventListener('click', ungroupSelected);
+document.getElementById('btn-merge').addEventListener('click', mergeSelectedObjects);
+document.getElementById('btn-unmerge').addEventListener('click', unmergeSelectedObject);
 document.getElementById('btn-select-all').addEventListener('click', selectAllObjects);
-document.getElementById('btn-clear').addEventListener('click', clearAll);
+const _btnClear = document.getElementById('btn-clear');
+if (_btnClear) _btnClear.addEventListener('click', clearAll);
 
 const btnSaveJson = document.getElementById('btn-save-json') || document.getElementById('btn-save');
 if (btnSaveJson) btnSaveJson.addEventListener('click', saveLevel);
@@ -16508,7 +20983,8 @@ if (btnExportLoader) {
     }
   });
 }
-document.getElementById('btn-load').addEventListener('click', () => loadInput.click());
+const _btnLoad = document.getElementById('btn-load');
+if (_btnLoad) _btnLoad.addEventListener('click', () => loadInput.click());
 loadInput.addEventListener('change', () => {
   const file = loadInput.files[0];
   if (!file) return;
@@ -16626,6 +21102,11 @@ window.addEventListener('resize', () => {
     functionsPanelState.width = nextFnWidth;
     applyFunctionsPanelState({ save: true, reflow: false });
   }
+  const nextBotH = clampBottomHeight(bottomPanelState.height);
+  if (nextBotH !== bottomPanelState.height) {
+    bottomPanelState.height = nextBotH;
+    applyBottomPanelState({ save: true, reflow: false });
+  }
 });
 
 if (mmNewBtn) mmNewBtn.addEventListener('click', startNewProject);
@@ -16660,6 +21141,76 @@ if (mainMenuProjectList) {
     }
     const row = e.target.closest('[data-project-id]');
     if (row) openProjectById(row.dataset.projectId);
+  });
+}
+
+if (mainMenuHistoryProject) {
+  mainMenuHistoryProject.addEventListener('change', () => {
+    renderMainMenuVersionHistory(mainMenuHistoryProject.value || '');
+  });
+}
+
+if (mmHistorySaveBtn) {
+  mmHistorySaveBtn.addEventListener('click', async () => {
+    try {
+      const projectId = _selectedHistoryProjectId();
+      const defaultName = `Snapshot ${new Date().toLocaleString()}`;
+      const inputName = prompt('Snapshot name:', defaultName);
+      if (inputName === null) return;
+      const snapName = inputName.trim() || defaultName;
+      await saveVersionSnapshot(snapName, { projectId });
+      renderMainMenuVersionHistory(projectId);
+    } catch (err) {
+      alert('Failed to save snapshot: ' + err.message);
+    }
+  });
+}
+
+if (mmHistoryOpenBtn) {
+  mmHistoryOpenBtn.addEventListener('click', () => {
+    openVersionHistoryManager();
+  });
+}
+
+if (mainMenuHistoryList) {
+  mainMenuHistoryList.addEventListener('click', e => {
+    const restoreBtn = e.target.closest('[data-vh-restore]');
+    if (restoreBtn) {
+      const projectId = String(restoreBtn.dataset.vhProject || _selectedHistoryProjectId());
+      const entries = _getVersionHistoryEntries(projectId);
+      const target = entries.find(entry => entry.id === restoreBtn.dataset.vhRestore);
+      if (!target) return;
+      if (!confirm(`Restore snapshot "${target.name}"? Current scene will be replaced.`)) return;
+
+      if (projectId === VERSION_HISTORY_SCRATCH_KEY) {
+        currentProjectId = null;
+        currentProjectName = '';
+      } else {
+        const project = getStoredProjects().find(p => p.id === projectId);
+        if (project) {
+          currentProjectId = project.id;
+          currentProjectName = project.name || '';
+        }
+      }
+
+      resetSceneForNewProject();
+      loadLevelJSON(target.payload, { pushHistory: true });
+      showStudio();
+      return;
+    }
+
+    const deleteBtn = e.target.closest('[data-vh-delete]');
+    if (deleteBtn) {
+      const projectId = String(deleteBtn.dataset.vhProject || _selectedHistoryProjectId());
+      const entries = _getVersionHistoryEntries(projectId);
+      const idx = entries.findIndex(entry => entry.id === deleteBtn.dataset.vhDelete);
+      if (idx < 0) return;
+      const target = entries[idx];
+      if (!confirm(`Delete snapshot "${target.name}"?`)) return;
+      entries.splice(idx, 1);
+      _setVersionHistoryEntries(entries, projectId);
+      renderMainMenuVersionHistory(projectId);
+    }
   });
 }
 
@@ -16914,6 +21465,96 @@ function bindReflectProps(mesh) {
   bindMaterialProp('roughness', roughRange, roughNum, 'roughness');
 }
 
+function bindTextureProps(mesh) {
+  const uploadBtn = document.getElementById('prop-tex-upload');
+  const fileInput = document.getElementById('prop-tex-file');
+  const removeBtn = document.getElementById('prop-tex-remove');
+  if (!uploadBtn || !fileInput || state.selectedObject !== mesh) return;
+
+  const targets = getPropertyTargets(mesh).filter(t => t.material);
+  if (!targets.length) return;
+
+  uploadBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      if (!dataUrl || !String(dataUrl).startsWith('data:image')) return;
+      for (const t of targets) {
+        t.userData.textureConfig = normalizeTextureConfig({
+          ...(normalizeTextureConfig(t.userData.textureConfig) || {}),
+          imageData: dataUrl,
+        });
+        applyTextureConfig(t);
+      }
+      refreshProps();
+    };
+    reader.readAsDataURL(file);
+    fileInput.value = '';
+  });
+
+  if (removeBtn) {
+    removeBtn.addEventListener('click', () => {
+      for (const t of targets) {
+        if (t.material.map) { t.material.map.dispose(); t.material.map = null; t.material.needsUpdate = true; }
+        t.userData.textureConfig = null;
+      }
+      refreshProps();
+    });
+  }
+
+  const bindTexNum = (id, field) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', () => {
+      const v = parseFloat(el.value) || 0;
+      for (const t of targets) {
+        const cfg = normalizeTextureConfig(t.userData.textureConfig);
+        if (!cfg) continue;
+        cfg[field] = v;
+        t.userData.textureConfig = cfg;
+        applyTextureConfig(t);
+      }
+    });
+  };
+  bindTexNum('prop-tex-repeat-x', 'repeatX');
+  bindTexNum('prop-tex-repeat-y', 'repeatY');
+  bindTexNum('prop-tex-offset-x', 'offsetX');
+  bindTexNum('prop-tex-offset-y', 'offsetY');
+  bindTexNum('prop-tex-rotation', 'rotation');
+
+  const bindTexSel = (id, field) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', () => {
+      for (const t of targets) {
+        const cfg = normalizeTextureConfig(t.userData.textureConfig);
+        if (!cfg) continue;
+        cfg[field] = el.value;
+        t.userData.textureConfig = cfg;
+        applyTextureConfig(t);
+      }
+    });
+  };
+  bindTexSel('prop-tex-wrap-s', 'wrapS');
+  bindTexSel('prop-tex-wrap-t', 'wrapT');
+
+  const flipEl = document.getElementById('prop-tex-flip-y');
+  if (flipEl) {
+    flipEl.addEventListener('change', () => {
+      for (const t of targets) {
+        const cfg = normalizeTextureConfig(t.userData.textureConfig);
+        if (!cfg) continue;
+        cfg.flipY = flipEl.checked;
+        t.userData.textureConfig = cfg;
+        applyTextureConfig(t);
+      }
+    });
+  }
+}
+
 function buildCollisionConfigSnapshot(mesh) {
   return {
     collisionMode: getMeshCollisionMode(mesh),
@@ -17016,11 +21657,11 @@ function bindShapeParamProps(mesh) {
   const depthInput = document.getElementById('prop-shape-depth');
   if ((!sidesInput && !depthInput) || state.selectedObject !== mesh) return;
 
-  const type = mesh.userData.type;
+  const type = typeof getEffectiveShapeType === 'function' ? getEffectiveShapeType(mesh) : mesh.userData.type;
   const def = DEFS[type];
   if (!def) return;
 
-  const targets = getPropertyTargets(mesh).filter(t => t.userData.type === type);
+  const targets = getPropertyTargets(mesh).filter(t => (typeof getEffectiveShapeType === 'function' ? getEffectiveShapeType(t) : t.userData.type) === type);
   if (!targets.length) return;
 
   const applyShapeToTargets = patch => {
@@ -17067,6 +21708,16 @@ function bindTractionToggle(mesh) {
       t.userData.traction = toggle.checked;
       if (before !== toggle.checked) pushUndo({ type: 'traction', mesh: t, before, after: toggle.checked });
     }
+  });
+}
+
+function bindStaticToggle(mesh) {
+  const toggle = document.getElementById('prop-static-toggle');
+  if (!toggle || state.selectedObject !== mesh) return;
+  toggle.addEventListener('change', () => {
+    const targets = getPropertyTargets(mesh);
+    for (const t of targets) setObjectStatic(t, toggle.checked);
+    markRestoreDirty();
   });
 }
 
@@ -17741,6 +22392,17 @@ function bindScreenProps(mesh) {
       reader.readAsText(file);
     });
   }
+  // Camera label input
+  const cameraLabelInput = document.getElementById('prop-screen-camera-label');
+  if (cameraLabelInput) cameraLabelInput.addEventListener('change', () => {
+    for (const t of targets) {
+      const sc = normalizeScreenConfig(t.userData.screenConfig);
+      sc.cameraLabel = cameraLabelInput.value;
+      t.userData.screenConfig = sc;
+      _applyScreenTexture(t);
+    }
+    markRestoreDirty();
+  });
   // Interactive checkbox
   const interactiveCheck = document.getElementById('prop-screen-interactive');
   if (interactiveCheck) interactiveCheck.addEventListener('change', () => {
@@ -17753,25 +22415,380 @@ function bindScreenProps(mesh) {
   });
 }
 
+function bindCommandBlockProps(mesh) {
+  if (state.selectedObject !== mesh) return;
+  const targets = getPropertyTargets(mesh).filter(t => t.userData.type === 'commandBlock');
+  document.querySelectorAll('.cmd-block-toggle').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const cmdName = cb.dataset.cmd;
+      for (const t of targets) {
+        const cfg = normalizeCommandBlockConfig(t.userData.commandBlockConfig);
+        if (cb.checked) {
+          cfg.disabledCommands = cfg.disabledCommands.filter(c => c !== cmdName);
+        } else {
+          if (!cfg.disabledCommands.includes(cmdName)) cfg.disabledCommands.push(cmdName);
+        }
+        t.userData.commandBlockConfig = cfg;
+      }
+      markRestoreDirty();
+      refreshProps();
+    });
+  });
+}
+
 function bindCameraProps(mesh) {
   if (state.selectedObject !== mesh) return;
   const targets = getPropertyTargets(mesh).filter(t => t.userData.type === 'camera');
+
+  const getCurrentConfig = () => normalizeCameraConfig(mesh.userData.cameraConfig);
+  const getClipName = () => getCurrentConfig().currentClip;
+  const getClip = () => { const cfg = getCurrentConfig(); return _getActiveClip(cfg); };
+
+  const updateAll = (patch) => {
+    for (const t of targets) {
+      const cur = normalizeCameraConfig(t.userData.cameraConfig);
+      t.userData.cameraConfig = { ...cur, ...patch };
+    }
+    _updateCameraFrustumHelper();
+    _updateCameraLookAtHelper();
+    _refreshCameraPathPreview(mesh);
+    markRestoreDirty();
+  };
+
+  const updateClip = (clipPatch) => {
+    const clipName = getClipName();
+    if (!clipName) return;
+    for (const t of targets) {
+      const cur = normalizeCameraConfig(t.userData.cameraConfig);
+      if (cur.clips[clipName]) {
+        cur.clips[clipName] = normalizeCameraClip({ ...cur.clips[clipName], ...clipPatch });
+        t.userData.cameraConfig = cur;
+      }
+    }
+    _updateCameraFrustumHelper();
+    _updateCameraLookAtHelper();
+    _refreshCameraPathPreview(mesh);
+    markRestoreDirty();
+  };
+
+  // Lens properties
   const fovInput = document.getElementById('prop-camera-fov');
   const nearInput = document.getElementById('prop-camera-near');
   const farInput = document.getElementById('prop-camera-far');
-  const update = () => {
+  const aspectInput = document.getElementById('prop-camera-aspect');
+  const lensUpdate = () => updateAll({
+    fov: parseFloat(fovInput?.value) || 60,
+    near: parseFloat(nearInput?.value) || 0.1,
+    far: parseFloat(farInput?.value) || 1000,
+    aspectRatio: parseFloat(aspectInput?.value) || (16 / 9),
+  });
+  if (fovInput) fovInput.addEventListener('change', lensUpdate);
+  if (nearInput) nearInput.addEventListener('change', lensUpdate);
+  if (farInput) farInput.addEventListener('change', lensUpdate);
+  if (aspectInput) aspectInput.addEventListener('change', lensUpdate);
+
+  // Look-At Target
+  const lookAtEnabled = document.getElementById('prop-camera-lookat-enabled');
+  if (lookAtEnabled) lookAtEnabled.addEventListener('change', () => {
+    updateAll({ lookAtEnabled: lookAtEnabled.checked });
+    if (lookAtEnabled.checked) {
+      _createCameraLookAtHelper(mesh);
+    } else {
+      _removeCameraLookAtHelper();
+    }
+    refreshProps();
+  });
+  const lookAtX = document.getElementById('prop-camera-lookat-x');
+  const lookAtY = document.getElementById('prop-camera-lookat-y');
+  const lookAtZ = document.getElementById('prop-camera-lookat-z');
+  const lookAtUpdate = () => {
+    updateAll({ lookAtTarget: [parseFloat(lookAtX?.value) || 0, parseFloat(lookAtY?.value) || 0, parseFloat(lookAtZ?.value) || 0] });
+    _updateCameraLookAtHelper();
+  };
+  if (lookAtX) lookAtX.addEventListener('change', lookAtUpdate);
+  if (lookAtY) lookAtY.addEventListener('change', lookAtUpdate);
+  if (lookAtZ) lookAtZ.addEventListener('change', lookAtUpdate);
+
+  // ── Clip management ──
+  const clipSelect = document.getElementById('prop-camera-clip-select');
+  if (clipSelect) clipSelect.addEventListener('change', () => {
+    updateAll({ currentClip: clipSelect.value });
+    refreshProps();
+  });
+
+  const clipNewBtn = document.getElementById('prop-camera-clip-new');
+  if (clipNewBtn) clipNewBtn.addEventListener('click', () => {
+    const cfg = getCurrentConfig();
+    const name = prompt('New clip name:', 'Clip_' + (Object.keys(cfg.clips).length + 1));
+    if (!name?.trim()) return;
+    cfg.clips[name.trim()] = normalizeCameraClip({});
+    cfg.currentClip = name.trim();
     for (const t of targets) {
-      t.userData.cameraConfig = normalizeCameraConfig({
-        fov: parseFloat(fovInput?.value) || 60,
-        near: parseFloat(nearInput?.value) || 0.1,
-        far: parseFloat(farInput?.value) || 1000,
-      });
+      t.userData.cameraConfig = cfg;
     }
     markRestoreDirty();
-  };
-  if (fovInput) fovInput.addEventListener('change', update);
-  if (nearInput) nearInput.addEventListener('change', update);
-  if (farInput) farInput.addEventListener('change', update);
+    refreshProps();
+  });
+
+  const clipDelBtn = document.getElementById('prop-camera-clip-del');
+  if (clipDelBtn) clipDelBtn.addEventListener('click', () => {
+    const cfg = getCurrentConfig();
+    const clipName = cfg.currentClip;
+    if (!clipName) return;
+    delete cfg.clips[clipName];
+    cfg.currentClip = Object.keys(cfg.clips)[0] || '';
+    for (const t of targets) {
+      t.userData.cameraConfig = cfg;
+    }
+    markRestoreDirty();
+    _refreshCameraPathPreview(mesh);
+    refreshProps();
+  });
+
+  // ── Clip speed, loop, path settings ──
+  const speedInput = document.getElementById('prop-camera-clip-speed');
+  if (speedInput) speedInput.addEventListener('change', () => {
+    updateClip({ speed: parseFloat(speedInput.value) || 2 });
+    refreshProps(); // refresh to update computed duration display
+  });
+
+  const loopInput = document.getElementById('prop-camera-clip-loop');
+  if (loopInput) loopInput.addEventListener('change', () => {
+    updateClip({ loop: loopInput.checked });
+  });
+
+  const pathTypeSelect = document.getElementById('prop-camera-path-type');
+  if (pathTypeSelect) pathTypeSelect.addEventListener('change', () => {
+    updateClip({ pathType: pathTypeSelect.value });
+  });
+
+  const tensionSlider = document.getElementById('prop-camera-path-tension');
+  const tensionVal = document.getElementById('prop-camera-tension-val');
+  if (tensionSlider) tensionSlider.addEventListener('input', () => {
+    if (tensionVal) tensionVal.textContent = parseFloat(tensionSlider.value).toFixed(2);
+    updateClip({ pathTension: parseFloat(tensionSlider.value) || 0.5 });
+  });
+
+  // ── Keyframe management ──
+  const addKfBtn = document.getElementById('prop-camera-add-kf');
+  if (addKfBtn) addKfBtn.addEventListener('click', () => {
+    const clip = getClip();
+    if (!clip) return;
+    const pos = mesh.position.toArray();
+    const rot = mesh.quaternion.toArray();
+    const time = clip.keyframes.length > 0
+      ? clip.keyframes[clip.keyframes.length - 1].time + 1
+      : 0;
+    const kf = normalizeCameraKeyframe({ time, position: pos, rotation: rot, easing: 'ease-in-out' });
+    clip.keyframes.push(kf);
+    clip.keyframes.sort((a, b) => a.time - b.time);
+    updateClip({ keyframes: clip.keyframes });
+    refreshProps();
+  });
+
+  const delLastBtn = document.getElementById('prop-camera-del-last-kf');
+  if (delLastBtn) delLastBtn.addEventListener('click', () => {
+    const clip = getClip();
+    if (!clip || !clip.keyframes.length) return;
+    clip.keyframes.pop();
+    updateClip({ keyframes: clip.keyframes });
+    refreshProps();
+  });
+
+  const clearBtn = document.getElementById('prop-camera-clear-kfs');
+  if (clearBtn) clearBtn.addEventListener('click', () => {
+    updateClip({ keyframes: [] });
+    refreshProps();
+  });
+
+  // Per-keyframe easing edits
+  document.querySelectorAll('.cam-kf-easing').forEach(select => {
+    select.addEventListener('change', () => {
+      const clip = getClip();
+      if (!clip) return;
+      const idx = parseInt(select.dataset.kfIndex);
+      if (clip.keyframes[idx]) {
+        clip.keyframes[idx].easing = select.value;
+        updateClip({ keyframes: clip.keyframes });
+      }
+    });
+  });
+  document.querySelectorAll('.cam-kf-del').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const clip = getClip();
+      if (!clip) return;
+      const idx = parseInt(btn.dataset.kfIndex);
+      clip.keyframes.splice(idx, 1);
+      updateClip({ keyframes: clip.keyframes });
+      refreshProps();
+    });
+  });
+
+  // Preview animation
+  const previewBtn = document.getElementById('prop-camera-preview');
+  const stopBtn = document.getElementById('prop-camera-stop-preview');
+  if (previewBtn) previewBtn.addEventListener('click', () => {
+    startCameraAnimationPreview(mesh);
+    if (previewBtn) previewBtn.style.display = 'none';
+    if (stopBtn) stopBtn.style.display = '';
+  });
+  if (stopBtn) stopBtn.addEventListener('click', () => {
+    stopCameraAnimationPreview();
+    if (previewBtn) previewBtn.style.display = '';
+    if (stopBtn) stopBtn.style.display = 'none';
+  });
+
+  // Timeline scrubber
+  const scrubber = document.getElementById('prop-camera-scrubber');
+  const scrubTime = document.getElementById('prop-camera-scrub-time');
+  const scrubFrame = document.getElementById('prop-camera-scrub-frame');
+  if (scrubber) {
+    const _scrubUpdate = () => {
+      const cfg2 = getCurrentConfig();
+      const clipInfo2 = _getActiveClipInfo(cfg2);
+      const t = parseFloat(scrubber.value) * clipInfo2.duration;
+      const fps2 = 30;
+      if (scrubTime) scrubTime.textContent = t.toFixed(2) + 's';
+      if (scrubFrame) scrubFrame.textContent = 'Frame ' + Math.round(t * fps2);
+      const result = _interpolateCameraAnimation(cfg2, t);
+      if (result) {
+        mesh.position.copy(result.position);
+        if (result.lookAt) {
+          mesh.lookAt(result.lookAt);
+        } else if (result.rotation) {
+          mesh.quaternion.copy(result.rotation);
+        }
+        _refreshCameraPathPreview(mesh);
+        _renderCameraPip();
+      }
+    };
+    scrubber.addEventListener('input', _scrubUpdate);
+
+    // Step forward/back buttons
+    const stepBack = document.getElementById('prop-camera-step-back');
+    const stepFwd = document.getElementById('prop-camera-step-fwd');
+    const _stepFrame = (dir) => {
+      const cfg2 = getCurrentConfig();
+      const clipInfo2 = _getActiveClipInfo(cfg2);
+      const fps2 = 30;
+      const frameStep = 1 / (clipInfo2.duration * fps2);
+      scrubber.value = Math.max(0, Math.min(1, parseFloat(scrubber.value) + dir * frameStep));
+      _scrubUpdate();
+    };
+    if (stepBack) stepBack.addEventListener('click', () => _stepFrame(-1));
+    if (stepFwd) stepFwd.addEventListener('click', () => _stepFrame(1));
+
+    // Keyframe tick clicks — jump scrubber to keyframe time
+    document.querySelectorAll('.cam-kf-tick').forEach(tick => {
+      tick.addEventListener('click', () => {
+        const cfg2 = getCurrentConfig();
+        const clipInfo2 = _getActiveClipInfo(cfg2);
+        const idx = parseInt(tick.dataset.kfTick);
+        const kf = clipInfo2.keyframes[idx];
+        if (kf && clipInfo2.duration > 0) {
+          scrubber.value = (kf.time || idx) / clipInfo2.duration;
+          _scrubUpdate();
+        }
+      });
+    });
+
+    // Play from here
+    const playFromBtn = document.getElementById('prop-camera-play-from');
+    if (playFromBtn) playFromBtn.addEventListener('click', () => {
+      const cfg2 = getCurrentConfig();
+      const clipInfo2 = _getActiveClipInfo(cfg2);
+      const startOffset = parseFloat(scrubber.value) * clipInfo2.duration;
+      startCameraAnimationPreview(mesh);
+      // Offset the preview start time so it begins at the scrubber position
+      _cameraPreviewStartTime = performance.now() / 1000 - startOffset;
+      if (previewBtn) previewBtn.style.display = 'none';
+      if (stopBtn) stopBtn.style.display = '';
+    });
+
+    // Keyboard: left/right arrow when scrubber focused
+    scrubber.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowLeft') { e.preventDefault(); _stepFrame(-1); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); _stepFrame(1); }
+    });
+  }
+
+  // Render to video
+  const renderBtn = document.getElementById('prop-camera-render');
+  if (renderBtn) renderBtn.addEventListener('click', () => showRenderToVideoDialog(mesh));
+
+  // Screenshot
+  const shotBtn = document.getElementById('prop-camera-screenshot');
+  if (shotBtn) shotBtn.addEventListener('click', () => {
+    const cfg = getCurrentConfig();
+    const shotCam = new THREE.PerspectiveCamera(cfg.fov, cfg.aspectRatio, cfg.near, cfg.far);
+    mesh.updateMatrixWorld(true);
+    const wp = new THREE.Vector3();
+    mesh.getWorldPosition(wp);
+    shotCam.position.copy(wp);
+    if (cfg.lookAtEnabled) {
+      shotCam.lookAt(cfg.lookAtTarget[0], cfg.lookAtTarget[1], cfg.lookAtTarget[2]);
+    } else {
+      const wq = new THREE.Quaternion();
+      mesh.getWorldQuaternion(wq);
+      shotCam.quaternion.copy(wq);
+    }
+    shotCam.updateProjectionMatrix();
+    const w = 1920, h = Math.round(1920 / cfg.aspectRatio);
+    const rt = new THREE.WebGLRenderTarget(w, h);
+    const wasVis = mesh.visible;
+    mesh.visible = false;
+
+    // Hide objects invisible in-game for screenshot too
+    const hiddenForShot = [];
+    for (const sm of sceneObjects) {
+      if (sm.userData.hiddenInGame || ['light', 'spawn', 'trigger', 'pivot', 'soundzone'].includes(sm.userData.type)) {
+        if (sm.visible || (sm.material && sm.material.visible)) {
+          hiddenForShot.push({ mesh: sm, wasV: sm.visible, matV: sm.material?.visible });
+          sm.visible = false;
+          if (sm.material) sm.material.visible = false;
+          if (sm.userData.customSkinGroup) sm.userData.customSkinGroup.visible = false;
+        }
+      }
+    }
+
+    const curTarget = renderer.getRenderTarget();
+    renderer.setRenderTarget(rt);
+    renderer.render(scene, shotCam);
+    renderer.setRenderTarget(curTarget);
+    mesh.visible = wasVis;
+
+    // Restore hidden
+    for (const sh of hiddenForShot) {
+      sh.mesh.visible = sh.wasV;
+      if (sh.mesh.material) sh.mesh.material.visible = sh.matV;
+      if (sh.mesh.userData.customSkinGroup) sh.mesh.userData.customSkinGroup.visible = true;
+    }
+
+    const buf = new Uint8Array(w * h * 4);
+    renderer.readRenderTargetPixels(rt, 0, 0, w, h, buf);
+    rt.dispose();
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    const imgData = ctx.createImageData(w, h);
+    for (let y = 0; y < h; y++) {
+      const src = (h - 1 - y) * w * 4, dst = y * w * 4;
+      imgData.data.set(buf.subarray(src, src + w * 4), dst);
+    }
+    ctx.putImageData(imgData, 0, 0);
+    c.toBlob(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `flame3d-screenshot-${Date.now()}.png`; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }, 'image/png');
+  });
+
+  // Setup helpers
+  _createCameraFrustumHelper(mesh);
+  if (getCurrentConfig().lookAtEnabled) _createCameraLookAtHelper(mesh);
+  _createCameraPip(mesh);
+  _refreshCameraPathPreview(mesh);
 }
 
 function bindTriggerStopProps(mesh) {
@@ -17855,7 +22872,7 @@ function bindTriggerRules(mesh) {
   document.querySelectorAll('.tr-rule-val').forEach(input => {
     input.addEventListener('change', () => {
       const key = input.dataset.rule;
-      const val = parseFloat(input.value) || 0;
+      const val = key === 'keyPress' ? String(input.value || '').trim() : (parseFloat(input.value) || 0);
       for (const t of triggerTargets) {
         if (!t.userData.triggerRules) t.userData.triggerRules = {};
         t.userData.triggerRules[key] = val;
@@ -17880,7 +22897,7 @@ function bindTriggerRules(mesh) {
       if (key) {
         const defaultVal = key === 'health'
           ? Math.min(fpsHealth, gameRules.maxHealth)
-          : (gameRules[key] ?? 0);
+          : (key === 'keyPress' ? 'KeyE' : (gameRules[key] ?? 0));
         for (const t of triggerTargets) {
           if (!t.userData.triggerRules) t.userData.triggerRules = {};
           t.userData.triggerRules[key] = defaultVal;
@@ -18248,6 +23265,32 @@ function bindControlActions(mesh) {
   });
 }
 
+function bindSoundZoneProps(mesh) {
+  if (!mesh || mesh.userData.type !== 'soundzone') return;
+  const cfg = getMeshSoundZoneConfig(mesh);
+  const audioInput = document.getElementById('prop-sz-audio');
+  const radiusInput = document.getElementById('prop-sz-radius');
+  const volumeInput = document.getElementById('prop-sz-volume');
+  const loopInput = document.getElementById('prop-sz-loop');
+
+  if (audioInput) audioInput.addEventListener('change', () => {
+    cfg.audioName = String(audioInput.value || '').trim();
+    mesh.userData.soundZoneConfig = normalizeSoundZoneConfig(cfg);
+  });
+  if (radiusInput) radiusInput.addEventListener('change', () => {
+    cfg.radius = THREE.MathUtils.clamp(parseFloat(radiusInput.value) || 8, 1, 200);
+    mesh.userData.soundZoneConfig = normalizeSoundZoneConfig(cfg);
+  });
+  if (volumeInput) volumeInput.addEventListener('change', () => {
+    cfg.volume = THREE.MathUtils.clamp(parseFloat(volumeInput.value) || 0.4, 0, 1);
+    mesh.userData.soundZoneConfig = normalizeSoundZoneConfig(cfg);
+  });
+  if (loopInput) loopInput.addEventListener('change', () => {
+    cfg.loop = !!loopInput.checked;
+    mesh.userData.soundZoneConfig = normalizeSoundZoneConfig(cfg);
+  });
+}
+
 function bindJointProps(mesh) {
   if (!mesh || mesh.userData.type !== 'joint') return;
   const jc = getMeshJointConfig(mesh);
@@ -18308,6 +23351,7 @@ function refreshProps() {
   const isTrigger = m.userData.type === 'trigger';
   const isTarget = m.userData.type === 'target';
   const isKeypad = m.userData.type === 'keypad';
+  const isSoundZone = m.userData.type === 'soundzone';
   const isJoint = m.userData.type === 'joint';
   const isSkeleton = m.userData.type === 'skeleton';
   const canToggleSwitch = isSwitchableObjectType(m.userData.type);
@@ -18324,6 +23368,7 @@ function refreshProps() {
   const isNpc = m.userData.type === 'npc';
   const npcConfig = isNpc ? normalizeNpcConfig(m.userData.npcConfig) : null;
   const keypadConfig = isKeypad ? getMeshKeypadConfig(m) : null;
+  const soundZoneConfig = isSoundZone ? getMeshSoundZoneConfig(m) : null;
   const isSwitch = canToggleSwitch && switchConfig.enabled;
   const canEditControlFunctions = isTrigger || canToggleSwitch;
   const switchVarOptions = renderDatalistOptions([...new Set([...SWITCH_VAR_KEYS, ...getKnownVarNames([switchConfig.varKey])])]);
@@ -18332,11 +23377,11 @@ function refreshProps() {
     ? `<div class="prop-row"><span class="prop-key">Color</span><div class="prop-controls"><input id="prop-surface-color" type="color" value="${colorHexToCss(m.material.color.getHex())}"/><span id="prop-surface-color-value" class="prop-code">${colorHexToCss(m.material.color.getHex()).toUpperCase()}</span></div></div>`
     : '';
 
-  const shapeParams = normalizeShapeParams(m.userData.type, m.userData.shapeParams || {});
-  const shapeControls = (def.usesSides || def.is2D)
-    ? `${def.usesSides ? `<div class="prop-row"><span class="prop-key">Sides</span><div class="prop-controls"><input id="prop-shape-sides" type="number" min="3" max="64" step="1" value="${shapeParams.sides ?? clampShapeSides(state.placeSides)}" style="width:64px"/></div></div>` : ''}
-       ${def.is2D ? `<div class="prop-row"><span class="prop-key">Depth</span><div class="prop-controls"><input id="prop-shape-depth" type="number" min="0.05" max="8" step="0.05" value="${r3(shapeParams.depth ?? clampShapeDepth(state.place2DDepth), 2)}" style="width:64px"/></div></div>` : ''}`
-    : '';
+  const shapeParams = normalizeShapeParams(typeof getEffectiveShapeType === 'function' ? getEffectiveShapeType(m) : m.userData.type, m.userData.shapeParams || {});
+  const shapeSelectHtml = typeof buildShapeSelectHTML === 'function' ? buildShapeSelectHTML(m) : '';
+  const effectiveShapeControlsHtml = typeof buildEffectiveShapeControls === 'function' ? buildEffectiveShapeControls(m) : '';
+  const visibleInPlayHtml = typeof buildVisibleInPlayHTML === 'function' ? buildVisibleInPlayHTML(m) : '';
+  const shapeControls = shapeSelectHtml + effectiveShapeControlsHtml;
 
   const solidToggle = `<div class="prop-row"><span class="prop-key">Solid</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-solid-toggle" type="checkbox" ${m.userData.solid ? 'checked' : ''}/> Block</label></div></div>`;
   const solidnessControls = `<div class="prop-row"><span class="prop-key" title="How much this object resists being pushed through (1 = fully solid, 0 = pass-through)">Density</span><div class="prop-controls"><input id="prop-solidness-range" type="range" min="0" max="1" step="0.01" value="${clampMeshSolidness(m.userData.solidness ?? 1)}"/><input id="prop-solidness-number" type="number" min="0" max="1" step="0.01" value="${r3(clampMeshSolidness(m.userData.solidness ?? 1), 2)}"/></div></div>`;
@@ -18344,7 +23389,27 @@ function refreshProps() {
   const curMetalness = m.material.metalness ?? 0;
   const curRoughness = m.material.roughness ?? 0.5;
   const reflectControls = `<div class="prop-row"><span class="prop-key">Metal</span><div class="prop-controls"><input id="prop-metalness-range" type="range" min="0" max="1" step="0.01" value="${r3(curMetalness, 2)}"/><input id="prop-metalness-number" type="number" min="0" max="1" step="0.01" value="${r3(curMetalness, 2)}"/></div></div><div class="prop-row"><span class="prop-key">Rough</span><div class="prop-controls"><input id="prop-roughness-range" type="range" min="0" max="1" step="0.01" value="${r3(curRoughness, 2)}"/><input id="prop-roughness-number" type="number" min="0" max="1" step="0.01" value="${r3(curRoughness, 2)}"/></div></div>`;
+
+  // Texture controls
+  const texCfg = normalizeTextureConfig(m.userData.textureConfig);
+  const hasTexture = !!texCfg;
+  const textureControls = isSurface ? `
+    <div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Texture</span></div>
+    <div class="prop-row"><span class="prop-key">Image</span><div class="prop-controls" style="gap:4px">
+      <button id="prop-tex-upload" type="button" style="font-size:10px;padding:2px 8px;cursor:pointer">📁 Upload</button>
+      <input id="prop-tex-file" type="file" accept="image/*" style="display:none"/>
+      ${hasTexture ? `<button id="prop-tex-remove" type="button" style="font-size:10px;padding:2px 8px;cursor:pointer;color:#f44">✕ Remove</button>` : ''}
+    </div></div>
+    ${hasTexture ? `<div class="prop-row"><span class="prop-key">Preview</span><div class="prop-controls"><img id="prop-tex-preview" src="${texCfg.imageData.substring(0, 100000)}" style="max-width:80px;max-height:60px;border-radius:3px;border:1px solid var(--border);image-rendering:auto"/></div></div>
+    <div class="prop-row"><span class="prop-key">Repeat</span><div class="prop-controls"><label style="font-size:9px;color:var(--muted)">X</label><input id="prop-tex-repeat-x" type="number" step="0.1" value="${r3(texCfg.repeatX, 2)}" style="width:52px"/><label style="font-size:9px;color:var(--muted)">Y</label><input id="prop-tex-repeat-y" type="number" step="0.1" value="${r3(texCfg.repeatY, 2)}" style="width:52px"/></div></div>
+    <div class="prop-row"><span class="prop-key">Offset</span><div class="prop-controls"><label style="font-size:9px;color:var(--muted)">X</label><input id="prop-tex-offset-x" type="number" step="0.01" value="${r3(texCfg.offsetX, 2)}" style="width:52px"/><label style="font-size:9px;color:var(--muted)">Y</label><input id="prop-tex-offset-y" type="number" step="0.01" value="${r3(texCfg.offsetY, 2)}" style="width:52px"/></div></div>
+    <div class="prop-row"><span class="prop-key">Rotate°</span><div class="prop-controls"><input id="prop-tex-rotation" type="number" step="1" value="${r3(texCfg.rotation, 1)}" style="width:64px"/></div></div>
+    <div class="prop-row"><span class="prop-key">Wrap</span><div class="prop-controls"><label style="font-size:9px;color:var(--muted)">S</label><select id="prop-tex-wrap-s" style="font-size:10px;padding:2px"><option value="repeat" ${texCfg.wrapS === 'repeat' ? 'selected' : ''}>Repeat</option><option value="clamp" ${texCfg.wrapS === 'clamp' ? 'selected' : ''}>Clamp</option><option value="mirror" ${texCfg.wrapS === 'mirror' ? 'selected' : ''}>Mirror</option></select><label style="font-size:9px;color:var(--muted)">T</label><select id="prop-tex-wrap-t" style="font-size:10px;padding:2px"><option value="repeat" ${texCfg.wrapT === 'repeat' ? 'selected' : ''}>Repeat</option><option value="clamp" ${texCfg.wrapT === 'clamp' ? 'selected' : ''}>Clamp</option><option value="mirror" ${texCfg.wrapT === 'mirror' ? 'selected' : ''}>Mirror</option></select></div></div>
+    <div class="prop-row"><span class="prop-key">Flip Y</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-tex-flip-y" type="checkbox" ${texCfg.flipY ? 'checked' : ''}/></label></div></div>` : ''}
+  ` : '';
+
   const tractionToggle = `<div class="prop-row"><span class="prop-key" title="When enabled, the player moves with this object (like standing on a moving platform)">Moving Platform</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-traction-toggle" type="checkbox" ${m.userData.traction ? 'checked' : ''}/> Carry player</label></div></div>`;
+  const staticToggle = `<div class="prop-row"><span class="prop-key" title="Static objects skip per-frame matrix updates (better FPS for scenery)">Static</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-static-toggle" type="checkbox" ${m.userData._isStatic ? 'checked' : ''}/> Freeze transforms</label></div></div>`;
   const gameVisibleToggle = `<div class="prop-row"><span class="prop-key">In-Game</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-game-visible" type="checkbox" ${!m.userData.hiddenInGame ? 'checked' : ''}/> Visible</label></div></div>`;
   const collisionControls = `<div class="prop-row"><span class="prop-key" title="How the game checks if the player bumps into this object">Collision</span><div class="prop-controls"><select id="prop-collision-mode" style="font-size:10px;padding:2px 3px"><option value="aabb" ${collisionMode !== 'geometry' ? 'selected' : ''}>Simple Box</option><option value="geometry" ${collisionMode === 'geometry' ? 'selected' : ''}>Exact Shape</option></select><span style="color:var(--muted);font-size:9px">exact shape = matches erased holes</span></div></div>
     ${collisionMode !== 'geometry' ? `<div class="prop-row"><span class="prop-key">Hitbox</span><div class="prop-controls"><select id="prop-hitbox-mode" style="font-size:10px;padding:2px 3px"><option value="auto" ${hitboxConfig.mode !== 'manual' ? 'selected' : ''}>Auto</option><option value="manual" ${hitboxConfig.mode === 'manual' ? 'selected' : ''}>Manual</option></select><button id="prop-hitbox-autofit" type="button" style="font-size:10px;padding:2px 6px">Auto Fit</button></div></div>
@@ -18408,6 +23473,14 @@ function refreshProps() {
       <div class="prop-row"><span class="prop-key">UI Offset</span><div class="prop-controls"><input id="prop-keypad-offset-x" type="number" step="1" value="${r3(keypadConfig.offsetX, 0)}" style="width:56px"/><input id="prop-keypad-offset-y" type="number" step="1" value="${r3(keypadConfig.offsetY, 0)}" style="width:56px"/><span style="color:var(--muted);font-size:9px">from center</span></div></div>`
     : '';
 
+  const soundZoneControls = isSoundZone && soundZoneConfig
+    ? `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">Sound Zone</span></div>
+       <div class="prop-row"><span class="prop-key">Audio</span><div class="prop-controls"><input id="prop-sz-audio" list="prop-sz-audio-list" type="text" value="${escapeHtml(soundZoneConfig.audioName || '')}" placeholder="audio name" style="width:140px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px;font-family:inherit"/><datalist id="prop-sz-audio-list">${renderDatalistOptions(getKnownAudioNames([soundZoneConfig.audioName]))}</datalist></div></div>
+       <div class="prop-row"><span class="prop-key">Radius</span><div class="prop-controls"><input id="prop-sz-radius" type="number" min="1" max="200" step="0.5" value="${r3(soundZoneConfig.radius, 2)}" style="width:70px"/></div></div>
+       <div class="prop-row"><span class="prop-key">Volume</span><div class="prop-controls"><input id="prop-sz-volume" type="number" min="0" max="1" step="0.05" value="${r3(soundZoneConfig.volume, 2)}" style="width:70px"/></div></div>
+       <div class="prop-row"><span class="prop-key">Loop</span><div class="prop-controls"><label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:11px"><input id="prop-sz-loop" type="checkbox" ${soundZoneConfig.loop ? 'checked' : ''}/> Repeat</label></div></div>`
+    : '';
+
   const checkpointControls = isCheckpoint
     ? `<div class="prop-row"><span class="prop-key">Checkpt</span><div class="prop-controls"><select id="prop-checkpoint-interaction" style="font-size:10px;padding:2px 3px"><option value="touch" ${checkpointConfig.interaction === 'touch' ? 'selected' : ''}>Touch</option><option value="shoot" ${checkpointConfig.interaction === 'shoot' ? 'selected' : ''}>Shoot</option><option value="switch" ${checkpointConfig.interaction === 'switch' ? 'selected' : ''}>Switch</option></select><span style="color:var(--muted);font-size:9px">sets next respawn</span></div></div>`
     : '';
@@ -18426,7 +23499,7 @@ function refreshProps() {
   // Screen/media controls
   const isScreen = m.userData.type === 'screen';
   const screenConfig = isScreen ? normalizeScreenConfig(m.userData.screenConfig) : null;
-  const _screenMediaOpts = [['color','Solid Color'],['image','Image'],['video','Video'],['url','Website URL'],['html','HTML']];
+  const _screenMediaOpts = [['color','Solid Color'],['image','Image'],['video','Video'],['url','Website URL'],['html','HTML'],['camera','Camera Feed']];
   const screenControls = isScreen
     ? `<div class="prop-row"><span class="prop-key">Media</span><div class="prop-controls"><select id="prop-screen-type" style="font-size:10px">${_screenMediaOpts.map(([v,l]) => `<option value="${v}" ${screenConfig.mediaType === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>` +
       `<div class="prop-row"><span class="prop-key">Interact</span><div class="prop-controls"><label style="font-size:10px;cursor:pointer"><input id="prop-screen-interactive" type="checkbox" ${screenConfig.interactive ? 'checked' : ''}/> Clickable in-game</label></div></div>` +
@@ -18434,14 +23507,86 @@ function refreshProps() {
       (screenConfig.mediaType === 'image' ? `<div class="prop-row"><span class="prop-key">Image</span><div class="prop-controls"><button id="prop-screen-upload" style="font-size:9px;padding:2px 6px">Upload Image</button><input id="prop-screen-file" type="file" accept="image/*" style="display:none"/></div></div>` : '') +
       (screenConfig.mediaType === 'video' ? `<div class="prop-row"><span class="prop-key">Video</span><div class="prop-controls"><button id="prop-screen-video-upload" style="font-size:9px;padding:2px 6px">Upload Video</button><input id="prop-screen-video-file" type="file" accept="video/*" style="display:none"/></div></div>` : '') +
       (screenConfig.mediaType === 'url' ? `<div class="prop-row"><span class="prop-key">URL</span><div class="prop-controls"><input id="prop-screen-url" type="text" value="${escapeHtml(screenConfig.url)}" placeholder="https://example.com" style="width:160px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px"/></div></div>` : '') +
-      (screenConfig.mediaType === 'html' ? `<div class="prop-row"><span class="prop-key">HTML</span><div class="prop-controls"><textarea id="prop-screen-html" rows="4" style="width:170px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:3px 5px;font-size:10px;font-family:monospace;resize:vertical" placeholder="&lt;h1&gt;Hello&lt;/h1&gt;">${escapeHtml(screenConfig.htmlContent)}</textarea></div></div><div class="prop-row"><div class="prop-controls"><button id="prop-screen-html-upload" style="font-size:9px;padding:2px 6px">Upload HTML File</button><input id="prop-screen-html-file" type="file" accept=".html,.htm" style="display:none"/></div></div>` : '')
+      (screenConfig.mediaType === 'html' ? `<div class="prop-row"><span class="prop-key">HTML</span><div class="prop-controls"><textarea id="prop-screen-html" rows="4" style="width:170px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:3px 5px;font-size:10px;font-family:monospace;resize:vertical" placeholder="&lt;h1&gt;Hello&lt;/h1&gt;">${escapeHtml(screenConfig.htmlContent)}</textarea></div></div><div class="prop-row"><div class="prop-controls"><button id="prop-screen-html-upload" style="font-size:9px;padding:2px 6px">Upload HTML File</button><input id="prop-screen-html-file" type="file" accept=".html,.htm" style="display:none"/></div></div>` : '') +
+      (screenConfig.mediaType === 'camera' ? `<div class="prop-row"><span class="prop-key">Camera</span><div class="prop-controls"><input id="prop-screen-camera-label" type="text" list="prop-screen-camera-list" value="${escapeHtml(screenConfig.cameraLabel)}" placeholder="camera label" style="width:118px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:2px 5px;font-size:11px;font-family:inherit"/><datalist id="prop-screen-camera-list">${sceneObjects.filter(o => o.userData.type === 'camera').map(o => `<option value="${escapeHtml(o.userData.label || o.name)}"/>`).join('')}</datalist><span style="color:var(--muted);font-size:9px">camera label</span></div></div>` : '')
     : '';
 
   // Camera controls
   const isCamera = m.userData.type === 'camera';
   const cameraConfig = isCamera ? normalizeCameraConfig(m.userData.cameraConfig) : null;
+  const _camClip = isCamera ? _getActiveClip(cameraConfig) : null;
+  const _camClipInfo = isCamera ? _getActiveClipInfo(cameraConfig) : null;
+  const _camClipNames = isCamera ? Object.keys(cameraConfig.clips) : [];
   const cameraControls = isCamera
-    ? `<div class="prop-row"><span class="prop-key">FOV</span><div class="prop-controls"><input id="prop-camera-fov" type="number" min="10" max="150" step="1" value="${cameraConfig.fov}" style="width:56px"/></div></div><div class="prop-row"><span class="prop-key">Near</span><div class="prop-controls"><input id="prop-camera-near" type="number" min="0.01" step="0.1" value="${cameraConfig.near}" style="width:56px"/></div></div><div class="prop-row"><span class="prop-key">Far</span><div class="prop-controls"><input id="prop-camera-far" type="number" min="1" step="10" value="${cameraConfig.far}" style="width:56px"/></div></div>`
+    ? `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">📷 Lens</span></div>` +
+      `<div class="prop-row"><span class="prop-key">FOV</span><div class="prop-controls"><input id="prop-camera-fov" type="number" min="10" max="150" step="1" value="${cameraConfig.fov}" style="width:56px"/></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Near</span><div class="prop-controls"><input id="prop-camera-near" type="number" min="0.01" step="0.1" value="${cameraConfig.near}" style="width:56px"/></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Far</span><div class="prop-controls"><input id="prop-camera-far" type="number" min="1" step="10" value="${cameraConfig.far}" style="width:56px"/></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Aspect</span><div class="prop-controls"><select id="prop-camera-aspect" style="font-size:10px"><option value="1.7778" ${Math.abs(cameraConfig.aspectRatio - 16/9) < 0.01 ? 'selected' : ''}>16:9</option><option value="2.3333" ${Math.abs(cameraConfig.aspectRatio - 21/9) < 0.01 ? 'selected' : ''}>21:9</option><option value="1.3333" ${Math.abs(cameraConfig.aspectRatio - 4/3) < 0.01 ? 'selected' : ''}>4:3</option><option value="2.35" ${Math.abs(cameraConfig.aspectRatio - 2.35) < 0.01 ? 'selected' : ''}>2.35:1 Cine</option><option value="1" ${Math.abs(cameraConfig.aspectRatio - 1) < 0.01 ? 'selected' : ''}>1:1</option></select></div></div>` +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">🎯 Look-At Target</span></div>` +
+      `<div class="prop-row"><span class="prop-key">Enabled</span><div class="prop-controls"><label style="font-size:10px;cursor:pointer"><input id="prop-camera-lookat-enabled" type="checkbox" ${cameraConfig.lookAtEnabled ? 'checked' : ''}/> Track point</label></div></div>` +
+      (cameraConfig.lookAtEnabled ? `<div class="prop-row"><span class="prop-key">Target</span><div class="prop-controls"><input id="prop-camera-lookat-x" type="number" step="0.5" value="${r3(cameraConfig.lookAtTarget[0])}" style="width:50px" title="X"/><input id="prop-camera-lookat-y" type="number" step="0.5" value="${r3(cameraConfig.lookAtTarget[1])}" style="width:50px" title="Y"/><input id="prop-camera-lookat-z" type="number" step="0.5" value="${r3(cameraConfig.lookAtTarget[2])}" style="width:50px" title="Z"/></div></div>` : '') +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">🎬 Motion Clips</span></div>` +
+      `<div class="prop-row"><span class="prop-key">Clip</span><div class="prop-controls" style="display:flex;gap:4px;align-items:center">` +
+        `<select id="prop-camera-clip-select" style="font-size:10px;max-width:100px">${_camClipNames.length ? _camClipNames.map(n => `<option value="${n}" ${n === cameraConfig.currentClip ? 'selected' : ''}>${n}</option>`).join('') : '<option value="">No clips</option>'}</select>` +
+        `<button id="prop-camera-clip-new" style="font-size:8px;padding:1px 6px;background:#238636;color:#fff;border:none;border-radius:3px;cursor:pointer" title="New clip">+</button>` +
+        `<button id="prop-camera-clip-del" style="font-size:8px;padding:1px 6px;background:#21262d;color:#f85149;border:1px solid #30363d;border-radius:3px;cursor:pointer" title="Delete clip"${_camClipNames.length < 1 ? ' disabled' : ''}>✕</button>` +
+      `</div></div>` +
+      (_camClip ? (
+      `<div class="prop-row"><span class="prop-key">Speed</span><div class="prop-controls"><input id="prop-camera-clip-speed" type="number" min="0.1" max="100" step="0.1" value="${r3(_camClip.speed)}" style="width:56px"/><span style="font-size:9px;color:var(--muted)">u/s</span></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Duration</span><span class="prop-val" style="font-size:10px;color:#58a6ff;font-weight:600">${r3(_camClipInfo.duration, 2)}s</span></div>` +
+      `<div class="prop-row"><span class="prop-key">Loop</span><div class="prop-controls"><label style="font-size:10px;cursor:pointer"><input id="prop-camera-clip-loop" type="checkbox" ${_camClip.loop ? 'checked' : ''}/> Loop</label></div></div>` +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">🛤 Path Settings</span></div>` +
+      `<div class="prop-row"><span class="prop-key">Type</span><div class="prop-controls"><select id="prop-camera-path-type" style="font-size:10px">${CAMERA_PATH_TYPES.map(pt => `<option value="${pt}" ${_camClip.pathType === pt ? 'selected' : ''}>${pt}</option>`).join('')}</select></div></div>` +
+      `<div class="prop-row"><span class="prop-key">Tension</span><div class="prop-controls"><input id="prop-camera-path-tension" type="range" min="0" max="1" step="0.05" value="${_camClip.pathTension}" style="width:80px"/><span id="prop-camera-tension-val" style="font-size:9px;color:var(--muted);min-width:24px">${r3(_camClip.pathTension, 2)}</span></div></div>` +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">◆ Keyframes</span></div>` +
+      `<div class="prop-row"><span class="prop-key">Count</span><span class="prop-val" style="font-size:10px;color:var(--accentHi)">${_camClip.keyframes.length} keyframe${_camClip.keyframes.length !== 1 ? 's' : ''}</span></div>` +
+      `<div class="prop-row"><div class="prop-controls" style="display:flex;gap:4px;flex-wrap:wrap">` +
+        `<button id="prop-camera-add-kf" style="font-size:9px;padding:2px 8px;background:#1f6feb;color:#fff;border:none;border-radius:3px;cursor:pointer" title="Add keyframe at camera's current position">◆ Add KF</button>` +
+        `<button id="prop-camera-del-last-kf" style="font-size:9px;padding:2px 8px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:3px;cursor:pointer" title="Delete last keyframe">✕ Del Last</button>` +
+        `<button id="prop-camera-clear-kfs" style="font-size:9px;padding:2px 8px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:3px;cursor:pointer" title="Clear all keyframes">🗑 Clear</button>` +
+      `</div></div>` +
+      (_camClip.keyframes.length ? `<div class="prop-row" style="flex-direction:column;align-items:stretch;gap:2px;max-height:140px;overflow-y:auto">` +
+        _camClip.keyframes.map((kf, i) =>
+          `<div style="display:flex;align-items:center;gap:4px;font-size:9px;padding:1px 0">` +
+            `<span style="color:#00ccff;min-width:16px">◆${i + 1}</span>` +
+            `<span style="color:var(--muted)" title="Position">${r3(kf.position[0],1)},${r3(kf.position[1],1)},${r3(kf.position[2],1)}</span>` +
+            `<select class="cam-kf-easing" data-kf-index="${i}" style="font-size:8px;padding:0 2px">${CAMERA_EASING_TYPES.map(e => `<option value="${e}" ${kf.easing === e ? 'selected' : ''}>${e}</option>`).join('')}</select>` +
+            `<button class="cam-kf-del" data-kf-index="${i}" style="font-size:8px;padding:0 4px;background:none;border:none;color:#f85149;cursor:pointer" title="Delete this keyframe">✕</button>` +
+          `</div>`
+        ).join('') +
+      `</div>` : '') +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">🕐 Timeline Scrubber</span></div>` +
+      (_camClip.keyframes.length >= 2 ? (
+      `<div class="prop-row" style="flex-direction:column;gap:4px;padding:4px 11px">` +
+        `<div style="display:flex;align-items:center;gap:6px;width:100%">` +
+          `<input id="prop-camera-scrubber" type="range" min="0" max="1" step="0.001" value="0" style="flex:1;accent-color:#00ccff;cursor:pointer" title="Scrub through camera animation"/>` +
+        `</div>` +
+        `<div style="display:flex;justify-content:space-between;font-size:9px;color:var(--muted)">` +
+          `<span id="prop-camera-scrub-time">0.00s</span>` +
+          `<span id="prop-camera-scrub-frame">Frame 0</span>` +
+          `<span>${r3(_camClipInfo.duration, 2)}s</span>` +
+        `</div>` +
+        `<div style="position:relative;height:10px;background:#21262d;border-radius:3px;overflow:hidden;margin:2px 0" id="prop-camera-kf-ticks">` +
+          _camClip.keyframes.map((kf, i) => {
+            const pct = _camClipInfo.duration > 0 ? ((kf.time || i) / _camClipInfo.duration * 100) : 0;
+            return `<div class="cam-kf-tick" data-kf-tick="${i}" style="position:absolute;left:${pct}%;top:0;width:2px;height:100%;background:#00ccff;cursor:pointer;opacity:0.7" title="KF ${i + 1}"></div>`;
+          }).join('') +
+        `</div>` +
+        `<div style="display:flex;gap:4px">` +
+          `<button id="prop-camera-play-from" style="font-size:8px;padding:2px 6px;background:#238636;color:#fff;border:none;border-radius:3px;cursor:pointer" title="Play from current scrubber position">▶ Play from here</button>` +
+          `<button id="prop-camera-step-back" style="font-size:8px;padding:2px 6px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:3px;cursor:pointer" title="Step back 1 frame">◀</button>` +
+          `<button id="prop-camera-step-fwd" style="font-size:8px;padding:2px 6px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:3px;cursor:pointer" title="Step forward 1 frame">▶</button>` +
+        `</div>` +
+      `</div>`) : `<div class="prop-row"><span style="font-size:9px;color:var(--muted);padding:0 11px">Need 2+ keyframes for scrubber</span></div>`) +
+      `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">▶ Preview & Render</span></div>` +
+      `<div class="prop-row"><div class="prop-controls" style="display:flex;gap:4px;flex-wrap:wrap">` +
+        `<button id="prop-camera-preview" style="font-size:9px;padding:3px 10px;background:#238636;color:#fff;border:none;border-radius:3px;cursor:pointer" title="Preview animation — moves camera along path${_camClip.keyframes.length < 2 ? ' (need 2+ KFs)' : ''}" ${_camClip.keyframes.length < 2 ? 'disabled' : ''}>▶ Preview</button>` +
+        `<button id="prop-camera-stop-preview" style="font-size:9px;padding:3px 10px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:3px;cursor:pointer;display:none">⏹ Stop</button>` +
+        `<button id="prop-camera-render" style="font-size:9px;padding:3px 10px;background:#8957e5;color:#fff;border:none;border-radius:3px;cursor:pointer" title="Render to video${_camClip.keyframes.length < 2 ? ' (need 2+ KFs)' : ''}" ${_camClip.keyframes.length < 2 ? 'disabled' : ''}>🎬 Render</button>` +
+        `<button id="prop-camera-screenshot" style="font-size:9px;padding:3px 10px;background:#21262d;color:#e6edf3;border:1px solid #30363d;border-radius:3px;cursor:pointer" title="Screenshot from camera view">📸 Shot</button>` +
+      `</div></div>`
+      ) : '')
     : '';
 
   // NPC controls
@@ -18463,6 +23608,20 @@ function refreshProps() {
       `<div class="prop-row"><div class="prop-controls" style="width:100%"><textarea id="prop-npc-dialogue" rows="6" style="width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:4px 6px;font-size:11px;font-family:inherit;resize:vertical;line-height:1.4" placeholder="One line per dialogue message&#10;Player presses E to advance&#10;Last line closes the dialogue">${escapeHtml(npcConfig.dialogueLines.join('\n'))}</textarea></div></div>`
     : '';
 
+  // Command Block controls
+  const isCommandBlock = m.userData.type === 'commandBlock';
+  const commandBlockConfig = isCommandBlock ? normalizeCommandBlockConfig(m.userData.commandBlockConfig) : null;
+  const _allCmdNames = (isCommandBlock && window._flame3dConsole && window._flame3dConsole.commands) ? Object.keys(window._flame3dConsole.commands).sort() : [];
+  const commandBlockControls = isCommandBlock
+    ? `<div class="prop-row" style="padding:5px 11px;border-bottom:none"><span class="prop-key" style="font-size:9px;font-weight:700">⌨ Available Commands</span></div>` +
+      `<div style="max-height:200px;overflow-y:auto;margin:0 11px 4px 11px">` +
+      _allCmdNames.map(cmd => {
+        const disabled = commandBlockConfig.disabledCommands.includes(cmd);
+        return `<div class="prop-row" style="padding:1px 0"><div class="prop-controls"><label style="font-size:10px;cursor:pointer;display:flex;align-items:center;gap:4px"><input class="cmd-block-toggle" type="checkbox" data-cmd="${escapeHtml(cmd)}" ${!disabled ? 'checked' : ''}/> <code style="font-size:10px;color:${disabled ? 'var(--muted)' : '#58a6ff'}">${escapeHtml(cmd)}</code></label></div></div>`;
+      }).join('') +
+      `</div>`
+    : '';
+
   // Target health
   const targetControls = isTarget
     ? `<div class="prop-row"><span class="prop-key">Max HP</span><div class="prop-controls"><input id="prop-target-hp" type="number" min="0" max="9999" step="1" value="${m.userData.targetMaxHealth || 0}" style="width:56px"/><span style="color:var(--muted);font-size:9px">0 = invincible</span></div></div>`
@@ -18478,11 +23637,15 @@ function refreshProps() {
     const stopConfig = isTrigger ? getMeshTriggerStopConfig(m) : createDefaultTriggerStopConfig();
 
     const rules = m.userData.triggerRules || {};
-    const ruleKeys = ['health','jumpHeight','gravity','height','sprintSpeed','maxHealth','fallDamage','fallDamageMinHeight','fallDamageMultiplier'];
+    const ruleKeys = ['health','jumpHeight','gravity','height','sprintSpeed','maxHealth','fallDamage','fallDamageMinHeight','fallDamageMultiplier','keyPress'];
     let rulesListHtml = '';
     if (isTrigger) {
       for (const [k, v] of Object.entries(rules)) {
-        rulesListHtml += `<div class="prop-row" style="padding:2px 11px"><span class="prop-key" style="font-size:9px;min-width:50px">${k}</span><div class="prop-controls"><input class="tr-rule-val" data-rule="${k}" type="number" step="0.1" value="${v}" style="width:50px;font-size:10px"/><button class="ct-del tr-rule-del" data-rule="${k}">✕</button></div></div>`;
+        const isKeyRule = k === 'keyPress';
+        const val = isKeyRule ? escapeHtml(String(v ?? '')) : v;
+        const inputType = isKeyRule ? 'text' : 'number';
+        const stepAttr = isKeyRule ? '' : ' step="0.1"';
+        rulesListHtml += `<div class="prop-row" style="padding:2px 11px"><span class="prop-key" style="font-size:9px;min-width:50px">${k}</span><div class="prop-controls"><input class="tr-rule-val" data-rule="${k}" type="${inputType}"${stepAttr} value="${val}" style="width:70px;font-size:10px" placeholder="${isKeyRule ? 'KeyE' : ''}"/><button class="ct-del tr-rule-del" data-rule="${k}">✕</button></div></div>`;
       }
     }
 
@@ -18631,6 +23794,7 @@ function refreshProps() {
         ${shapeControls}
         ${opacityControls}
         ${reflectControls}
+        ${textureControls}
         ${emitToggle}
         ${lightControls}
       </div>
@@ -18641,17 +23805,20 @@ function refreshProps() {
         ${solidToggle}
         ${solidnessControls}
         ${tractionToggle}
+        ${staticToggle}
         ${collisionControls}
         ${gameVisibleToggle}
+        ${visibleInPlayHtml}
       </div>
     </div>
-    ${(pathControls || switchControls || switchRangeControls || keypadControls || checkpointControls || targetControls || triggerRulesHtml || jointControls || skeletonControls || npcControls) ? `<div class="props-category">
+    ${(pathControls || switchControls || switchRangeControls || keypadControls || soundZoneControls || checkpointControls || targetControls || triggerRulesHtml || jointControls || skeletonControls || npcControls || commandBlockControls) ? `<div class="props-category">
       <div class="props-cat-hdr" data-cat="behavior">▾ Behavior</div>
       <div class="props-cat-body" data-cat="behavior">
         ${pathControls}
         ${switchControls}
         ${switchRangeControls}
         ${keypadControls}
+        ${soundZoneControls}
         ${checkpointControls}
         ${teleportControls}
         ${targetControls}
@@ -18659,6 +23826,7 @@ function refreshProps() {
         ${jointControls}
         ${skeletonControls}
         ${npcControls}
+        ${commandBlockControls}
       </div>
     </div>` : ''}
     ${(textControls || screenControls || cameraControls) ? `<div class="props-category">
@@ -18710,12 +23878,18 @@ function refreshProps() {
   });
 
   bindSurfaceProps(m);
+  if (typeof bindShapeSelectProps === 'function') bindShapeSelectProps(m);
+  if (typeof bindTubeRadiusProps === 'function') bindTubeRadiusProps(m);
+  if (typeof bindFrameThicknessProps === 'function') bindFrameThicknessProps(m);
+  if (typeof bindVisibleInPlayProps === 'function') bindVisibleInPlayProps(m);
   bindShapeParamProps(m);
   bindSolidToggle(m);
   bindSolidnessProps(m);
   bindOpacityProps(m);
   bindReflectProps(m);
+  if (isSurface) bindTextureProps(m);
   bindTractionToggle(m);
+  bindStaticToggle(m);
   bindGameVisibleToggle(m);
   bindCollisionProps(m);
   if (hasLight) bindLightProps(m);
@@ -18726,6 +23900,7 @@ function refreshProps() {
   if (isTeleport) bindTeleportProps(m);
   if (canToggleSwitch) bindSwitchProps(m);
   if (isKeypad) bindKeypadProps(m);
+  if (isSoundZone) bindSoundZoneProps(m);
   if (isTarget) bindTargetHealthProp(m);
   if (isTrigger) {
     bindTriggerRules(m);
@@ -18738,6 +23913,7 @@ function refreshProps() {
   if (isScreen) bindScreenProps(m);
   if (isCamera) bindCameraProps(m);
   if (isNpc) bindNpcProps(m);
+  if (isCommandBlock) bindCommandBlockProps(m);
   refreshSelectedPathPreview();
 }
 
@@ -18837,14 +24013,9 @@ function refreshStatus() {
     txt += `<span class="s-sep">│</span>Depth: ${r3(state.place2DDepth, 2)}`;
   if (state.mode === 'place')
     txt += `<span class="s-sep">│</span>Opacity: ${r3(state.placeOpacity, 2)}`;
-  txt += `<span class="s-sep">│</span>Sun: ${r3(parseFloat(sunTimeInput.value), 1)}h`;
   txt += `<span class="s-sep">│</span>Grid: ${(state.chunkRenderRadius * 2) + 1}x${(state.chunkRenderRadius * 2) + 1}`;
-  if (state.mode === 'select' && state.transformMode === 'scale') {
-    const sx = state.scaleSides.x === 'pos' ? '+X' : '-X';
-    const sy = state.scaleSides.y === 'pos' ? '+Y' : '-Y';
-    const sz = state.scaleSides.z === 'pos' ? '+Z' : '-Z';
-    txt += `<span class="s-sep">│</span>Scale Sides: ${sx} ${sy} ${sz}`;
-  }
+  if (state.chunkRenderRadius > 8) txt += `<span style="color:#f0883e;font-weight:600" title="Large grid may reduce performance"> ⚠</span>`;
+
   const selectionCount = (state.selectedObject ? 1 : 0) + state.extraSelected.length;
   if (selectionCount) txt += `<span class="s-sep">│</span>Selected: ${selectionCount}`;
   if (state.selectedObject) {
@@ -19211,92 +24382,183 @@ document.addEventListener('mousedown', (e) => {
   });
 }
 
+// ─── Function Editor State ───────────────────────────────────────────────────
 // ─── Control functions UI (project-level function editor) ────────────────────
+
+/* ── Badge helper ─── */
+function _cfnBadgePills(actions) {
+  const counts = {};
+  for (const a of actions) {
+    const t = a.actionType || 'move';
+    counts[t] = (counts[t] || 0) + 1;
+  }
+  return Object.entries(counts).map(([t, n]) => {
+    const m = ACTION_TYPE_META[t] || { icon: '?', color: '#8b949e' };
+    return `<span class="cfn-action-badge" style="background:${m.color}22;color:${m.color}" title="${t} ×${n}">${m.icon}${n > 1 ? '×' + n : ''}</span>`;
+  }).join('');
+}
+
+/* ── Jump-to-function helper ─── */
+function _cfnJumpToFunction(name) {
+  const targetName = String(name ?? '').trim().toLowerCase();
+  if (!targetName) return;
+  const fnIdx = controlFunctions.findIndex(fn => String(fn.name ?? '').trim().toLowerCase() === targetName);
+  if (fnIdx < 0) return;
+  _cfnCollapsed.delete(fnIdx);
+  const fn = controlFunctions[fnIdx];
+  if (fn) {
+    const grp = controlFunctionGroups.find(g => g.id === fn.groupId);
+    if (grp && grp.collapsed) grp.collapsed = false;
+  }
+  refreshControlFunctionsUI();
+  requestAnimationFrame(() => {
+    const el = controlFunctionsListEl?.querySelector(`.ct-entry[data-fn-index="${fnIdx}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('cfn-highlight');
+      setTimeout(() => el.classList.remove('cfn-highlight'), 1600);
+    }
+  });
+}
+
 function refreshControlFunctionsUI() {
   if (!controlFunctionsListEl) return;
   ensureControlFunctionGroups();
   const search = String(controlFnSearchInput?.value ?? '').trim().toLowerCase();
-  const visible = controlFunctions
+  let visible = controlFunctions
     .map((fn, fnIdx) => ({ fn, fnIdx }))
     .filter(({ fn }) => !search || String(fn.name ?? '').toLowerCase().includes(search));
+  if (_cfnActionTypeFilter) {
+    visible = visible.filter(({ fn }) => fn.actions.some(a => a.actionType === _cfnActionTypeFilter));
+  }
 
   const groupOptionsHtml = controlFunctionGroups
     .map(group => `<option value="${escapeHtml(group.id)}">${escapeHtml(group.name)}</option>`)
     .join('');
 
-  const renderFunctionCard = (fn, fnIdx) => {
-    const actionsHtml = fn.actions.map((action, actIdx) => {
-      const isLight = action.actionType === 'light';
-      const isRotate = action.actionType === 'rotate';
-      const isAudio = action.actionType === 'audio';
-      const isPath = action.actionType === 'path';
-      const isFunctionControl = action.actionType === 'functionControl';
-      const isPlayerGroup = action.actionType === 'playerGroup';
-      const isSetVar = action.actionType === 'setVar';
-      const isSetBool = action.actionType === 'setBool';
-      const isPlayerStats = action.actionType === 'playerStats';
-      const isTeleport = action.actionType === 'teleport';
-      const isSkeletonAct = action.actionType === 'skeleton';
-      const moveOpts = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool || isPlayerStats || isTeleport || isSkeletonAct) ? '' : getMoveTargetOptions(action.refType, action.refValue);
-      const moveListId = `cfn-target-opts-${fnIdx}-${actIdx}`;
-      const fnListId = `cfn-fn-opts-${fnIdx}-${actIdx}`;
-      const audioListId = `cfn-audio-opts-${fnIdx}-${actIdx}`;
-      const varListId = `cfn-var-opts-${fnIdx}-${actIdx}`;
-      const boolListId = `cfn-bool-opts-${fnIdx}-${actIdx}`;
-      const knownFnNames = renderDatalistOptions(getKnownControlFunctionNames([action.audioUntilFunction, action.functionControlTarget]));
-      const knownAudioNames = renderDatalistOptions(getKnownAudioNames([action.audioName]));
-      const knownVarNames = renderDatalistOptions(getKnownVarNames([action.setVarName, action.setVarValueVar]));
-      const knownBoolNames = renderDatalistOptions(getKnownBoolNames([action.setBoolName]));
-      const primaryHtml = isPlayerGroup
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Groups</span><select class="cfn-pg-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${CONTROL_PLAYER_GROUP_MODES.map(mode => `<option value="${mode}" ${action.playerGroupMode === mode ? 'selected' : ''}>${mode}</option>`).join('')}</select><input class="cfn-pg-value" data-fn="${fnIdx}" data-act="${actIdx}" list="cfn-pg-groups-${fnIdx}-${actIdx}" type="text" value="${escapeHtml(action.playerGroupValue || '')}" placeholder="default, red, blue" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="cfn-pg-groups-${fnIdx}-${actIdx}">${renderDatalistOptions(getKnownGroups())}</datalist></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Random</span><span style="font-size:8px;color:var(--muted)">Use comma list above when mode=random</span></div>`
-        : isFunctionControl
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Cmd</span><select class="cfn-fc-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${FUNCTION_CONTROL_COMMANDS.map(cmd => `<option value="${cmd}" ${action.functionControlCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select></div>${normalizeFunctionNameList(action.functionControlTarget || '').map((tgt, ti) => `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">${ti === 0 ? 'Targets' : ''}</span><input class="cfn-fc-target-entry" data-fn="${fnIdx}" data-act="${actIdx}" data-tgt-index="${ti}" list="${fnListId}" type="text" value="${escapeHtml(tgt)}" placeholder="functionName" style="flex:1;min-width:80px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><button class="ct-del cfn-fc-target-del" data-fn="${fnIdx}" data-act="${actIdx}" data-tgt-index="${ti}" title="Remove">✕</button></div>`).join('')}<div class="sf-row" style="gap:4px"><span style="font-size:8px;min-width:42px"></span><button class="cfn-fc-target-add" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:8px;padding:1px 5px;color:var(--muted);cursor:pointer">+ Target</button></div><datalist id="${fnListId}">${knownFnNames}</datalist>`
-        : isPath
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Path</span><select class="cfn-path-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PATH_CONTROL_COMMANDS.map(cmd => `<option value="${cmd}" ${action.pathCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select><span style="font-size:8px;color:var(--muted)">target path</span></div>`
-        : isSetVar
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Var</span><input class="cfn-set-var-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${varListId}" type="text" value="${escapeHtml(action.setVarName || '')}" placeholder="score" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${varListId}">${knownVarNames}</datalist><select class="cfn-set-var-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${['=','+','-','*','/'].map(op => `<option value="${op}" ${action.setVarOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Value</span><select class="cfn-set-var-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="digits" ${action.setVarValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${action.setVarValueType === 'var' ? 'selected' : ''}>var</option></select>${action.setVarValueType === 'var' ? `<input class="cfn-set-var-var" data-fn="${fnIdx}" data-act="${actIdx}" list="${varListId}" type="text" value="${escapeHtml(action.setVarValueVar || '')}" placeholder="var name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="cfn-set-var-value" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="1" value="${action.setVarValue}" style="width:72px;font-size:9px"/>`}</div>`
-        : isSetBool
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Bool</span><input class="cfn-set-bool-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${boolListId}" type="text" value="${escapeHtml(action.setBoolName || '')}" placeholder="doorOpen" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${boolListId}">${knownBoolNames}</datalist><select class="cfn-set-bool-value" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="true" ${action.setBoolValue === true ? 'selected' : ''}>true</option><option value="false" ${action.setBoolValue === false ? 'selected' : ''}>false</option><option value="toggle" ${action.setBoolValue === 'toggle' ? 'selected' : ''}>toggle</option></select></div>`
-        : isPlayerStats
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Target</span><select class="cfn-ps-target-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="name" ${action.playerStatTargetType === 'name' ? 'selected' : ''}>name</option><option value="group" ${action.playerStatTargetType === 'group' ? 'selected' : ''}>group</option></select><input class="cfn-ps-target" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.playerStatTarget || '')}" placeholder="Player" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Stat</span><select class="cfn-ps-key" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PLAYER_STAT_KEYS.map(k => `<option value="${k}" ${action.playerStatKey === k ? 'selected' : ''}>${k}</option>`).join('')}</select><select class="cfn-ps-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PLAYER_STAT_OPS.map(op => `<option value="${op}" ${action.playerStatOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select><input class="cfn-ps-value" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="1" value="${action.playerStatValue}" style="width:64px;font-size:9px"/></div><div style="font-size:8px;color:#444d56;margin-left:42px">Only affects players matching the target. Non-player objects are ignored.</div>`
-        : isSkeletonAct
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Skeleton</span><select class="cfn-ref-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="group" ${action.refType === 'group' ? 'selected' : ''}>group</option><option value="name" ${action.refType === 'name' ? 'selected' : ''}>name</option></select><input class="cfn-ref-val" data-fn="${fnIdx}" data-act="${actIdx}" list="${moveListId}" type="text" value="${escapeHtml(action.refValue)}" placeholder="skeleton name" style="flex:1;min-width:70px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${moveListId}">${getMoveTargetOptions(action.refType, action.refValue)}</datalist></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Cmd</span><select class="cfn-skel-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${SKELETON_ANIM_COMMANDS.map(cmd => `<option value="${cmd}" ${action.skelAnimCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Clip</span><input class="cfn-skel-clip" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.skelAnimClip || '')}" placeholder="animation clip name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Speed</span><input class="cfn-skel-speed" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" min="0" value="${action.skelAnimSpeed ?? 1}" style="width:52px;font-size:9px"/></div>`
-        : isTeleport
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Mode</span><select class="cfn-teleport-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${TELEPORT_MODES.map(m => `<option value="${m}" ${action.teleportMode === m ? 'selected' : ''}>${m}</option>`).join('')}</select></div>${action.teleportMode === 'coords' ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Coords</span><input class="cfn-teleport-x" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[0]}" style="width:52px;font-size:9px"/><input class="cfn-teleport-y" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[1]}" style="width:52px;font-size:9px"/><input class="cfn-teleport-z" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[2]}" style="width:52px;font-size:9px"/></div>` : ''}${action.teleportMode === 'object' ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Object</span><input class="cfn-teleport-target-ref" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.teleportTargetRef || '')}" placeholder="object name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div>` : ''}<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">World</span><select class="cfn-teleport-world" data-fn="${fnIdx}" data-act="${actIdx}" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"><option value="" ${!action.teleportWorldId ? 'selected' : ''}>(current world)</option>${worlds.map(w => `<option value="${w.id}" ${action.teleportWorldId === w.id ? 'selected' : ''}>${escapeHtml(w.name || w.id)}</option>`).join('')}</select></div>`
-        : isAudio
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Audio</span><input class="cfn-audio-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${audioListId}" type="text" value="${escapeHtml(action.audioName || '')}" placeholder="audio name" style="flex:1;min-width:94px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${audioListId}">${knownAudioNames}</datalist></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Mode</span><select class="cfn-audio-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${AUDIO_PLAY_MODES.map(mode => `<option value="${mode}" ${action.audioMode === mode ? 'selected' : ''}>${mode}</option>`).join('')}</select><span style="font-size:8px;color:var(--muted)">Range</span><input class="cfn-audio-dist" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="1" max="800" step="1" value="${action.audioDistance}" style="width:52px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Until</span><select class="cfn-audio-until" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${AUDIO_UNTIL_EVENTS.map(ev => `<option value="${ev}" ${action.audioUntil === ev ? 'selected' : ''}>${ev}</option>`).join('')}</select><input class="cfn-audio-until-fn" data-fn="${fnIdx}" data-act="${actIdx}" list="${fnListId}" type="text" value="${escapeHtml(action.audioUntilFunction || '')}" placeholder="fn name" style="width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-audio-loop" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.audioLoop ? 'checked' : ''}/> Loop</label></div><datalist id="${fnListId}">${knownFnNames}</datalist>`
-        : isLight
-        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Light</span><select class="cfn-light-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${CONTROL_LIGHT_OPS.map(op => `<option value="${op}" ${action.lightOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select><input class="cfn-light-val" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.lightValue}" style="width:46px;font-size:9px"/></div>`
-        : isRotate
-          ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To Rot°</span><input class="cfn-rox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-roy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-roz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[2]}" style="width:42px;font-size:9px"/></div>
-          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From Rot°</span><input class="cfn-rsox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-rsoy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-rsoz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[2]}" style="width:42px;font-size:9px"/></div>
-          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">Spin RPM</span><input class="cfn-rrx" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[0]}" style="width:42px;font-size:9px"/><input class="cfn-rry" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[1]}" style="width:42px;font-size:9px"/><input class="cfn-rrz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[2]}" style="width:42px;font-size:9px"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-rotate-repeat" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.rotateRepeat ? 'checked' : ''}/> Loop</label></div>
-          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">Pivot</span><select class="cfn-rotate-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="separate" ${action.rotateGroupMode === 'separate' ? 'selected' : ''}>self</option><option value="together" ${action.rotateGroupMode === 'together' ? 'selected' : ''}>group center</option></select><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-keep-upright" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.rotateKeepUpright ? 'checked' : ''}/> Keep upright</label></div>
-          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`
-          : `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To (orig)</span><input class="cfn-ox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[0]}" style="width:42px;font-size:9px"/><input class="cfn-oy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[1]}" style="width:42px;font-size:9px"/><input class="cfn-oz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[2]}" style="width:42px;font-size:9px"/></div>
-          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From (orig)</span><input class="cfn-sox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-soy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-soz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[2]}" style="width:42px;font-size:9px"/></div>
-          <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`;
-      const posReadout = (!isLight && !isPlayerGroup && !isFunctionControl && !isAudio && !isPath && !isSetVar && !isSetBool && !isPlayerStats && !isTeleport && !isSkeletonAct) ? `<div class="cfn-pos-readout" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:8px;color:var(--accentHi);margin-left:34px;min-height:12px;font-family:monospace;opacity:0.8"></div>` : '';
-      const targetRefHtml = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool || isPlayerStats || isTeleport || isSkeletonAct)
-        ? `<span style="font-size:8px;color:var(--muted);min-width:56px">player</span>`
-        : `<select class="cfn-ref-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="group" ${action.refType === 'group' ? 'selected' : ''}>group</option><option value="name" ${action.refType === 'name' ? 'selected' : ''}>name</option></select><input class="cfn-ref-val" data-fn="${fnIdx}" data-act="${actIdx}" list="${moveListId}" type="text" value="${escapeHtml(action.refValue)}" style="width:70px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${moveListId}">${moveOpts}</datalist>`;
-      return `<div style="border-left:2px solid var(--border);margin-left:4px;padding-left:6px;margin-bottom:4px">
-        <div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">#${actIdx+1}</span>${targetRefHtml}<select class="cfn-action-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="move" ${action.actionType === 'move' ? 'selected' : ''}>move</option><option value="rotate" ${action.actionType === 'rotate' ? 'selected' : ''}>rotate</option><option value="light" ${action.actionType === 'light' ? 'selected' : ''}>light</option><option value="audio" ${action.actionType === 'audio' ? 'selected' : ''}>audio</option><option value="path" ${action.actionType === 'path' ? 'selected' : ''}>path</option><option value="functionControl" ${action.actionType === 'functionControl' ? 'selected' : ''}>function ctrl</option><option value="playerGroup" ${action.actionType === 'playerGroup' ? 'selected' : ''}>player group</option><option value="setVar" ${action.actionType === 'setVar' ? 'selected' : ''}>set var</option><option value="setBool" ${action.actionType === 'setBool' ? 'selected' : ''}>set bool</option><option value="playerStats" ${action.actionType === 'playerStats' ? 'selected' : ''}>player stats</option><option value="teleport" ${action.actionType === 'teleport' ? 'selected' : ''}>teleport</option><option value="skeleton" ${action.actionType === 'skeleton' ? 'selected' : ''}>skeleton</option></select><button class="ct-del cfn-del-act" data-fn="${fnIdx}" data-act="${actIdx}" title="Remove action">✕</button></div>
-        ${primaryHtml}${posReadout}
-      </div>`;
-    }).join('');
+  const renderActionRow = (action, fnIdx, actIdx, totalActions) => {
+    const isLight = action.actionType === 'light';
+    const isRotate = action.actionType === 'rotate';
+    const isAudio = action.actionType === 'audio';
+    const isPath = action.actionType === 'path';
+    const isFunctionControl = action.actionType === 'functionControl';
+    const isPlayerGroup = action.actionType === 'playerGroup';
+    const isSetVar = action.actionType === 'setVar';
+    const isSetBool = action.actionType === 'setBool';
+    const isPlayerStats = action.actionType === 'playerStats';
+    const isTeleport = action.actionType === 'teleport';
+    const isSkeletonAct = action.actionType === 'skeleton';
+    const isScale = action.actionType === 'scale';
+    const isCommand = action.actionType === 'command';
+    const isDelay = action.actionType === 'delay';
+    const isWaitKey = action.actionType === 'waitKey';
+    const moveOpts = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool || isPlayerStats || isTeleport || isSkeletonAct || isCommand || isDelay || isWaitKey) ? '' : getMoveTargetOptions(action.refType, action.refValue);
+    const moveListId = `cfn-target-opts-${fnIdx}-${actIdx}`;
+    const fnListId = `cfn-fn-opts-${fnIdx}-${actIdx}`;
+    const audioListId = `cfn-audio-opts-${fnIdx}-${actIdx}`;
+    const varListId = `cfn-var-opts-${fnIdx}-${actIdx}`;
+    const boolListId = `cfn-bool-opts-${fnIdx}-${actIdx}`;
+    const knownFnNames = renderDatalistOptions(getKnownControlFunctionNames([action.audioUntilFunction, action.functionControlTarget]));
+    const knownAudioNames = renderDatalistOptions(getKnownAudioNames([action.audioName]));
+    const knownVarNames = renderDatalistOptions(getKnownVarNames([action.setVarName, action.setVarValueVar]));
+    const knownBoolNames = renderDatalistOptions(getKnownBoolNames([action.setBoolName]));
+    const meta = ACTION_TYPE_META[action.actionType] || { icon:'?', color:'#8b949e' };
+    const primaryHtml = isWaitKey
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Key</span><select class="cfn-wait-key" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${CONDITION_KEY_CODES.map(k => `<option value="${k}" ${action.waitKeyCode === k ? 'selected' : ''}>${k}</option>`).join('')}</select></div><div style="font-size:8px;color:#444d56;margin-left:42px">Waits until this key is pressed before continuing</div>`
+      : isDelay
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Wait</span><input class="cfn-delay-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.delayDuration}" style="width:64px;font-size:9px" title="Delay (seconds)"/><span style="font-size:8px;color:var(--muted)">seconds</span></div><div style="font-size:8px;color:#444d56;margin-left:42px">Pauses before running the next action</div>`
+      : isCommand
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Command</span><input class="cfn-cmd-text" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.commandText || '')}" placeholder="tp 0 10 0" style="flex:1;min-width:120px;font-size:10px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px;font-family:monospace"/></div><div style="font-size:8px;color:#444d56;margin-left:42px">Runs this console command when the function activates</div>`
+      : isPlayerGroup
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Groups</span><select class="cfn-pg-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${CONTROL_PLAYER_GROUP_MODES.map(mode => `<option value="${mode}" ${action.playerGroupMode === mode ? 'selected' : ''}>${mode}</option>`).join('')}</select><input class="cfn-pg-value" data-fn="${fnIdx}" data-act="${actIdx}" list="cfn-pg-groups-${fnIdx}-${actIdx}" type="text" value="${escapeHtml(action.playerGroupValue || '')}" placeholder="default, red, blue" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="cfn-pg-groups-${fnIdx}-${actIdx}">${renderDatalistOptions(getKnownGroups())}</datalist></div>`
+      : isFunctionControl
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Cmd</span><select class="cfn-fc-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${FUNCTION_CONTROL_COMMANDS.map(cmd => `<option value="${cmd}" ${action.functionControlCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select></div>${normalizeFunctionNameList(action.functionControlTarget || '').map((tgt, ti) => `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">${ti === 0 ? 'Targets' : ''}</span><input class="cfn-fc-target-entry" data-fn="${fnIdx}" data-act="${actIdx}" data-tgt-index="${ti}" list="${fnListId}" type="text" value="${escapeHtml(tgt)}" placeholder="functionName" style="flex:1;min-width:80px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><button class="cfn-jump-btn" data-jump-name="${escapeHtml(tgt)}" title="Jump to ${escapeHtml(tgt)}">↗</button><button class="ct-del cfn-fc-target-del" data-fn="${fnIdx}" data-act="${actIdx}" data-tgt-index="${ti}" title="Remove">✕</button></div>`).join('')}<div class="sf-row" style="gap:4px"><span style="font-size:8px;min-width:42px"></span><button class="cfn-fc-target-add" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:8px;padding:1px 5px;color:var(--muted);cursor:pointer">+ Target</button></div><datalist id="${fnListId}">${knownFnNames}</datalist>`
+      : isPath
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Path</span><select class="cfn-path-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PATH_CONTROL_COMMANDS.map(cmd => `<option value="${cmd}" ${action.pathCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select><span style="font-size:8px;color:var(--muted)">target path</span></div>`
+      : isSetVar
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Var</span><input class="cfn-set-var-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${varListId}" type="text" value="${escapeHtml(action.setVarName || '')}" placeholder="score" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${varListId}">${knownVarNames}</datalist><select class="cfn-set-var-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${['=','+','-','*','/'].map(op => `<option value="${op}" ${action.setVarOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Value</span><select class="cfn-set-var-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="digits" ${action.setVarValueType !== 'var' ? 'selected' : ''}>digits</option><option value="var" ${action.setVarValueType === 'var' ? 'selected' : ''}>var</option></select>${action.setVarValueType === 'var' ? `<input class="cfn-set-var-var" data-fn="${fnIdx}" data-act="${actIdx}" list="${varListId}" type="text" value="${escapeHtml(action.setVarValueVar || '')}" placeholder="var name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/>` : `<input class="cfn-set-var-value" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="1" value="${action.setVarValue}" style="width:72px;font-size:9px"/>`}</div>`
+      : isSetBool
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Bool</span><input class="cfn-set-bool-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${boolListId}" type="text" value="${escapeHtml(action.setBoolName || '')}" placeholder="doorOpen" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${boolListId}">${knownBoolNames}</datalist><select class="cfn-set-bool-value" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="true" ${action.setBoolValue === true ? 'selected' : ''}>true</option><option value="false" ${action.setBoolValue === false ? 'selected' : ''}>false</option><option value="toggle" ${action.setBoolValue === 'toggle' ? 'selected' : ''}>toggle</option></select></div>`
+      : isPlayerStats
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Target</span><select class="cfn-ps-target-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="name" ${action.playerStatTargetType === 'name' ? 'selected' : ''}>name</option><option value="group" ${action.playerStatTargetType === 'group' ? 'selected' : ''}>group</option></select><input class="cfn-ps-target" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.playerStatTarget || '')}" placeholder="Player" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Stat</span><select class="cfn-ps-key" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PLAYER_STAT_KEYS.map(k => `<option value="${k}" ${action.playerStatKey === k ? 'selected' : ''}>${k}</option>`).join('')}</select><select class="cfn-ps-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${PLAYER_STAT_OPS.map(op => `<option value="${op}" ${action.playerStatOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select><input class="cfn-ps-value" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="1" value="${action.playerStatValue}" style="width:64px;font-size:9px"/></div>`
+      : isSkeletonAct
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Skeleton</span><select class="cfn-ref-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="group" ${action.refType === 'group' ? 'selected' : ''}>group</option><option value="name" ${action.refType === 'name' ? 'selected' : ''}>name</option></select><input class="cfn-ref-val" data-fn="${fnIdx}" data-act="${actIdx}" list="${moveListId}" type="text" value="${escapeHtml(action.refValue)}" placeholder="skeleton name" style="flex:1;min-width:70px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${moveListId}">${getMoveTargetOptions(action.refType, action.refValue)}</datalist></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Cmd</span><select class="cfn-skel-cmd" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${SKELETON_ANIM_COMMANDS.map(cmd => `<option value="${cmd}" ${action.skelAnimCommand === cmd ? 'selected' : ''}>${cmd}</option>`).join('')}</select></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Clip</span><input class="cfn-skel-clip" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.skelAnimClip || '')}" placeholder="animation clip name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Speed</span><input class="cfn-skel-speed" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" min="0" value="${action.skelAnimSpeed ?? 1}" style="width:52px;font-size:9px"/></div>`
+      : isTeleport
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Mode</span><select class="cfn-teleport-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${TELEPORT_MODES.map(m => `<option value="${m}" ${action.teleportMode === m ? 'selected' : ''}>${m}</option>`).join('')}</select></div>${action.teleportMode === 'coords' ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Coords</span><input class="cfn-teleport-x" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[0]}" style="width:52px;font-size:9px"/><input class="cfn-teleport-y" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[1]}" style="width:52px;font-size:9px"/><input class="cfn-teleport-z" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.teleportCoords[2]}" style="width:52px;font-size:9px"/></div>` : ''}${action.teleportMode === 'object' ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Object</span><input class="cfn-teleport-target-ref" data-fn="${fnIdx}" data-act="${actIdx}" type="text" value="${escapeHtml(action.teleportTargetRef || '')}" placeholder="object name" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/></div>` : ''}<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">World</span><select class="cfn-teleport-world" data-fn="${fnIdx}" data-act="${actIdx}" style="flex:1;min-width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"><option value="" ${!action.teleportWorldId ? 'selected' : ''}>(current world)</option>${worlds.map(w => `<option value="${w.id}" ${action.teleportWorldId === w.id ? 'selected' : ''}>${escapeHtml(w.name || w.id)}</option>`).join('')}</select></div>`
+      : isAudio
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Audio</span><input class="cfn-audio-name" data-fn="${fnIdx}" data-act="${actIdx}" list="${audioListId}" type="text" value="${escapeHtml(action.audioName || '')}" placeholder="audio name" style="flex:1;min-width:94px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${audioListId}">${knownAudioNames}</datalist></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Mode</span><select class="cfn-audio-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${AUDIO_PLAY_MODES.map(mode => `<option value="${mode}" ${action.audioMode === mode ? 'selected' : ''}>${mode}</option>`).join('')}</select><span style="font-size:8px;color:var(--muted)">Range</span><input class="cfn-audio-dist" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="1" max="800" step="1" value="${action.audioDistance}" style="width:52px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:42px">Until</span><select class="cfn-audio-until" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${AUDIO_UNTIL_EVENTS.map(ev => `<option value="${ev}" ${action.audioUntil === ev ? 'selected' : ''}>${ev}</option>`).join('')}</select><input class="cfn-audio-until-fn" data-fn="${fnIdx}" data-act="${actIdx}" list="${fnListId}" type="text" value="${escapeHtml(action.audioUntilFunction || '')}" placeholder="fn name" style="width:84px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-audio-loop" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.audioLoop ? 'checked' : ''}/> Loop</label></div><datalist id="${fnListId}">${knownFnNames}</datalist>`
+      : isLight
+      ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Light</span><select class="cfn-light-op" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px">${CONTROL_LIGHT_OPS.map(op => `<option value="${op}" ${action.lightOp === op ? 'selected' : ''}>${op}</option>`).join('')}</select><input class="cfn-light-val" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.lightValue}" style="width:46px;font-size:9px"/></div>`
+      : isScale
+        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To Scale</span><input class="cfn-scx" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-scy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-scz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleOffset[2]}" style="width:42px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From Scale</span><input class="cfn-ssx" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleStartOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-ssy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleStartOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-ssz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.scaleStartOffset[2]}" style="width:42px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`
+      : isRotate
+        ? `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To Rot°</span><input class="cfn-rox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-roy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-roz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateOffset[2]}" style="width:42px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From Rot°</span><input class="cfn-rsox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-rsoy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-rsoz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateStartOffset[2]}" style="width:42px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">Spin RPM</span><input class="cfn-rrx" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[0]}" style="width:42px;font-size:9px"/><input class="cfn-rry" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[1]}" style="width:42px;font-size:9px"/><input class="cfn-rrz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.rotateRpm[2]}" style="width:42px;font-size:9px"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-rotate-repeat" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.rotateRepeat ? 'checked' : ''}/> Loop</label></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">Pivot</span><select class="cfn-rotate-mode" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="separate" ${action.rotateGroupMode === 'separate' ? 'selected' : ''}>self</option><option value="together" ${action.rotateGroupMode === 'together' ? 'selected' : ''}>group center</option></select><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-keep-upright" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.rotateKeepUpright ? 'checked' : ''}/> Keep upright</label></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`
+        : `<div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">To (orig)</span><input class="cfn-ox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[0]}" style="width:42px;font-size:9px"/><input class="cfn-oy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[1]}" style="width:42px;font-size:9px"/><input class="cfn-oz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.offset[2]}" style="width:42px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:56px">From (orig)</span><input class="cfn-sox" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[0]}" style="width:42px;font-size:9px"/><input class="cfn-soy" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[1]}" style="width:42px;font-size:9px"/><input class="cfn-soz" data-fn="${fnIdx}" data-act="${actIdx}" type="number" step="0.1" value="${action.startOffset[2]}" style="width:42px;font-size:9px"/></div><div class="sf-row" style="gap:4px"><span style="font-size:8px;color:var(--muted);min-width:32px">Anim</span><select class="cfn-style" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="glide" ${action.style === 'glide' ? 'selected' : ''}>glide</option><option value="strict" ${action.style === 'strict' ? 'selected' : ''}>strict</option><option value="snap" ${action.style === 'snap' ? 'selected' : ''}>snap</option></select><input class="cfn-dur" data-fn="${fnIdx}" data-act="${actIdx}" type="number" min="0" step="0.1" value="${action.duration}" style="width:46px;font-size:9px" title="Duration (s)"/><label style="display:flex;align-items:center;gap:3px;font-size:8px;color:var(--muted);cursor:pointer"><input class="cfn-return" data-fn="${fnIdx}" data-act="${actIdx}" type="checkbox" ${action.returnOnDeactivate ? 'checked' : ''}/> Return</label></div>`;
+    const posReadout = (!isLight && !isPlayerGroup && !isFunctionControl && !isAudio && !isPath && !isSetVar && !isSetBool && !isPlayerStats && !isTeleport && !isSkeletonAct && !isCommand && !isDelay && !isWaitKey) ? `<div class="cfn-pos-readout" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:8px;color:var(--accentHi);margin-left:34px;min-height:12px;font-family:monospace;opacity:0.8"></div>` : '';
+    const targetRefHtml = (isPlayerGroup || isFunctionControl || isSetVar || isSetBool || isPlayerStats || isTeleport || isSkeletonAct || isCommand || isDelay || isWaitKey)
+      ? `<span style="font-size:8px;color:var(--muted);min-width:56px">player</span>`
+      : `<select class="cfn-ref-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="group" ${action.refType === 'group' ? 'selected' : ''}>group</option><option value="name" ${action.refType === 'name' ? 'selected' : ''}>name</option></select><input class="cfn-ref-val" data-fn="${fnIdx}" data-act="${actIdx}" list="${moveListId}" type="text" value="${escapeHtml(action.refValue)}" style="width:70px;font-size:9px;padding:1px 3px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><datalist id="${moveListId}">${moveOpts}</datalist>`;
+    const upDisabled = actIdx === 0 ? ' disabled style="opacity:.3"' : '';
+    const downDisabled = actIdx === totalActions - 1 ? ' disabled style="opacity:.3"' : '';
+    return `<div class="cfn-act-row" data-fn="${fnIdx}" data-act="${actIdx}" style="border-left:2px solid ${meta.color}44;margin-left:4px;padding-left:6px;margin-bottom:4px">
+      <div class="sf-row" style="gap:4px"><span class="cfn-drag-handle cfn-act-drag" draggable="true" data-fn="${fnIdx}" data-act="${actIdx}" title="Drag to reorder">⣿</span><button class="cfn-reorder-btn cfn-act-up" data-fn="${fnIdx}" data-act="${actIdx}"${upDisabled} title="Move up">▲</button><button class="cfn-reorder-btn cfn-act-down" data-fn="${fnIdx}" data-act="${actIdx}"${downDisabled} title="Move down">▼</button><span class="cfn-action-badge" style="background:${meta.color}22;color:${meta.color}">${meta.icon}</span>${targetRefHtml}<select class="cfn-action-type" data-fn="${fnIdx}" data-act="${actIdx}" style="font-size:9px;padding:1px 3px"><option value="move" ${action.actionType === 'move' ? 'selected' : ''}>move</option><option value="rotate" ${action.actionType === 'rotate' ? 'selected' : ''}>rotate</option><option value="scale" ${action.actionType === 'scale' ? 'selected' : ''}>scale</option><option value="light" ${action.actionType === 'light' ? 'selected' : ''}>light</option><option value="audio" ${action.actionType === 'audio' ? 'selected' : ''}>audio</option><option value="path" ${action.actionType === 'path' ? 'selected' : ''}>path</option><option value="functionControl" ${action.actionType === 'functionControl' ? 'selected' : ''}>function ctrl</option><option value="playerGroup" ${action.actionType === 'playerGroup' ? 'selected' : ''}>player group</option><option value="setVar" ${action.actionType === 'setVar' ? 'selected' : ''}>set var</option><option value="setBool" ${action.actionType === 'setBool' ? 'selected' : ''}>set bool</option><option value="playerStats" ${action.actionType === 'playerStats' ? 'selected' : ''}>player stats</option><option value="teleport" ${action.actionType === 'teleport' ? 'selected' : ''}>teleport</option><option value="skeleton" ${action.actionType === 'skeleton' ? 'selected' : ''}>skeleton</option><option value="command" ${action.actionType === 'command' ? 'selected' : ''}>command</option><option value="delay" ${action.actionType === 'delay' ? 'selected' : ''}>delay</option><option value="waitKey" ${action.actionType === 'waitKey' ? 'selected' : ''}>wait key</option></select><button class="ct-del cfn-del-act" data-fn="${fnIdx}" data-act="${actIdx}" title="Remove action">✕</button></div>
+      ${primaryHtml}${posReadout}
+    </div>`;
+  };
 
-    return `<div class="ct-entry" style="flex-wrap:wrap" data-fn-index="${fnIdx}">
-      <div class="sf-row" style="gap:4px;width:100%"><span style="font-size:9px;color:var(--accentHi);font-weight:700">ƒ</span><input class="cfn-name" data-fn="${fnIdx}" type="text" value="${escapeHtml(fn.name)}" placeholder="name" style="flex:1;font-size:10px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px"/><select class="cfn-group" data-fn="${fnIdx}" style="font-size:9px;padding:1px 3px">${groupOptionsHtml}</select><label style="display:flex;align-items:center;gap:2px;cursor:pointer;font-size:9px;color:var(--muted)" title="Auto-execute when playtest starts"><input class="cfn-always-active" data-fn="${fnIdx}" type="checkbox" ${fn.alwaysActive ? 'checked' : ''}/> Always Active</label><button class="cfn-sim" data-fn="${fnIdx}" title="Simulate" style="background:none;border:none;color:var(--accentHi);cursor:pointer;font-size:11px;padding:0 2px">▶</button><button class="cfn-sim-reset" data-fn="${fnIdx}" title="Reset" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:10px;padding:0 2px">■</button><button class="ct-del cfn-del-fn" data-fn="${fnIdx}" title="Delete function">✕</button></div>
-      ${actionsHtml}
-      <button class="cfn-add-act" data-fn="${fnIdx}" style="font-size:8px;padding:1px 5px;margin-left:12px">+ Action</button>
+  const renderFunctionCard = (fn, fnIdx, groupFnIndices) => {
+    const isCollapsed = _cfnCollapsed.has(fnIdx);
+    const badges = _cfnBadgePills(fn.actions);
+    const caret = isCollapsed ? '▸' : '▾';
+    const posInGroup = groupFnIndices.indexOf(fnIdx);
+    const fnUpDisabled = posInGroup <= 0 ? ' disabled style="opacity:.3"' : '';
+    const fnDownDisabled = posInGroup >= groupFnIndices.length - 1 ? ' disabled style="opacity:.3"' : '';
+
+    if (_cfnCompactMode) {
+      return `<div class="cfn-compact-row ct-entry" data-fn-index="${fnIdx}">
+        <span class="cfn-drag-handle cfn-fn-drag" draggable="true" data-fn="${fnIdx}" title="Drag to reorder">⣿</span>
+        <button class="cfn-reorder-btn cfn-fn-up" data-fn="${fnIdx}"${fnUpDisabled}>▲</button>
+        <button class="cfn-reorder-btn cfn-fn-down" data-fn="${fnIdx}"${fnDownDisabled}>▼</button>
+        <span style="color:var(--accentHi);font-weight:700;font-size:9px">ƒ</span>
+        <span class="cfn-compact-name" title="${escapeHtml(fn.name)}">${escapeHtml(fn.name || '(unnamed)')}</span>
+        <span class="cfn-badges-row">${badges}</span>
+        <span style="font-size:8px;color:var(--muted)">${fn.actions.length}act</span>
+        ${fn.alwaysActive ? '<span style="font-size:7px;color:#7ee787" title="Always Active">●</span>' : ''}
+        <button class="cfn-sim" data-fn="${fnIdx}" title="Simulate" style="background:none;border:none;color:var(--accentHi);cursor:pointer;font-size:10px;padding:0 2px">▶</button>
+        <button class="cfn-sim-reset" data-fn="${fnIdx}" title="Reset" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:9px;padding:0 2px">■</button>
+        <button class="ct-del cfn-del-fn" data-fn="${fnIdx}" title="Delete function">✕</button>
+        <button class="cfn-toggle-card" data-fn="${fnIdx}" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:9px;padding:0 3px" title="Expand">${caret}</button>
+      </div>`;
+    }
+
+    const actionsHtml = fn.actions.map((action, actIdx) => renderActionRow(action, fnIdx, actIdx, fn.actions.length)).join('');
+    return `<div class="ct-entry" style="flex-wrap:wrap;flex-direction:column" data-fn-index="${fnIdx}">
+      <div class="cfn-card-header" data-fn="${fnIdx}">
+        <span class="cfn-drag-handle cfn-fn-drag" draggable="true" data-fn="${fnIdx}" title="Drag to reorder">⣿</span>
+        <button class="cfn-reorder-btn cfn-fn-up" data-fn="${fnIdx}"${fnUpDisabled}>▲</button>
+        <button class="cfn-reorder-btn cfn-fn-down" data-fn="${fnIdx}"${fnDownDisabled}>▼</button>
+        <span style="font-size:9px;color:var(--accentHi);font-weight:700">ƒ</span>
+        <input class="cfn-name" data-fn="${fnIdx}" type="text" value="${escapeHtml(fn.name)}" placeholder="name" style="flex:1;min-width:60px;font-size:10px;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:3px" onclick="event.stopPropagation()"/>
+        <select class="cfn-group" data-fn="${fnIdx}" style="font-size:9px;padding:1px 3px" onclick="event.stopPropagation()">${groupOptionsHtml}</select>
+        <label style="display:flex;align-items:center;gap:2px;cursor:pointer;font-size:9px;color:var(--muted)" title="Auto-execute when playtest starts" onclick="event.stopPropagation()"><input class="cfn-always-active" data-fn="${fnIdx}" type="checkbox" ${fn.alwaysActive ? 'checked' : ''}/> AA</label>
+        <span class="cfn-badges-row">${badges}</span>
+        <button class="cfn-sim" data-fn="${fnIdx}" title="Simulate" style="background:none;border:none;color:var(--accentHi);cursor:pointer;font-size:11px;padding:0 2px" onclick="event.stopPropagation()">▶</button>
+        <button class="cfn-sim-reset" data-fn="${fnIdx}" title="Reset" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:10px;padding:0 2px" onclick="event.stopPropagation()">■</button>
+        <button class="ct-del cfn-del-fn" data-fn="${fnIdx}" title="Delete function" onclick="event.stopPropagation()">✕</button>
+        <span class="cfn-caret">${caret}</span>
+      </div>
+      <div class="cfn-card-body${isCollapsed ? ' cfn-collapsed' : ''}" data-fn="${fnIdx}">
+        ${actionsHtml}
+        <button class="cfn-add-act" data-fn="${fnIdx}" style="font-size:8px;padding:1px 5px;margin-left:12px">+ Action</button>
+      </div>
     </div>`;
   };
 
   const groupedHtml = controlFunctionGroups.map(group => {
     const rows = visible.filter(({ fn }) => fn.groupId === group.id);
     if (!rows.length && search) return '';
-    const body = rows.map(({ fn, fnIdx }) => renderFunctionCard(fn, fnIdx)).join('') || '<div style="font-size:9px;color:var(--muted);padding:5px 2px">No functions in this group.</div>';
+    const groupFnIndices = rows.map(r => r.fnIdx);
+    const body = rows.map(({ fn, fnIdx }) => renderFunctionCard(fn, fnIdx, groupFnIndices)).join('') || '<div style="font-size:9px;color:var(--muted);padding:5px 2px">No functions in this group.</div>';
     const caret = group.collapsed ? '▸' : '▾';
     return `<div class="cfn-group-wrap" data-cfg="${escapeHtml(group.id)}"><button class="cfn-group-toggle" data-cfg="${escapeHtml(group.id)}"><span>${caret} ${escapeHtml(group.name)}</span><span style="opacity:.7">${rows.length}</span></button><div class="cfn-group-body" style="${group.collapsed ? 'display:none' : ''}">${body}</div><button class="cfn-group-add" data-cfg="${escapeHtml(group.id)}">+ Add Function</button></div>`;
   }).join('');
@@ -19323,8 +24585,162 @@ function bindControlFunctionsUI() {
     updater(fn.actions[actIdx]);
   };
 
+  /* ── Card collapse/expand ── */
+  controlFunctionsListEl.querySelectorAll('.cfn-card-header').forEach(hdr => {
+    hdr.addEventListener('click', () => {
+      const fnIdx = parseInt(hdr.dataset.fn, 10);
+      if (_cfnCollapsed.has(fnIdx)) _cfnCollapsed.delete(fnIdx);
+      else _cfnCollapsed.add(fnIdx);
+      refreshControlFunctionsUI();
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-toggle-card').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const fnIdx = parseInt(btn.dataset.fn, 10);
+      if (_cfnCollapsed.has(fnIdx)) _cfnCollapsed.delete(fnIdx);
+      else _cfnCollapsed.add(fnIdx);
+      refreshControlFunctionsUI();
+    });
+  });
+
+  /* ── Function reorder arrows ── */
+  controlFunctionsListEl.querySelectorAll('.cfn-fn-up').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const fnIdx = parseInt(btn.dataset.fn, 10);
+      if (fnIdx <= 0) return;
+      const fn = controlFunctions[fnIdx];
+      const prev = controlFunctions[fnIdx - 1];
+      if (!fn || !prev || fn.groupId !== prev.groupId) return;
+      controlFunctions[fnIdx] = prev;
+      controlFunctions[fnIdx - 1] = fn;
+      refreshControlFunctionsUI();
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-fn-down').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const fnIdx = parseInt(btn.dataset.fn, 10);
+      if (fnIdx >= controlFunctions.length - 1) return;
+      const fn = controlFunctions[fnIdx];
+      const next = controlFunctions[fnIdx + 1];
+      if (!fn || !next || fn.groupId !== next.groupId) return;
+      controlFunctions[fnIdx] = next;
+      controlFunctions[fnIdx + 1] = fn;
+      refreshControlFunctionsUI();
+    });
+  });
+
+  /* ── Action reorder arrows ── */
+  controlFunctionsListEl.querySelectorAll('.cfn-act-up').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const fnIdx = parseInt(btn.dataset.fn, 10);
+      const actIdx = parseInt(btn.dataset.act, 10);
+      const fn = controlFunctions[fnIdx];
+      if (!fn || actIdx <= 0) return;
+      [fn.actions[actIdx - 1], fn.actions[actIdx]] = [fn.actions[actIdx], fn.actions[actIdx - 1]];
+      refreshControlFunctionsUI();
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-act-down').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const fnIdx = parseInt(btn.dataset.fn, 10);
+      const actIdx = parseInt(btn.dataset.act, 10);
+      const fn = controlFunctions[fnIdx];
+      if (!fn || actIdx >= fn.actions.length - 1) return;
+      [fn.actions[actIdx], fn.actions[actIdx + 1]] = [fn.actions[actIdx + 1], fn.actions[actIdx]];
+      refreshControlFunctionsUI();
+    });
+  });
+
+  /* ── Jump-to-function ── */
+  controlFunctionsListEl.querySelectorAll('.cfn-jump-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      _cfnJumpToFunction(btn.dataset.jumpName);
+    });
+  });
+
+  /* ── Function drag-and-drop ── */
+  controlFunctionsListEl.querySelectorAll('.cfn-fn-drag').forEach(handle => {
+    handle.addEventListener('dragstart', (e) => {
+      e.stopPropagation();
+      const fnIdx = handle.dataset.fn;
+      e.dataTransfer.setData('text/cfn-fn', fnIdx);
+      e.dataTransfer.effectAllowed = 'move';
+      const card = handle.closest('.ct-entry');
+      if (card) card.classList.add('cfn-dragging');
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.ct-entry[data-fn-index]').forEach(card => {
+    card.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer.types.includes('text/cfn-fn')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      controlFunctionsListEl.querySelectorAll('.cfn-drag-over').forEach(el => el.classList.remove('cfn-drag-over'));
+      card.classList.add('cfn-drag-over');
+    });
+    card.addEventListener('dragleave', () => card.classList.remove('cfn-drag-over'));
+    card.addEventListener('drop', (e) => {
+      e.preventDefault();
+      controlFunctionsListEl.querySelectorAll('.cfn-drag-over,.cfn-dragging').forEach(el => el.classList.remove('cfn-drag-over', 'cfn-dragging'));
+      const srcIdx = parseInt(e.dataTransfer.getData('text/cfn-fn'), 10);
+      const dstIdx = parseInt(card.dataset.fnIndex, 10);
+      if (!Number.isFinite(srcIdx) || !Number.isFinite(dstIdx) || srcIdx === dstIdx) return;
+      const [moved] = controlFunctions.splice(srcIdx, 1);
+      if (!moved) return;
+      const targetGroup = controlFunctions[Math.min(dstIdx, controlFunctions.length - 1)]?.groupId;
+      if (targetGroup) moved.groupId = targetGroup;
+      controlFunctions.splice(dstIdx > srcIdx ? dstIdx - 1 : dstIdx, 0, moved);
+      refreshControlFunctionsUI();
+    });
+  });
+  document.addEventListener('dragend', () => {
+    controlFunctionsListEl?.querySelectorAll('.cfn-drag-over,.cfn-dragging').forEach(el => el.classList.remove('cfn-drag-over', 'cfn-dragging'));
+  }, { once: false });
+
+  /* ── Action drag-and-drop ── */
+  controlFunctionsListEl.querySelectorAll('.cfn-act-drag').forEach(handle => {
+    handle.addEventListener('dragstart', (e) => {
+      e.stopPropagation();
+      e.dataTransfer.setData('text/cfn-act', `${handle.dataset.fn},${handle.dataset.act}`);
+      e.dataTransfer.effectAllowed = 'move';
+      const row = handle.closest('.cfn-act-row');
+      if (row) row.classList.add('cfn-dragging');
+    });
+  });
+  controlFunctionsListEl.querySelectorAll('.cfn-act-row').forEach(row => {
+    row.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer.types.includes('text/cfn-act')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      controlFunctionsListEl.querySelectorAll('.cfn-act-drag-over').forEach(el => el.classList.remove('cfn-act-drag-over'));
+      row.classList.add('cfn-act-drag-over');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('cfn-act-drag-over'));
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      controlFunctionsListEl.querySelectorAll('.cfn-act-drag-over,.cfn-dragging').forEach(el => el.classList.remove('cfn-act-drag-over', 'cfn-dragging'));
+      const src = e.dataTransfer.getData('text/cfn-act').split(',').map(Number);
+      if (src.length !== 2) return;
+      const [srcFn, srcAct] = src;
+      const dstFn = parseInt(row.dataset.fn, 10);
+      const dstAct = parseInt(row.dataset.act, 10);
+      if (srcFn !== dstFn || srcAct === dstAct) return;
+      const fn = controlFunctions[srcFn];
+      if (!fn) return;
+      const [moved] = fn.actions.splice(srcAct, 1);
+      fn.actions.splice(dstAct > srcAct ? dstAct - 1 : dstAct, 0, moved);
+      refreshControlFunctionsUI();
+    });
+  });
+
+  /* ── Standard bindings ── */
   controlFunctionsListEl.querySelectorAll('.cfn-name').forEach(input => {
-    input.addEventListener('change', () => {
+    input.addEventListener('change', (e) => {
+      e.stopPropagation();
       const idx = parseInt(input.dataset.fn, 10);
       if (controlFunctions[idx]) controlFunctions[idx].name = input.value.trim();
     });
@@ -19338,7 +24754,8 @@ function bindControlFunctionsUI() {
   });
 
   controlFunctionsListEl.querySelectorAll('.cfn-group').forEach(select => {
-    select.addEventListener('change', () => {
+    select.addEventListener('change', (e) => {
+      e.stopPropagation();
       const idx = parseInt(select.dataset.fn, 10);
       const fn = controlFunctions[idx];
       if (!fn) return;
@@ -19351,15 +24768,16 @@ function bindControlFunctionsUI() {
 
   controlFunctionsListEl.querySelectorAll('.cfn-group-toggle').forEach(btn => {
     btn.addEventListener('click', () => {
-      const group = controlFunctionGroups.find(g => g.id === btn.dataset.cfg);
-      if (!group) return;
-      group.collapsed = !group.collapsed;
+      const gid = btn.dataset.cfg;
+      const group = controlFunctionGroups.find(g => g.id === gid);
+      if (group) group.collapsed = !group.collapsed;
       refreshControlFunctionsUI();
     });
   });
 
   controlFunctionsListEl.querySelectorAll('.cfn-del-fn').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
       const idx = parseInt(btn.dataset.fn, 10);
       if (idx >= 0 && idx < controlFunctions.length) controlFunctions.splice(idx, 1);
       refreshControlFunctionsUI();
@@ -19367,24 +24785,28 @@ function bindControlFunctionsUI() {
   });
 
   controlFunctionsListEl.querySelectorAll('.cfn-sim').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (state.isPlaytest) return;
-      simulateFunction(parseInt(btn.dataset.fn, 10));
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.fn, 10);
+      if (!state.isPlaytest) simulateFunction(idx);
     });
   });
 
   controlFunctionsListEl.querySelectorAll('.cfn-sim-reset').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (state.isPlaytest) return;
-      resetSimulation();
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.fn, 10);
+      if (!state.isPlaytest) resetSimulation();
     });
   });
 
   controlFunctionsListEl.querySelectorAll('.cfn-add-act').forEach(btn => {
     btn.addEventListener('click', () => {
       const idx = parseInt(btn.dataset.fn, 10);
-      if (controlFunctions[idx]) controlFunctions[idx].actions.push(createDefaultFunctionAction());
-      refreshControlFunctionsUI();
+      if (controlFunctions[idx]) {
+        controlFunctions[idx].actions.push(createDefaultFunctionAction());
+        refreshControlFunctionsUI();
+      }
     });
   });
 
@@ -19393,8 +24815,9 @@ function bindControlFunctionsUI() {
       const fnIdx = parseInt(btn.dataset.fn, 10);
       const actIdx = parseInt(btn.dataset.act, 10);
       const fn = controlFunctions[fnIdx];
-      if (fn && actIdx >= 0 && actIdx < fn.actions.length) fn.actions.splice(actIdx, 1);
-      if (fn && !fn.actions.length) fn.actions.push(createDefaultFunctionAction());
+      if (!fn) return;
+      if (actIdx >= 0 && actIdx < fn.actions.length) fn.actions.splice(actIdx, 1);
+      if (!fn.actions.length) fn.actions.push(createDefaultFunctionAction());
       refreshControlFunctionsUI();
     });
   });
@@ -19451,9 +24874,24 @@ function bindControlFunctionsUI() {
   bindCfnNumber('.cfn-rrx', (a, v) => { a.rotateRpm[0] = v; });
   bindCfnNumber('.cfn-rry', (a, v) => { a.rotateRpm[1] = v; });
   bindCfnNumber('.cfn-rrz', (a, v) => { a.rotateRpm[2] = v; });
+  bindCfnNumber('.cfn-scx', (a, v) => { a.scaleOffset[0] = v; });
+  bindCfnNumber('.cfn-scy', (a, v) => { a.scaleOffset[1] = v; });
+  bindCfnNumber('.cfn-scz', (a, v) => { a.scaleOffset[2] = v; });
+  bindCfnNumber('.cfn-ssx', (a, v) => { a.scaleStartOffset[0] = v; });
+  bindCfnNumber('.cfn-ssy', (a, v) => { a.scaleStartOffset[1] = v; });
+  bindCfnNumber('.cfn-ssz', (a, v) => { a.scaleStartOffset[2] = v; });
   bindCfnNumber('.cfn-light-val', (a, v) => { a.lightValue = v; });
   bindCfnNumber('.cfn-dur', (a, v) => { a.duration = Math.max(0, v); });
   bindCfnNumber('.cfn-set-var-value', (a, v) => { a.setVarValue = Math.trunc(v); });
+  bindCfnNumber('.cfn-delay-dur', (a, v) => { a.delayDuration = Math.max(0, v || 1); });
+
+  controlFunctionsListEl.querySelectorAll('.cfn-wait-key').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const fnIdx = parseInt(sel.dataset.fn, 10);
+      const actIdx = parseInt(sel.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.waitKeyCode = sel.value || 'Space'; });
+    });
+  });
 
   controlFunctionsListEl.querySelectorAll('.cfn-pg-mode').forEach(sel => {
     sel.addEventListener('change', () => {
@@ -19726,7 +25164,14 @@ function bindControlFunctionsUI() {
     });
   });
 
-  // Skeleton action bindings
+  controlFunctionsListEl.querySelectorAll('.cfn-cmd-text').forEach(input => {
+    input.addEventListener('change', () => {
+      const fnIdx = parseInt(input.dataset.fn, 10);
+      const actIdx = parseInt(input.dataset.act, 10);
+      withFnAction(fnIdx, actIdx, a => { a.commandText = input.value.trim(); });
+    });
+  });
+
   controlFunctionsListEl.querySelectorAll('.cfn-skel-cmd').forEach(sel => {
     sel.addEventListener('change', () => {
       const fnIdx = parseInt(sel.dataset.fn, 10);
@@ -19798,6 +25243,7 @@ function bindControlFunctionsUI() {
   });
 }
 
+/* ── Top-level button wiring ── */
 if (btnAddControlFn) {
   btnAddControlFn.addEventListener('click', () => {
     ensureControlFunctionGroups();
@@ -19826,6 +25272,32 @@ if (controlFnSearchInput) {
   controlFnSearchInput.addEventListener('input', () => refreshControlFunctionsUI());
 }
 
+/* ── Toolbar wiring ── */
+if (cfnActionFilterEl) {
+  cfnActionFilterEl.addEventListener('change', () => {
+    _cfnActionTypeFilter = cfnActionFilterEl.value;
+    refreshControlFunctionsUI();
+  });
+}
+if (cfnCollapseAllBtn) {
+  cfnCollapseAllBtn.addEventListener('click', () => {
+    controlFunctions.forEach((_, i) => _cfnCollapsed.add(i));
+    refreshControlFunctionsUI();
+  });
+}
+if (cfnExpandAllBtn) {
+  cfnExpandAllBtn.addEventListener('click', () => {
+    _cfnCollapsed.clear();
+    refreshControlFunctionsUI();
+  });
+}
+if (cfnCompactToggle) {
+  cfnCompactToggle.addEventListener('change', () => {
+    _cfnCompactMode = cfnCompactToggle.checked;
+    refreshControlFunctionsUI();
+  });
+}
+
 // ─── Quality control helpers ─────────────────────────────────────────────────
 const _objPos = new THREE.Vector3();
 
@@ -19845,6 +25317,81 @@ function applyShadowQuality(level) {
   renderer.shadowMap.needsUpdate = true;
 }
 
+function applyShadowMapResolution(res) {
+  quality.shadowMapRes = res;
+  if (quality.shadows !== 'off') {
+    sunLight.shadow.mapSize.set(res, res);
+    if (sunLight.shadow.map) { sunLight.shadow.map.dispose(); sunLight.shadow.map = null; }
+    renderer.shadowMap.needsUpdate = true;
+  }
+}
+
+function applyResolutionScale(scale) {
+  quality.resolutionScale = scale;
+  renderer.setPixelRatio(scale);
+}
+
+function updatePerfStats(t, dt) {
+  const instantFps = dt > 0 ? (1 / dt) : 60;
+  _perfStats.emaFps = _perfStats.emaFps * 0.92 + instantFps * 0.08;
+  if (t - _perfStats.lastUpdate < 500) return; // update display at 2hz
+  _perfStats.lastUpdate = t;
+  _perfStats.fps = Math.round(_perfStats.emaFps);
+  _perfStats.calls = renderer.info.render.calls;
+  _perfStats.triangles = renderer.info.render.triangles;
+  _perfStats.objectCount = sceneObjects.length;
+  const el = document.getElementById('perf-stats');
+  if (el) {
+    el.style.display = quality.showStats ? '' : 'none';
+    if (quality.showStats) {
+      el.innerHTML = `FPS: ${_perfStats.fps} | Draw: ${_perfStats.calls} | Tri: ${(_perfStats.triangles / 1000).toFixed(1)}k | Obj: ${_perfStats.objectCount}`;
+    }
+  }
+  // Feed bottom-panel performance monitor
+  _pushPerfSample(_perfStats.fps, _perfStats.calls, _perfStats.triangles, _perfStats.objectCount);
+}
+
+// ─── Spatial hash for fast visibility queries ────────────────────────────────
+const _SPATIAL_CELL_SIZE = 50;
+const _spatialHash = new Map(); // "cx,cz" -> Set<mesh>
+let _spatialDirty = true;
+
+function _spatialKey(x, z) {
+  return ((x / _SPATIAL_CELL_SIZE) | 0) + ',' + ((z / _SPATIAL_CELL_SIZE) | 0);
+}
+
+function rebuildSpatialHash() {
+  _spatialHash.clear();
+  for (const m of sceneObjects) {
+    m.getWorldPosition(_objPos);
+    const key = _spatialKey(_objPos.x, _objPos.z);
+    if (!_spatialHash.has(key)) _spatialHash.set(key, new Set());
+    _spatialHash.get(key).add(m);
+  }
+  _spatialDirty = false;
+}
+
+function markSpatialDirty() {
+  _spatialDirty = true;
+}
+
+function _getNearbyObjects(x, z, radius) {
+  const results = [];
+  const cellRadius = Math.ceil(radius / _SPATIAL_CELL_SIZE);
+  const cx = (x / _SPATIAL_CELL_SIZE) | 0;
+  const cz = (z / _SPATIAL_CELL_SIZE) | 0;
+  for (let dx = -cellRadius; dx <= cellRadius; dx++) {
+    for (let dz = -cellRadius; dz <= cellRadius; dz++) {
+      const key = (cx + dx) + ',' + (cz + dz);
+      const set = _spatialHash.get(key);
+      if (set) {
+        for (const m of set) results.push(m);
+      }
+    }
+  }
+  return results;
+}
+
 function updateVisibility(cam) {
   cam.updateMatrixWorld();
   _projScreenMatrix.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
@@ -19854,8 +25401,28 @@ function updateVisibility(cam) {
   const rd2 = quality.renderDist * quality.renderDist;
   const ld2 = quality.lightDist * quality.lightDist;
   const shadowOff = quality.shadows === 'off';
+  const lodDist2 = (quality._lodAutoDist || LOD_AUTO_DISTANCE) * (quality._lodAutoDist || LOD_AUTO_DISTANCE);
+  const lodActive = quality.lodEnabled;
 
-  for (const m of sceneObjects) {
+  // Rebuild spatial hash if dirty
+  if (_spatialDirty) rebuildSpatialHash();
+
+  // Use spatial hash for large scenes (>500 objects) to skip far-away objects
+  const useHash = sceneObjects.length > 500;
+  const nearby = useHash ? _getNearbyObjects(camPos.x, camPos.z, quality.renderDist + _SPATIAL_CELL_SIZE) : null;
+  if (useHash) {
+    // Hide everything first, then only process nearby
+    for (const m of sceneObjects) {
+      if (m.userData._dead) continue;
+      m.visible = false;
+      if (m.userData.pointLight) m.userData.pointLight.visible = false;
+      m.castShadow = false;
+    }
+  }
+
+  const objectsToProcess = useHash ? nearby : sceneObjects;
+
+  for (const m of objectsToProcess) {
     // Dead targets stay fully hidden.
     if (m.userData._dead) continue;
 
@@ -19865,20 +25432,29 @@ function updateVisibility(cam) {
 
     m.getWorldPosition(_objPos);
     const dist2 = camPos.distanceToSquared(_objPos);
+    const lightVisible = !!m.userData.pointLight && dist2 < ld2;
+
+    // Auto-LOD for imported models based on distance
+    if (lodActive && m.userData._isImportedModel && m.userData._lodOverride === 'auto') {
+      const shouldLOD = dist2 > lodDist2;
+      if (m.userData._lodActive !== shouldLOD) {
+        setImportedMeshLOD(m, shouldLOD);
+      }
+    }
 
     // Render distance: hide blocks too far away
     if (dist2 > rd2) {
-      m.visible = false;
+      m.visible = lightVisible;
       if (m.userData._customSkinActive) {
         if (m.material) m.material.visible = false;
         if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = false;
       } else if (m.material) {
-        m.material.visible = !hideDisplayOnly;
+        m.material.visible = false;
       }
 
-      // Keep point lights on even when mesh is out of render distance
+      // Keep point lights on even when mesh is out of render distance.
+      // The light is a child of the mesh, so the parent must stay visible.
       if (m.userData.pointLight) {
-        const lightVisible = dist2 < ld2;
         m.userData.pointLight.visible = lightVisible;
         if (!shadowOff) m.userData.pointLight.castShadow = lightVisible && dist2 < ld2 * 0.5;
       }
@@ -19889,17 +25465,16 @@ function updateVisibility(cam) {
     // before their geometry fully leaves the screen (containsPoint only checks
     // the centre point, intersectsObject checks the whole bounding sphere).
     const inFrustum = _frustum.intersectsObject(m) || dist2 < 100; // always show nearby
-    m.visible = inFrustum;
+    m.visible = inFrustum || lightVisible;
     if (m.userData._customSkinActive) {
       if (m.material) m.material.visible = false;
-      if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = !hideDisplayOnly;
+      if (m.userData.customSkinGroup) m.userData.customSkinGroup.visible = inFrustum && !hideDisplayOnly;
     } else if (m.material) {
-      m.material.visible = !hideDisplayOnly;
+      m.material.visible = inFrustum && !hideDisplayOnly;
     }
 
     // Point light distance culling
     if (m.userData.pointLight) {
-      const lightVisible = dist2 < ld2;
       m.userData.pointLight.visible = lightVisible;
       if (!shadowOff) m.userData.pointLight.castShadow = lightVisible && dist2 < ld2 * 0.5;
     }
@@ -19912,6 +25487,68 @@ function updateVisibility(cam) {
     }
   }
 }
+// Shadow map resolution
+const qualityShadowResSelect = document.getElementById('quality-shadow-res');
+if (qualityShadowResSelect) qualityShadowResSelect.addEventListener('change', () => {
+  applyShadowMapResolution(parseInt(qualityShadowResSelect.value, 10) || 4096);
+  saveEditorSettings();
+});
+
+// Resolution scale
+const qualityResolutionSelect = document.getElementById('quality-resolution');
+if (qualityResolutionSelect) qualityResolutionSelect.addEventListener('change', () => {
+  applyResolutionScale(parseFloat(qualityResolutionSelect.value) || Math.min(devicePixelRatio, 2));
+  saveEditorSettings();
+});
+
+// Stats overlay toggle
+const qualityShowStatsInput = document.getElementById('quality-show-stats');
+if (qualityShowStatsInput) qualityShowStatsInput.addEventListener('change', () => {
+  quality.showStats = qualityShowStatsInput.checked;
+  const el = document.getElementById('perf-stats');
+  if (el) el.style.display = quality.showStats ? '' : 'none';
+  saveEditorSettings();
+});
+
+// LOD toggle
+const qualityLodEnabledInput = document.getElementById('quality-lod-enabled');
+if (qualityLodEnabledInput) qualityLodEnabledInput.addEventListener('change', () => {
+  quality.lodEnabled = qualityLodEnabledInput.checked;
+  saveEditorSettings();
+});
+const qualityLodDistInput = document.getElementById('quality-lod-dist');
+if (qualityLodDistInput) qualityLodDistInput.addEventListener('change', () => {
+  // LOD_AUTO_DISTANCE is a const, but we can override it via a mutable alias
+  const val = THREE.MathUtils.clamp(parseInt(qualityLodDistInput.value, 10) || 80, 20, 500);
+  qualityLodDistInput.value = val;
+  // We need to dynamically update the distance — use a mutable property on quality
+  quality._lodAutoDist = val;
+  saveEditorSettings();
+});
+
+// Auto-batch button
+const btnAutoBatch = document.getElementById('btn-auto-batch');
+const btnUnbatch = document.getElementById('btn-unbatch');
+if (btnAutoBatch) btnAutoBatch.addEventListener('click', () => {
+  const count = autoBatchScene();
+  if (count > 0) {
+    btnAutoBatch.textContent = `✓ Batched ${count}`;
+    setTimeout(() => { btnAutoBatch.textContent = '⚡ Batch Now'; }, 2000);
+  } else {
+    btnAutoBatch.textContent = 'No duplicates';
+    setTimeout(() => { btnAutoBatch.textContent = '⚡ Batch Now'; }, 2000);
+  }
+});
+if (btnUnbatch) btnUnbatch.addEventListener('click', () => {
+  const restored = unbatchAll();
+  if (restored > 0) {
+    btnUnbatch.textContent = `✓ Restored ${restored}`;
+    setTimeout(() => { btnUnbatch.textContent = '↩ Unbatch All'; }, 2000);
+  } else {
+    btnUnbatch.textContent = 'Nothing batched';
+    setTimeout(() => { btnUnbatch.textContent = '↩ Unbatch All'; }, 2000);
+  }
+});
 
 qualityRenderDistInput.addEventListener('change', () => {
   setRuntimeRenderDistance(qualityRenderDistInput.value);
@@ -19925,12 +25562,6 @@ qualityLightDistInput.addEventListener('change', () => {
   setRuntimeLightDistance(qualityLightDistInput.value);
   saveEditorSettings();
 });
-
-// Fog UI listeners
-if (fogEnabledInput) fogEnabledInput.addEventListener('change', readFogUI);
-if (fogColorInput) fogColorInput.addEventListener('input', readFogUI);
-if (fogDensityInput) fogDensityInput.addEventListener('change', readFogUI);
-if (fogBrightnessInput) fogBrightnessInput.addEventListener('change', readFogUI);
 
 // FOV UI listeners
 if (fovEditorInput) fovEditorInput.addEventListener('change', () => {
@@ -20012,18 +25643,23 @@ function updateRuntimeOptimizer(nowMs, dt) {
 // ─── Portal view rendering ────────────────────────────────────────────────────
 const _portalDiscGeo = new THREE.CircleGeometry(0.58, 32);
 const _portalTmpPos = new THREE.Vector3();
+const _portalSrcPos = new THREE.Vector3();
+const _portalDestPos = new THREE.Vector3();
+const _portalCamPos = new THREE.Vector3();
+const _portalRelOffset = new THREE.Vector3();
+const _portalSrcQuat = new THREE.Quaternion();
+const _portalDestQuat = new THREE.Quaternion();
+const _portalViewQuat = new THREE.Quaternion();
+const _portalRelQuat = new THREE.Quaternion();
+const _portalRTs = [
+  new THREE.WebGLRenderTarget(256, 256),
+  new THREE.WebGLRenderTarget(256, 256)
+];
 const _portalCam = new THREE.PerspectiveCamera(75, 1, 0.1, 200);
 
-function _createPortalRenderTarget() {
-  const rt = new THREE.WebGLRenderTarget(256, 256);
-  rt.texture.colorSpace = THREE.SRGBColorSpace;
-  return rt;
-}
-
-function _ensurePortalDisc(mesh) {
+function _ensurePortalDisc(mesh, rtIndex) {
   if (mesh.userData._portalDisc) return mesh.userData._portalDisc;
-  if (!mesh.userData._portalRT) mesh.userData._portalRT = _createPortalRenderTarget();
-  const mat = new THREE.MeshBasicMaterial({ map: mesh.userData._portalRT.texture, side: THREE.DoubleSide, transparent: true });
+  const mat = new THREE.MeshBasicMaterial({ map: _portalRTs[rtIndex].texture, side: THREE.DoubleSide, transparent: true });
   const disc = new THREE.Mesh(_portalDiscGeo, mat);
   disc.userData._isPortalDisc = true;
   disc.renderOrder = 1;
@@ -20034,6 +25670,7 @@ function _ensurePortalDisc(mesh) {
 
 function _renderPortalViews() {
   if (!state.isPlaytest) return;
+  let rendered = 0;
   for (const m of sceneObjects) {
     if (m.userData.type !== 'teleport') continue;
     // Hide portal disc if not in playtest or no pair
@@ -20042,6 +25679,7 @@ function _renderPortalViews() {
     _portalTmpPos.setFromMatrixPosition(m.matrixWorld);
     const dist = _portalTmpPos.distanceTo(fpsPos);
     if (dist > PORTAL_MAX_DIST) continue;
+    if (rendered >= 2) continue; // max 2 active portal renders per frame
 
     const config = getMeshTeleportConfig(m);
     if (!config.pairLabel) continue;
@@ -20060,15 +25698,26 @@ function _renderPortalViews() {
     );
     if (!dest) continue;
 
-    const disc = _ensurePortalDisc(m);
+    const disc = _ensurePortalDisc(m, rendered);
     disc.visible = true;
-    if (!m.userData._portalRT) m.userData._portalRT = _createPortalRenderTarget();
 
-    // Position portal camera at destination, facing the same direction as the player
-    _portalCam.position.copy(dest.position);
-    _portalCam.position.y += 0.7;
-    _portalCam.rotation.set(fpsPitch, fpsYaw, 0, 'YXZ');
+    // Mirror the player's full camera transform through the source portal into the destination portal frame.
+    fpsCam.getWorldPosition(_portalCamPos);
+    fpsCam.getWorldQuaternion(_portalViewQuat);
+    m.getWorldPosition(_portalSrcPos);
+    dest.getWorldPosition(_portalDestPos);
+    m.getWorldQuaternion(_portalSrcQuat);
+    dest.getWorldQuaternion(_portalDestQuat);
+
+    _portalRelOffset.copy(_portalCamPos).sub(_portalSrcPos).applyQuaternion(_portalSrcQuat.clone().invert());
+    _portalCam.position.copy(_portalRelOffset.applyQuaternion(_portalDestQuat)).add(_portalDestPos);
+
+    _portalRelQuat.copy(_portalSrcQuat).invert().multiply(_portalViewQuat);
+    _portalCam.quaternion.copy(_portalDestQuat).multiply(_portalRelQuat);
     _portalCam.fov = fpsCam.fov;
+    _portalCam.aspect = fpsCam.aspect;
+    _portalCam.near = fpsCam.near;
+    _portalCam.far = fpsCam.far;
     _portalCam.updateProjectionMatrix();
 
     // Render scene from destination perspective
@@ -20090,17 +25739,105 @@ function _renderPortalViews() {
       }
     }
 
-    renderer.setRenderTarget(m.userData._portalRT);
+    renderer.setRenderTarget(_portalRTs[rendered]);
     renderer.render(scene, _portalCam);
     renderer.setRenderTarget(null);
 
     // Restore visibility
     for (const o of _savedVis) o.visible = false;
 
-    disc.material.map = m.userData._portalRT.texture;
+    disc.material.map = _portalRTs[rendered].texture;
     disc.material.needsUpdate = true;
     disc.visible = true;
     if (destDisc) destDisc.visible = destDiscWasVisible;
+    rendered++;
+  }
+}
+
+// ─── Camera-to-screen live feed rendering ─────────────────────────────────────
+const _camScreenRT = new THREE.WebGLRenderTarget(512, 288);
+const _camScreenCam = new THREE.PerspectiveCamera(60, 16 / 9, 0.1, 500);
+const _camScreenTmpPos = new THREE.Vector3();
+const CAMERA_SCREEN_MAX_DIST = 60;
+const CAMERA_SCREEN_MAX_ACTIVE = 4;
+
+function _renderCameraScreenViews() {
+  if (!state.isPlaytest) return;
+  let rendered = 0;
+  for (const m of sceneObjects) {
+    if (m.userData.type !== 'screen') continue;
+    const sc = m.userData.screenConfig;
+    if (!sc || sc.mediaType !== 'camera' || !sc.cameraLabel) continue;
+    if (rendered >= CAMERA_SCREEN_MAX_ACTIVE) break;
+
+    // Distance check from player
+    _camScreenTmpPos.setFromMatrixPosition(m.matrixWorld);
+    const dist = _camScreenTmpPos.distanceTo(fpsPos);
+    if (dist > CAMERA_SCREEN_MAX_DIST) continue;
+
+    // Find the camera object by label
+    const targetLabel = sc.cameraLabel.toLowerCase();
+    const camMesh = sceneObjects.find(o =>
+      o.userData.type === 'camera' &&
+      (o.userData.label || '').toLowerCase() === targetLabel
+    );
+    if (!camMesh) continue;
+
+    // Configure render camera from camera mesh
+    const cfg = normalizeCameraConfig(camMesh.userData.cameraConfig);
+    _camScreenCam.fov = cfg.fov;
+    _camScreenCam.aspect = cfg.aspectRatio;
+    _camScreenCam.near = cfg.near;
+    _camScreenCam.far = cfg.far;
+    _camScreenCam.updateProjectionMatrix();
+
+    camMesh.updateMatrixWorld(true);
+    const worldPos = new THREE.Vector3();
+    camMesh.getWorldPosition(worldPos);
+    _camScreenCam.position.copy(worldPos);
+
+    if (cfg.lookAtEnabled) {
+      _camScreenCam.lookAt(cfg.lookAtTarget[0], cfg.lookAtTarget[1], cfg.lookAtTarget[2]);
+    } else {
+      const worldQuat = new THREE.Quaternion();
+      camMesh.getWorldQuaternion(worldQuat);
+      _camScreenCam.quaternion.copy(worldQuat);
+    }
+
+    // Hide camera mesh during render
+    const camWasVis = camMesh.visible;
+    camMesh.visible = false;
+
+    // Temporarily reveal objects in camera frustum that frustum culling hid
+    const savedVis = [];
+    _camScreenCam.updateMatrixWorld();
+    _projScreenMatrix.multiplyMatrices(_camScreenCam.projectionMatrix, _camScreenCam.matrixWorldInverse);
+    _frustum.setFromProjectionMatrix(_projScreenMatrix);
+    for (const o of sceneObjects) {
+      if (!o.visible && !o.userData._dead && !o.userData._playtestHidden && _frustum.intersectsObject(o)) {
+        savedVis.push(o);
+        o.visible = true;
+      }
+    }
+
+    // Render to RT
+    renderer.setRenderTarget(_camScreenRT);
+    renderer.render(scene, _camScreenCam);
+    renderer.setRenderTarget(null);
+
+    // Restore
+    for (const o of savedVis) o.visible = false;
+    camMesh.visible = camWasVis;
+
+    // Apply RT texture to screen material
+    if (m.material) {
+      if (!m.userData._camScreenActive) {
+        m.userData._camScreenActive = true;
+      }
+      m.material.map = _camScreenRT.texture;
+      m.material.needsUpdate = true;
+    }
+    rendered++;
   }
 }
 
@@ -20119,13 +25856,14 @@ function animate(t) {
   if (state.isPlaytest) {
     if (runtimeMode && runtimePauseActive) {
       syncFpsCamera();
+      _updateCloudWind(dt);
+      syncSkyToCamera(fpsCam);
       updateSunShadowCenter(fpsPos);
       updateGridChunks(fpsPos.x, fpsPos.z);
       updateGridLabels(fpsPos.x, fpsPos.z);
       updateCoordHud();
       updateVisibility(fpsCam);
       updateCheckpointIndicators(t / 1000);
-      syncSkyToCamera(fpsCam);
       renderer.render(scene, fpsCam);
       return;
     }
@@ -20138,18 +25876,6 @@ function animate(t) {
     updateNpcBehaviors(dt, t / 1000);
     _showNpcInteractHint();
     updateRuntimeAudioInstances();
-    const dayCycleEnabled = !!(sunDayCycleEnabledInput && sunDayCycleEnabledInput.checked);
-    const dayCycleDuration = clampSunDayDuration(parseFloat(sunDayDurationInput.value));
-    if (dayCycleEnabled && dayCycleDuration > 0) {
-      const curTime = clampSunTime(parseFloat(sunTimeInput.value));
-      const hoursPerSecond = 24 / dayCycleDuration;
-      const nextTime = (curTime + (hoursPerSecond * dt)) % 24;
-      sunTimeInput.value = nextTime.toFixed(3);
-      updateSunSky();
-    }
-
-    // ── Cloud wind animation ──
-    _updateCloudWind(dt);
 
     // ── Crouch transition ──
     {
@@ -20236,9 +25962,23 @@ function animate(t) {
 
     if (_move.lengthSq() > 0) {
       let speed = canSprint ? resolveGameRule('sprintSpeed', 12) : BASE_FPS_SPEED;
+      if (window._flame3dConsole && window._flame3dConsole.speedMul !== 1) speed *= window._flame3dConsole.speedMul;
       if (fpsCrouching) speed *= 0.5;
       _move.normalize().multiplyScalar(speed * dt);
     }
+
+    // Noclip: skip all collision, gravity, traction — free flight
+    if (window._flame3dConsole && window._flame3dConsole.noclip) {
+      fpsPos.x += _move.x;
+      fpsPos.z += _move.z;
+      const flyDir = (fpsKeys.has('Space') || fpsKeys.has('KeyE') ? 1 : 0) - (fpsKeys.has(keybinds.crouch) || fpsKeys.has('KeyQ') ? 1 : 0);
+      const noclipSpeed = (canSprint ? resolveGameRule('sprintSpeed', 12) : BASE_FPS_SPEED) * dt;
+      if (flyDir !== 0) fpsPos.y += flyDir * noclipSpeed;
+      fpsVelY = 0;
+      fpsGrounded = false;
+      fpsFallStartY = null;
+      syncFpsCamera();
+    } else {
 
     refreshSolids();
     const _tractionIgnore = applyTractionCarry();
@@ -20314,8 +26054,9 @@ function animate(t) {
           }
           fpsGrounded = false;
         }
-        fpsPos.y = Math.max(0, nextY);
-        if (fpsPos.y === 0 && fpsVelY === 0) fpsGrounded = true;
+        const floorClampY = (state.isPlaytest && !gridPlaySolid) ? -Infinity : 0;
+        fpsPos.y = Math.max(floorClampY, nextY);
+        if (floorClampY === 0 && fpsPos.y === 0 && fpsVelY === 0) fpsGrounded = true;
       }
     } else {
       const flyDir = (fpsKeys.has('Space') || fpsKeys.has('KeyE') ? 1 : 0) - (fpsKeys.has(keybinds.crouch) || fpsKeys.has('KeyQ') ? 1 : 0);
@@ -20328,16 +26069,17 @@ function animate(t) {
       fpsFallStartY = null;
     }
 
+    } // end noclip else
+
     // Track first ground touch after spawn
     if (!fpsSpawnLanded && fpsGrounded) fpsSpawnLanded = true;
 
-    // Ground touch function trigger — only when touching the grid floor (y ≈ 0), not objects
+    // Ground touch function trigger
     if (gameRules.groundTouchFunction) {
-      const onGrid = fpsGrounded && fpsPos.y < 0.01;
-      if (onGrid && !_groundTouchFnActive) {
+      if (fpsGrounded && !_groundTouchFnActive) {
         _groundTouchFnActive = true;
         executeControlFunction(gameRules.groundTouchFunction, null, true);
-      } else if (!onGrid && _groundTouchFnActive) {
+      } else if (!fpsGrounded && _groundTouchFnActive) {
         _groundTouchFnActive = false;
         executeControlFunction(gameRules.groundTouchFunction, null, false);
       }
@@ -20348,8 +26090,10 @@ function animate(t) {
 
     // Trigger block overlap detection
     checkTriggerBlocks();
+    checkCollectiblePickups();
     checkTeleportBlocks();
     checkCheckpointBlocks();
+    updateSoundZones();
 
     // Re-evaluate trigger calls continuously so condition changes can start/stop actions.
     for (const [uuid, calls] of _activeTriggerCalls) {
@@ -20363,6 +26107,25 @@ function animate(t) {
     clampPlayerToWorldBorder();
     syncFpsCamera();
 
+    // ── Day/night cycle ──
+    if (sunDayCycleInput?.checked) {
+      const dur = parseFloat(sunDayDurationInput?.value) || SUN_DAY_DURATION_DEFAULT;
+      let curTime = parseFloat(sunTimeInput?.value) ?? SUN_TIME_DEFAULT;
+      curTime += dt * (24 / dur);
+      if (curTime >= 24) curTime -= 24;
+      if (sunTimeInput) sunTimeInput.value = curTime;
+      updateSunSky();
+    }
+    _updateCloudWind(dt);
+    syncSkyToCamera(fpsCam);
+
+    // ── Star twinkle ──
+    if (_starsMesh && _starsPhases && _starsMaterial.opacity > 0) {
+      const time01 = (t / 1000) * 1.5;
+      // Modulate relative to the base alpha set by updateSunSky
+      _starsMaterial.opacity = _starsBaseOpacity * (0.92 + 0.08 * Math.sin(time01));
+    }
+
     updateSunShadowCenter(fpsPos);
     updateGridChunks(fpsPos.x, fpsPos.z);
     updateGridLabels(fpsPos.x, fpsPos.z);
@@ -20372,8 +26135,8 @@ function animate(t) {
     updateOrbitIndicator();
     updateSpawnDirectionIndicators();
     updateJointIndicators();
-    syncSkyToCamera(fpsCam);
     _renderPortalViews();
+    _renderCameraScreenViews();
     renderer.render(scene, fpsCam);
     for (const m of sceneObjects) {
       _playtestPrevPositions.set(m, m.position.clone());
@@ -20385,10 +26148,16 @@ function animate(t) {
       updateSimAnimations(t / 1000);
       updateMovementPathAnimations(dt);
     }
-    _updateCloudWind(dt);
     moveEditorCamera(dt);
+    // Camera animation preview (overrides editor cam temporarily)
+    _updateCameraAnimationPreview();
     orbitControls.update();
     updateOrbitIndicator();
+    // Camera frustum helper update
+    _updateCameraFrustumHelper();
+    _updateCameraLookAtHelper();
+    _updateCloudWind(dt);
+    syncSkyToCamera(editorCam);
     updateSunShadowCenter(editorCam.position);
     updateGridChunks(editorCam.position.x, editorCam.position.z);
     updateGridLabels(editorCam.position.x, editorCam.position.z);
@@ -20397,9 +26166,13 @@ function animate(t) {
     updateCheckpointIndicators(t / 1000);
     updateSpawnDirectionIndicators();
     updateJointIndicators();
-    syncSkyToCamera(editorCam);
     renderer.render(scene, editorCam);
+    // Camera PiP preview (renders after main scene)
+    _renderCameraPip();
   }
+
+  // Update performance stats overlay (both modes)
+  updatePerfStats(t, dt);
 }
 
 // ─── Right-panel tab switching (Functions / Objects Library) ──────────────────
@@ -20414,6 +26187,1654 @@ function setFnPane(name) {
 }
 _fnPaneTabs.forEach(t => t.addEventListener('click', () => setFnPane(t.dataset.fnPane)));
 
+// ─── Bottom-panel tab switching ──────────────────────────────────────────────
+const _bpTabs  = document.querySelectorAll('.bp-tab');
+const _bpPanes = document.querySelectorAll('.bp-pane');
+let _activeBpPane = 'console';
+function setBpPane(name) {
+  _activeBpPane = name;
+  _bpTabs.forEach(t => t.classList.toggle('active', t.dataset.bpPane === name));
+  _bpPanes.forEach(p => p.classList.toggle('active', p.id === 'bp-pane-' + name));
+}
+_bpTabs.forEach(t => t.addEventListener('click', () => setBpPane(t.dataset.bpPane)));
+
+// ─── Bottom-panel toggle ─────────────────────────────────────────────────────
+if (bottomToggleBtn) {
+  bottomToggleBtn.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    bottomPanelState.collapsed = !bottomPanelState.collapsed;
+    applyBottomPanelState();
+  });
+}
+
+// ─── Bottom-panel resize ─────────────────────────────────────────────────────
+if (bottomResizerEl) {
+  bottomResizerEl.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || bottomPanelState.collapsed || e.target === bottomToggleBtn) return;
+    bottomPanelState.resizing = true;
+    document.body.classList.add('bottom-resizing');
+    document.body.style.cursor = 'ns-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+}
+window.addEventListener('pointermove', e => {
+  if (!bottomPanelState.resizing) return;
+  const newHeight = window.innerHeight - e.clientY;
+  bottomPanelState.height = clampBottomHeight(newHeight);
+  applyBottomPanelState({ save: false, reflow: true });
+});
+window.addEventListener('pointerup', stopBottomResize);
+window.addEventListener('pointercancel', stopBottomResize);
+
+// ─── Console ─────────────────────────────────────────────────────────────────
+const _consoleLogEl = document.getElementById('console-log');
+const _consoleClearBtn = document.getElementById('console-clear');
+const _consoleFilterLog  = document.getElementById('console-filter-log');
+const _consoleFilterWarn = document.getElementById('console-filter-warn');
+const _consoleFilterErr  = document.getElementById('console-filter-error');
+const _consoleMaxEntries = 500;
+let _consoleEntries = [];
+
+function _formatConsoleArg(arg) {
+  if (arg === null) return 'null';
+  if (arg === undefined) return 'undefined';
+  if (typeof arg === 'object') {
+    try { return JSON.stringify(arg, null, 1); } catch { return String(arg); }
+  }
+  return String(arg);
+}
+
+function appendConsoleEntry(level, args) {
+  if (!_consoleLogEl) return;
+  const now = new Date();
+  const ts = now.toTimeString().slice(0, 8) + '.' + String(now.getMilliseconds()).padStart(3, '0');
+  const text = Array.from(args).map(_formatConsoleArg).join(' ');
+
+  const el = document.createElement('div');
+  el.className = 'console-entry ce-' + level;
+  el.dataset.level = level;
+
+  const timeSpan = document.createElement('span');
+  timeSpan.className = 'ce-time';
+  timeSpan.textContent = ts;
+  el.appendChild(timeSpan);
+  el.appendChild(document.createTextNode(text));
+
+  _consoleLogEl.appendChild(el);
+  _consoleEntries.push(el);
+
+  // Prune old entries
+  while (_consoleEntries.length > _consoleMaxEntries) {
+    const old = _consoleEntries.shift();
+    if (old.parentNode) old.parentNode.removeChild(old);
+  }
+
+  // Apply current filter visibility
+  _applyConsoleFilter(el);
+
+  // Auto-scroll
+  _consoleLogEl.scrollTop = _consoleLogEl.scrollHeight;
+}
+
+function _applyConsoleFilter(el) {
+  const lvl = el.dataset.level;
+  if (lvl === 'log' && _consoleFilterLog && !_consoleFilterLog.checked) el.style.display = 'none';
+  else if (lvl === 'warn' && _consoleFilterWarn && !_consoleFilterWarn.checked) el.style.display = 'none';
+  else if (lvl === 'error' && _consoleFilterErr && !_consoleFilterErr.checked) el.style.display = 'none';
+  else el.style.display = '';
+}
+
+function _applyAllConsoleFilters() {
+  for (const el of _consoleEntries) _applyConsoleFilter(el);
+}
+
+function clearConsole() {
+  if (!_consoleLogEl) return;
+  _consoleLogEl.innerHTML = '';
+  _consoleEntries = [];
+}
+
+// Wrap native console methods
+const _origConsoleLog = console.log.bind(console);
+const _origConsoleWarn = console.warn.bind(console);
+const _origConsoleError = console.error.bind(console);
+
+console.log = function() { _origConsoleLog.apply(console, arguments); appendConsoleEntry('log', arguments); };
+console.warn = function() { _origConsoleWarn.apply(console, arguments); appendConsoleEntry('warn', arguments); };
+console.error = function() { _origConsoleError.apply(console, arguments); appendConsoleEntry('error', arguments); };
+
+// Also capture unhandled errors
+window.addEventListener('error', e => {
+  appendConsoleEntry('error', ['Uncaught: ' + (e.message || e.error || 'Unknown error')]);
+});
+window.addEventListener('unhandledrejection', e => {
+  appendConsoleEntry('error', ['Unhandled Promise: ' + (e.reason || 'Unknown')]);
+});
+
+if (_consoleClearBtn) _consoleClearBtn.addEventListener('click', clearConsole);
+if (_consoleFilterLog) _consoleFilterLog.addEventListener('change', _applyAllConsoleFilters);
+if (_consoleFilterWarn) _consoleFilterWarn.addEventListener('change', _applyAllConsoleFilters);
+if (_consoleFilterErr) _consoleFilterErr.addEventListener('change', _applyAllConsoleFilters);
+
+// ─── Console Command System ──────────────────────────────────────────────────
+{
+const _cmdInput = document.getElementById('console-input');
+const _cmdHistory = [];
+let _cmdHistoryIdx = -1;
+let _cmdHistoryDraft = '';
+
+// -- Helpers to log styled entries --
+function _cmdLog(text)    { appendConsoleEntry('result', [text]); }
+function _cmdError(text)  { appendConsoleEntry('error', ['[Error] ' + text]); }
+function _cmdEcho(text)   { appendConsoleEntry('cmd', ['> ' + text]); }
+
+// -- Tokenizer: splits respecting (parens), "quotes", key:value --
+function _tokenize(input) {
+  const tokens = [];
+  let i = 0;
+  while (i < input.length) {
+    // skip whitespace
+    if (input[i] === ' ' || input[i] === '\t') { i++; continue; }
+    // parenthesized group → collect as raw string (without parens)
+    if (input[i] === '(') {
+      let depth = 1, start = i + 1;
+      i++;
+      while (i < input.length && depth > 0) {
+        if (input[i] === '(') depth++;
+        else if (input[i] === ')') depth--;
+        i++;
+      }
+      tokens.push({ type: 'group', value: input.slice(start, i - 1).trim() });
+      continue;
+    }
+    // bracket group [key: value] → treat as kv pair
+    if (input[i] === '[') {
+      let depth = 1, start = i + 1;
+      i++;
+      while (i < input.length && depth > 0) {
+        if (input[i] === '[') depth++;
+        else if (input[i] === ']') depth--;
+        i++;
+      }
+      const inner = input.slice(start, i - 1).trim();
+      if (inner.includes(':')) {
+        const cidx = inner.indexOf(':');
+        tokens.push({ type: 'kv', key: inner.slice(0, cidx).trim().toLowerCase(), value: inner.slice(cidx + 1).trim() });
+      } else {
+        tokens.push({ type: 'word', value: inner });
+      }
+      continue;
+    }
+    // quoted string
+    if (input[i] === '"' || input[i] === "'") {
+      const q = input[i]; i++;
+      let s = '';
+      while (i < input.length && input[i] !== q) { s += input[i]; i++; }
+      if (i < input.length) i++; // closing quote
+      tokens.push({ type: 'string', value: s });
+      continue;
+    }
+    // word or key:value
+    let word = '';
+    while (i < input.length && input[i] !== ' ' && input[i] !== '\t' && input[i] !== '(' && input[i] !== '[') {
+      word += input[i]; i++;
+    }
+    if (word.includes(':')) {
+      const cidx = word.indexOf(':');
+      tokens.push({ type: 'kv', key: word.slice(0, cidx).toLowerCase(), value: word.slice(cidx + 1) });
+    } else {
+      tokens.push({ type: 'word', value: word });
+    }
+  }
+  return tokens;
+}
+
+// -- Parse a group token "x y z" into a Vector3 --
+function _parseVec3(groupToken) {
+  if (!groupToken || groupToken.type !== 'group') return null;
+  const parts = groupToken.value.split(/[\s,]+/).map(Number);
+  if (parts.length < 3 || parts.some(isNaN)) return null;
+  return new THREE.Vector3(parts[0], parts[1], parts[2]);
+}
+
+// -- Selector resolver: returns array of meshes --
+function _resolveSelector(selectorStr) {
+  if (!selectorStr) return [];
+  const s = selectorStr.trim();
+  if (s === '*') return [...sceneObjects];
+  if (s === '.') {
+    const result = [];
+    if (state.selectedObject) result.push(state.selectedObject);
+    result.push(...state.extraSelected);
+    return result;
+  }
+  // group:Name
+  if (s.toLowerCase().startsWith('group:')) {
+    const gName = s.slice(6);
+    return sceneObjects.filter(m => m.userData.editorGroupId === gName);
+  }
+  // type:typename
+  if (s.toLowerCase().startsWith('type:')) {
+    const tName = s.slice(5).toLowerCase();
+    return sceneObjects.filter(m => (m.userData.type || '').toLowerCase() === tName);
+  }
+  // by label (exact), then fall back to label (case-insensitive), then type name
+  const byLabel = sceneObjects.filter(m => (m.userData.label || '') === s);
+  if (byLabel.length) return byLabel;
+  const sl = s.toLowerCase();
+  const byLabelCI = sceneObjects.filter(m => (m.userData.label || '').toLowerCase() === sl);
+  if (byLabelCI.length) return byLabelCI;
+  return sceneObjects.filter(m => (m.userData.type || '').toLowerCase() === sl);
+}
+
+// -- Parse kv pairs from remaining tokens --
+function _collectKV(tokens, startIdx) {
+  const kv = {};
+  for (let i = startIdx; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t.type === 'kv') kv[t.key] = t.value;
+    else if (t.type === 'word' && t.value.includes(':')) {
+      const ci = t.value.indexOf(':');
+      kv[t.value.slice(0, ci).toLowerCase()] = t.value.slice(ci + 1);
+    }
+  }
+  return kv;
+}
+
+// -- Command registry --
+const _commands = {};
+
+function _registerCmd(name, desc, usage, fn) {
+  _commands[name.toLowerCase()] = { name, desc, usage, fn };
+}
+
+// ── help ──
+_registerCmd('help', 'Show available commands', 'help [command]', (tokens) => {
+  if (tokens.length > 1) {
+    const cmd = _commands[tokens[1].value.toLowerCase()];
+    if (cmd) { _cmdLog(cmd.name + ' — ' + cmd.desc + '\n  Usage: ' + cmd.usage); }
+    else _cmdError('Unknown command: "' + tokens[1].value + '"');
+    return;
+  }
+  _cmdLog('── Flame3D Console Commands ──');
+  const cats = {
+    'Editor': ['place', 'delete', 'select', 'deselect', 'move', 'rotate', 'scale', 'group', 'ungroup', 'rename', 'set', 'list', 'count', 'inspect'],
+    'Playtest': ['tp', 'heal', 'damage', 'kill', 'god', 'noclip', 'speed'],
+    'General': ['help', 'clear', 'echo'],
+  };
+  for (const [cat, names] of Object.entries(cats)) {
+    const lines = names.filter(n => _commands[n]).map(n => '  ' + _commands[n].name.padEnd(12) + _commands[n].desc);
+    _cmdLog(cat + ':\n' + lines.join('\n'));
+  }
+});
+
+// ── clear ──
+_registerCmd('clear', 'Clear the console', 'clear', () => { clearConsole(); });
+
+// ── echo ──
+_registerCmd('echo', 'Print a message', 'echo <message>', (tokens) => {
+  _cmdLog(tokens.slice(1).map(t => t.value).join(' '));
+});
+
+// ── place ──
+_registerCmd('place', 'Place an object at a position', 'place <type> (<x> <y> <z>) [name:<n>] [group:<g>]', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.place.usage); return; }
+  const typeName = tokens[1].value.toLowerCase();
+  if (!DEFS[typeName]) {
+    _cmdError('Unknown type: "' + tokens[1].value + '". Available: ' + Object.keys(DEFS).join(', '));
+    return;
+  }
+  // Find position group
+  const posToken = tokens.find(t => t.type === 'group');
+  const pos = posToken ? _parseVec3(posToken) : new THREE.Vector3(0, DEFS[typeName].placedY || 0, 0);
+  if (!pos) { _cmdError('Invalid position. Use: (x y z)'); return; }
+  const kv = _collectKV(tokens, 2);
+
+  const mesh = createMesh(typeName, false, { opacity: state.placeOpacity });
+  mesh.position.copy(pos);
+  scene.add(mesh);
+  sceneObjects.push(mesh);
+  mesh.userData.type = typeName;
+  if (kv.name) mesh.userData.label = kv.name;
+  if (kv.group) mesh.userData.editorGroupId = kv.group;
+
+  pushUndo({ type: 'add', mesh });
+  if (typeof refreshBpAssets === 'function') refreshBpAssets();
+  refreshStatus();
+  _cmdLog('Placed ' + DEFS[typeName].label + ' at (' + pos.x + ', ' + pos.y + ', ' + pos.z + ')' + (kv.name ? ' as "' + kv.name + '"' : ''));
+});
+
+// ── delete ──
+_registerCmd('delete', 'Delete objects matching a selector', 'delete <selector>', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.delete.usage); return; }
+  const sel = tokens.slice(1).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  for (const m of [...objs]) deleteObject(m);
+  _cmdLog('Deleted ' + objs.length + ' object(s)');
+});
+
+// ── select ──
+_registerCmd('select', 'Select objects matching a selector', 'select <selector>', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.select.usage); return; }
+  const sel = tokens.slice(1).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  selectObject(objs[0]);
+  for (let i = 1; i < objs.length; i++) toggleExtraSelect(objs[i]);
+  _cmdLog('Selected ' + objs.length + ' object(s)');
+});
+
+// ── deselect ──
+_registerCmd('deselect', 'Deselect all', 'deselect', () => {
+  selectObject(null);
+  _cmdLog('Selection cleared');
+});
+
+// ── move ──
+_registerCmd('move', 'Move objects to a position', 'move <selector> (<x> <y> <z>)', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.move.usage); return; }
+  const sel = tokens[1].value;
+  const posToken = tokens.find(t => t.type === 'group');
+  const pos = _parseVec3(posToken);
+  if (!pos) { _cmdError('Invalid position. Use: (x y z)'); return; }
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  for (const m of objs) m.position.copy(pos);
+  refreshProps();
+  refreshStatus();
+  _cmdLog('Moved ' + objs.length + ' object(s) to (' + pos.x + ', ' + pos.y + ', ' + pos.z + ')');
+});
+
+// ── rotate ──
+_registerCmd('rotate', 'Rotate objects (degrees)', 'rotate <selector> (<xDeg> <yDeg> <zDeg>)', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.rotate.usage); return; }
+  const sel = tokens[1].value;
+  const rotToken = tokens.find(t => t.type === 'group');
+  const rot = _parseVec3(rotToken);
+  if (!rot) { _cmdError('Invalid rotation. Use: (xDeg yDeg zDeg)'); return; }
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  for (const m of objs) m.rotation.set(
+    THREE.MathUtils.degToRad(rot.x),
+    THREE.MathUtils.degToRad(rot.y),
+    THREE.MathUtils.degToRad(rot.z)
+  );
+  refreshProps();
+  refreshStatus();
+  _cmdLog('Rotated ' + objs.length + ' object(s) to (' + rot.x + '°, ' + rot.y + '°, ' + rot.z + '°)');
+});
+
+// ── scale ──
+_registerCmd('scale', 'Scale objects', 'scale <selector> (<x> <y> <z>)', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.scale.usage); return; }
+  const sel = tokens[1].value;
+  const scToken = tokens.find(t => t.type === 'group');
+  const sc = _parseVec3(scToken);
+  if (!sc) { _cmdError('Invalid scale. Use: (x y z)'); return; }
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  for (const m of objs) m.scale.set(sc.x, sc.y, sc.z);
+  refreshProps();
+  refreshStatus();
+  _cmdLog('Scaled ' + objs.length + ' object(s) to (' + sc.x + ', ' + sc.y + ', ' + sc.z + ')');
+});
+
+// ── group ──
+_registerCmd('group', 'Assign objects to a named group', 'group <groupName> <selector>', (tokens) => {
+  if (tokens.length < 3) { _cmdError('Usage: ' + _commands.group.usage); return; }
+  const gName = tokens[1].value;
+  const sel = tokens.slice(2).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  for (const m of objs) m.userData.editorGroupId = gName;
+  _cmdLog('Assigned ' + objs.length + ' object(s) to group "' + gName + '"');
+});
+
+// ── ungroup ──
+_registerCmd('ungroup', 'Remove objects from their group', 'ungroup <selector>', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.ungroup.usage); return; }
+  const sel = tokens.slice(1).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  for (const m of objs) delete m.userData.editorGroupId;
+  _cmdLog('Ungrouped ' + objs.length + ' object(s)');
+});
+
+// ── rename ──
+_registerCmd('rename', 'Rename an object', 'rename <selector> <newName>', (tokens) => {
+  if (tokens.length < 3) { _cmdError('Usage: ' + _commands.rename.usage); return; }
+  const sel = tokens[1].value;
+  const newName = tokens.slice(2).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  for (const m of objs) m.userData.label = newName;
+  refreshProps();
+  _cmdLog('Renamed ' + objs.length + ' object(s) to "' + newName + '"');
+});
+
+// ── set ──
+_registerCmd('set', 'Set a property on objects', 'set <selector> <property> <value>', (tokens) => {
+  if (tokens.length < 4) { _cmdError('Usage: ' + _commands.set.usage); return; }
+  const sel = tokens[1].value;
+  const prop = tokens[2].value.toLowerCase();
+  const val = tokens.slice(3).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  // Handle known properties
+  const numVal = Number(val);
+  for (const m of objs) {
+    if (prop === 'color' || prop === 'colour') {
+      m.material.color.set(val);
+    } else if (prop === 'opacity') {
+      m.material.transparent = true;
+      m.material.opacity = THREE.MathUtils.clamp(numVal, 0, 1);
+    } else if (prop === 'visible') {
+      m.visible = val === 'true' || val === '1';
+    } else if (prop === 'label' || prop === 'name') {
+      m.userData.label = val;
+    } else {
+      m.userData[prop] = isNaN(numVal) ? val : numVal;
+    }
+  }
+  refreshProps();
+  refreshStatus();
+  _cmdLog('Set ' + prop + ' = ' + val + ' on ' + objs.length + ' object(s)');
+});
+
+// ── list ──
+_registerCmd('list', 'List objects, groups, or types', 'list [objects|groups|types]', (tokens) => {
+  const what = (tokens[1]?.value || 'objects').toLowerCase();
+  if (what === 'groups') {
+    const groups = new Map();
+    for (const m of sceneObjects) {
+      const g = m.userData.editorGroupId;
+      if (g) groups.set(g, (groups.get(g) || 0) + 1);
+    }
+    if (!groups.size) { _cmdLog('No groups defined'); return; }
+    const lines = [];
+    for (const [name, count] of groups) lines.push('  ' + name + ' (' + count + ' objects)');
+    _cmdLog('Groups:\n' + lines.join('\n'));
+  } else if (what === 'types') {
+    const types = new Map();
+    for (const m of sceneObjects) {
+      const t = m.userData.type || 'unknown';
+      types.set(t, (types.get(t) || 0) + 1);
+    }
+    const lines = [];
+    for (const [t, c] of types) lines.push('  ' + t + ': ' + c);
+    _cmdLog('Object types:\n' + lines.join('\n'));
+  } else {
+    if (!sceneObjects.length) { _cmdLog('No objects in scene'); return; }
+    const lines = sceneObjects.slice(0, 50).map(m => {
+      const label = m.userData.label || '(unnamed)';
+      const type = m.userData.type || '?';
+      const p = m.position;
+      const g = m.userData.editorGroupId ? ' [' + m.userData.editorGroupId + ']' : '';
+      return '  ' + label + ' (' + type + ') at (' + r3(p.x) + ', ' + r3(p.y) + ', ' + r3(p.z) + ')' + g;
+    });
+    _cmdLog('Objects (' + sceneObjects.length + '):\n' + lines.join('\n') + (sceneObjects.length > 50 ? '\n  ...and ' + (sceneObjects.length - 50) + ' more' : ''));
+  }
+});
+
+// ── count ──
+_registerCmd('count', 'Count objects matching selector', 'count <selector>', (tokens) => {
+  if (tokens.length < 2) { _cmdLog('Total objects: ' + sceneObjects.length); return; }
+  const sel = tokens.slice(1).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  _cmdLog('Matched: ' + objs.length + ' object(s)');
+});
+
+// ── inspect ──
+_registerCmd('inspect', 'Show details of an object', 'inspect <selector>', (tokens) => {
+  if (tokens.length < 2) { _cmdError('Usage: ' + _commands.inspect.usage); return; }
+  const sel = tokens.slice(1).map(t => t.value).join(' ');
+  const objs = _resolveSelector(sel);
+  if (!objs.length) { _cmdError('No objects matched "' + sel + '"'); return; }
+  const m = objs[0];
+  const p = m.position, r = m.rotation, s = m.scale;
+  const lines = [
+    'Label: ' + (m.userData.label || '(none)'),
+    'Type: ' + (m.userData.type || '?'),
+    'Position: (' + r3(p.x) + ', ' + r3(p.y) + ', ' + r3(p.z) + ')',
+    'Rotation: (' + r3(THREE.MathUtils.radToDeg(r.x)) + '°, ' + r3(THREE.MathUtils.radToDeg(r.y)) + '°, ' + r3(THREE.MathUtils.radToDeg(r.z)) + '°)',
+    'Scale: (' + r3(s.x) + ', ' + r3(s.y) + ', ' + r3(s.z) + ')',
+    'Group: ' + (m.userData.editorGroupId || '(none)'),
+    'Visible: ' + m.visible,
+    'Color: #' + m.material.color.getHexString(),
+    'Opacity: ' + r3(m.material.opacity),
+  ];
+  _cmdLog(lines.join('\n'));
+});
+
+// ── Playtest commands ──
+
+// ── tp ──
+_registerCmd('tp', 'Teleport player (playtest only)', 'tp (<x> <y> <z>)', (tokens) => {
+  if (!state.isPlaytest) { _cmdError('tp is only available during playtest'); return; }
+  const posToken = tokens.find(t => t.type === 'group');
+  const pos = _parseVec3(posToken);
+  if (!pos) { _cmdError('Invalid position. Use: tp (x y z)'); return; }
+  fpsPos.copy(pos);
+  syncFpsCamera();
+  _cmdLog('Teleported to (' + pos.x + ', ' + pos.y + ', ' + pos.z + ')');
+});
+
+// ── heal ──
+_registerCmd('heal', 'Heal the player', 'heal <amount>', (tokens) => {
+  if (!state.isPlaytest) { _cmdError('heal is only available during playtest'); return; }
+  const amt = Number(tokens[1]?.value);
+  if (isNaN(amt)) { _cmdError('Usage: heal <amount>'); return; }
+  const maxHp = resolveGameRule('maxHealth', 100);
+  fpsHealth = Math.min(fpsHealth + amt, maxHp);
+  updateHealthHud();
+  _cmdLog('Healed ' + amt + ' → HP: ' + Math.ceil(fpsHealth) + '/' + maxHp);
+});
+
+// ── damage ──
+_registerCmd('damage', 'Damage the player', 'damage <amount>', (tokens) => {
+  if (!state.isPlaytest) { _cmdError('damage is only available during playtest'); return; }
+  const amt = Number(tokens[1]?.value);
+  if (isNaN(amt)) { _cmdError('Usage: damage <amount>'); return; }
+  fpsHealth = Math.max(0, fpsHealth - amt);
+  updateHealthHud();
+  _cmdLog('Damaged ' + amt + ' → HP: ' + Math.ceil(fpsHealth));
+});
+
+// ── kill ──
+_registerCmd('kill', 'Kill the player', 'kill', () => {
+  if (!state.isPlaytest) { _cmdError('kill is only available during playtest'); return; }
+  fpsHealth = 0;
+  updateHealthHud();
+  _cmdLog('Player killed');
+});
+
+// ── god ──
+let _godMode = false;
+_registerCmd('god', 'Toggle god mode (invincible)', 'god', () => {
+  if (!state.isPlaytest) { _cmdError('god is only available during playtest'); return; }
+  _godMode = !_godMode;
+  if (_godMode) {
+    fpsHealth = resolveGameRule('maxHealth', 100);
+    updateHealthHud();
+  }
+  _cmdLog('God mode: ' + (_godMode ? 'ON' : 'OFF'));
+});
+
+// ── noclip ──
+let _noclip = false;
+_registerCmd('noclip', 'Toggle noclip flying', 'noclip', () => {
+  if (!state.isPlaytest) { _cmdError('noclip is only available during playtest'); return; }
+  _noclip = !_noclip;
+  _cmdLog('Noclip: ' + (_noclip ? 'ON' : 'OFF'));
+});
+
+// ── speed ──
+let _speedMul = 1;
+_registerCmd('speed', 'Set movement speed multiplier', 'speed <multiplier>', (tokens) => {
+  if (!state.isPlaytest) { _cmdError('speed is only available during playtest'); return; }
+  const mul = Number(tokens[1]?.value);
+  if (isNaN(mul) || mul <= 0) { _cmdError('Usage: speed <positive number>'); return; }
+  _speedMul = mul;
+  _cmdLog('Speed multiplier: ' + _speedMul + 'x');
+});
+
+// ── spawn (alias for place during playtest) ──
+_registerCmd('spawn', 'Place an object at a position (alias for place)', 'spawn <type> (<x> <y> <z>)', (tokens) => {
+  _commands.place.fn(tokens);
+});
+
+// Expose cheat state for the game loop
+window._flame3dConsole = { get godMode() { return _godMode; }, get noclip() { return _noclip; }, get speedMul() { return _speedMul; }, execute: _executeCommand, get commands() { return _commands; } };
+
+// -- Split a raw prompt on ';', respecting quoted strings and (groups) --
+function _splitRawCommands(raw) {
+  const cmds = [];
+  let cur = '';
+  let inQuote = '';
+  let parenDepth = 0;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inQuote) {
+      cur += ch;
+      if (ch === inQuote) inQuote = '';
+    } else if (ch === '"' || ch === "'") {
+      inQuote = ch;
+      cur += ch;
+    } else if (ch === '(') {
+      parenDepth++;
+      cur += ch;
+    } else if (ch === ')') {
+      if (parenDepth > 0) parenDepth--;
+      cur += ch;
+    } else if (ch === ';' && parenDepth === 0) {
+      const t = cur.trim();
+      if (t) cmds.push(t);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  const t = cur.trim();
+  if (t) cmds.push(t);
+  return cmds;
+}
+
+// -- Execute a command string (may contain ';'-separated commands) --
+function _executeCommand(input) {
+  const segments = _splitRawCommands(input);
+  for (const trimmed of segments) {
+    if (!trimmed) continue;
+    _cmdEcho(trimmed);
+    const tokens = _tokenize(trimmed);
+    if (!tokens.length) continue;
+    const cmdName = tokens[0].value.toLowerCase();
+    const cmd = _commands[cmdName];
+    if (!cmd) {
+      _cmdError('Unknown command: "' + cmdName + '". Type "help" for a list of commands.');
+      continue;
+    }
+    try { cmd.fn(tokens); } catch (e) { _cmdError(e.message || String(e)); }
+  }
+}
+
+// -- Live suggestion dropdown --
+let _cmdSuggestEl = null;
+let _cmdSuggestIdx = -1;
+
+function _selectorOptions() {
+  const opts = [
+    { label: '*', value: '*', desc: 'all objects' },
+    { label: '.', value: '.', desc: 'current selection' },
+  ];
+  const groups = new Set();
+  const types = new Set();
+  const labels = new Set();
+  if (typeof sceneObjects !== 'undefined') {
+    for (const mesh of sceneObjects) {
+      if (mesh.userData.editorGroupId) groups.add(mesh.userData.editorGroupId);
+      if (mesh.userData.type) types.add(mesh.userData.type);
+      if (mesh.userData.label) labels.add(mesh.userData.label);
+    }
+  }
+  for (const group of groups) opts.push({ label: 'group:' + group, value: 'group:' + group, desc: 'by group' });
+  for (const type of types) opts.push({ label: 'type:' + type, value: 'type:' + type, desc: 'by type' });
+  for (const label of labels) opts.push({ label, value: label, desc: 'by label' });
+  return opts;
+}
+
+function _groupNameOptions() {
+  const groups = new Set();
+  if (typeof sceneObjects !== 'undefined') {
+    for (const mesh of sceneObjects) {
+      if (mesh.userData.editorGroupId) groups.add(mesh.userData.editorGroupId);
+    }
+  }
+  return [...groups].map(group => ({ label: group, value: group, desc: 'existing group' }));
+}
+
+function _cmdArgTable() {
+  const typeItems = typeof DEFS !== 'undefined'
+    ? Object.keys(DEFS).map(key => ({ label: key, value: key, desc: DEFS[key]?.label || '' }))
+    : [];
+  const setProps = ['color', 'opacity', 'visible', 'label', 'solid', 'roughness', 'metalness', 'name']
+    .map(prop => ({ label: prop, value: prop, desc: '' }));
+  const listArgs = ['objects', 'groups', 'types']
+    .map(value => ({ label: value, value, desc: '' }));
+  const hint3d = { label: '(x y z)', value: '(', desc: 'position' };
+  const hintRot = { label: '(xDeg yDeg zDeg)', value: '(', desc: 'rotation degrees' };
+  const kvHints = ['name:', 'group:']
+    .map(value => ({ label: value, value, desc: 'optional' }));
+  const selectorOptions = () => _selectorOptions();
+  return {
+    place: [() => typeItems, () => [hint3d], () => kvHints],
+    spawn: [() => typeItems, () => [hint3d], () => kvHints],
+    delete: [selectorOptions],
+    select: [selectorOptions],
+    deselect: [],
+    move: [selectorOptions, () => [hint3d]],
+    rotate: [selectorOptions, () => [hintRot]],
+    scale: [selectorOptions, () => [hint3d]],
+    group: [_groupNameOptions, selectorOptions],
+    ungroup: [selectorOptions],
+    rename: [selectorOptions],
+    set: [selectorOptions, () => setProps],
+    list: [() => listArgs],
+    count: [selectorOptions],
+    inspect: [selectorOptions],
+    help: [() => Object.keys(_commands).map(name => ({ label: name, value: name, desc: _commands[name]?.desc || '' }))],
+    tp: [() => [hint3d]],
+    heal: [() => ['50', '100', '999'].map(value => ({ label: value, value, desc: '' }))],
+    damage: [() => ['10', '25', '50'].map(value => ({ label: value, value, desc: '' }))],
+    speed: [() => ['0.5', '1', '2', '5'].map(value => ({ label: value, value, desc: '' }))],
+    echo: [],
+    clear: [],
+    god: [],
+    noclip: [],
+    kill: [],
+  };
+}
+
+function _cmdGetArgContext(val) {
+  const segments = val.split(';');
+  const last = segments[segments.length - 1];
+  const words = [];
+  let current = '';
+  let inQuote = '';
+  let parenDepth = 0;
+  for (const ch of last) {
+    if (inQuote) {
+      current += ch;
+      if (ch === inQuote) inQuote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inQuote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === '(') {
+      parenDepth++;
+      current += ch;
+      continue;
+    }
+    if (ch === ')') {
+      parenDepth = Math.max(0, parenDepth - 1);
+      current += ch;
+      continue;
+    }
+    if (ch === ' ' && parenDepth === 0) {
+      if (current.length) {
+        words.push(current);
+        current = '';
+      } else {
+        words.push('');
+      }
+      continue;
+    }
+    current += ch;
+  }
+
+  const trailingSpace = last.endsWith(' ') && parenDepth === 0 && !inQuote;
+  const realWords = words.filter(word => word.length > 0);
+  if (!realWords.length && !current.length) return { cmdName: '', argIndex: 0, partial: '', inParen: parenDepth > 0 };
+  if (!realWords.length) return { cmdName: current.toLowerCase(), argIndex: 0, partial: current, inParen: false };
+  if (trailingSpace) return { cmdName: realWords[0].toLowerCase(), argIndex: realWords.length, partial: '', inParen: false };
+  return { cmdName: realWords[0].toLowerCase(), argIndex: realWords.length, partial: current, inParen: parenDepth > 0 };
+}
+
+function _cmdShowSuggestions(val) {
+  const { cmdName, argIndex, partial, inParen } = _cmdGetArgContext(val);
+  if (!cmdName && !partial) { _cmdHideSuggestions(); return; }
+  if (inParen) { _cmdHideSuggestions(); return; }
+
+  let items = [];
+  if (argIndex === 0) {
+    const lookup = (partial || cmdName).toLowerCase();
+    items = Object.keys(_commands)
+      .filter(name => name.startsWith(lookup))
+      .map(name => ({ label: name, value: name, desc: _commands[name]?.desc || '', isHint: false }));
+  } else {
+    const table = _cmdArgTable();
+    const argList = table[cmdName];
+    if (!argList) { _cmdHideSuggestions(); return; }
+    const usageItems = _commands[cmdName]?.usage
+      ? [{ label: _commands[cmdName].usage, value: '', desc: '', isHint: true }]
+      : [];
+    const argFn = argList[argIndex - 1];
+    if (!argFn) {
+      items = usageItems;
+    } else {
+      let candidates = argFn().map(item => typeof item === 'string'
+        ? { label: item, value: item, desc: '', isHint: false }
+        : { isHint: false, ...item });
+      if (partial) {
+        const lookup = partial.toLowerCase();
+        candidates = candidates.filter(item => item.isHint || item.label.toLowerCase().startsWith(lookup));
+      }
+      items = usageItems.concat(candidates);
+    }
+  }
+
+  if (!items.length) { _cmdHideSuggestions(); return; }
+  if (!_cmdSuggestEl) {
+    _cmdSuggestEl = document.createElement('div');
+    _cmdSuggestEl.style.cssText = 'position:fixed;z-index:90000;background:#161b22;border:1px solid #30363d;' +
+      'border-radius:4px;box-shadow:0 4px 12px rgba(0,0,0,.6);min-width:240px;max-height:220px;overflow-y:auto;font-family:ui-monospace,"Cascadia Code",monospace;font-size:11px';
+    document.body.appendChild(_cmdSuggestEl);
+  }
+  _cmdSuggestIdx = -1;
+  _cmdSuggestEl.innerHTML = items.map((item, index) => {
+    if (item.isHint) {
+      return `<div style="padding:3px 10px;color:#8b949e;font-style:italic;border-bottom:1px solid #21262d;font-size:10px;user-select:none">${item.label}</div>`;
+    }
+    return `<div class="_cmd-sug" data-idx="${index}" data-value="${String(item.value).replace(/"/g, '&quot;')}" style="padding:4px 10px;cursor:pointer;color:#c9d1d9;display:flex;gap:8px;align-items:baseline">` +
+      `<span style="color:#58a6ff;min-width:90px">${item.label}</span><span style="color:#8b949e;font-size:10px">${item.desc || ''}</span></div>`;
+  }).join('');
+  const rect = _cmdInput.getBoundingClientRect();
+  const elH = Math.min(items.length * 25, 220);
+  _cmdSuggestEl.style.left = rect.left + 'px';
+  _cmdSuggestEl.style.top = (rect.top - elH - 6) + 'px';
+  _cmdSuggestEl.style.display = 'block';
+  _cmdSuggestEl.querySelectorAll('._cmd-sug').forEach(row => {
+    row.addEventListener('mousedown', ev => {
+      ev.preventDefault();
+      _cmdPickSuggestion(row.dataset.value);
+    });
+    row.addEventListener('mouseover', () => {
+      _cmdSuggestEl.querySelectorAll('._cmd-sug').forEach(r => r.style.background = '');
+      row.style.background = 'rgba(31,111,235,.2)';
+      _cmdSuggestIdx = parseInt(row.dataset.idx, 10);
+    });
+  });
+}
+
+function _cmdHideSuggestions() {
+  if (_cmdSuggestEl) { _cmdSuggestEl.style.display = 'none'; }
+  _cmdSuggestIdx = -1;
+}
+
+function _cmdPickSuggestion(value) {
+  if (!_cmdInput || value === '') return;
+  const val = _cmdInput.value;
+  const segments = val.split(';');
+  segments[segments.length - 1] = segments[segments.length - 1].replace(/\S*$/, '') + value + ' ';
+  _cmdInput.value = segments.join(';');
+  _cmdHideSuggestions();
+  _cmdInput.focus();
+  _cmdShowSuggestions(_cmdInput.value);
+}
+
+function _cmdSuggestArrow(dir) {
+  if (!_cmdSuggestEl || _cmdSuggestEl.style.display === 'none') return false;
+  const rows = Array.from(_cmdSuggestEl.querySelectorAll('._cmd-sug'));
+  if (!rows.length) return false;
+  rows.forEach(r => r.style.background = '');
+  _cmdSuggestIdx = (_cmdSuggestIdx + dir + rows.length) % rows.length;
+  rows[_cmdSuggestIdx].style.background = 'rgba(31,111,235,.2)';
+  rows[_cmdSuggestIdx].scrollIntoView({ block: 'nearest' });
+  return true;
+}
+
+// -- Wire up input --
+if (_cmdInput) {
+  _cmdInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      if (_cmdSuggestEl && _cmdSuggestEl.style.display !== 'none' && _cmdSuggestIdx >= 0) {
+        const rows = _cmdSuggestEl.querySelectorAll('._cmd-sug');
+        if (rows[_cmdSuggestIdx]) { _cmdPickSuggestion(rows[_cmdSuggestIdx].dataset.value); e.preventDefault(); return; }
+      }
+      const val = _cmdInput.value;
+      if (val.trim()) {
+        _cmdHistory.push(val);
+        if (_cmdHistory.length > 200) _cmdHistory.shift();
+        _cmdHistoryIdx = -1;
+        _cmdHistoryDraft = '';
+        _cmdHideSuggestions();
+        _executeCommand(val);
+        _cmdInput.value = '';
+      }
+      e.preventDefault();
+    } else if (e.key === 'Escape') {
+      _cmdHideSuggestions();
+    } else if (e.key === 'ArrowUp') {
+      if (_cmdSuggestArrow(-1)) { e.preventDefault(); return; }
+      if (_cmdHistory.length) {
+        if (_cmdHistoryIdx === -1) {
+          _cmdHistoryDraft = _cmdInput.value;
+          _cmdHistoryIdx = _cmdHistory.length - 1;
+        } else if (_cmdHistoryIdx > 0) {
+          _cmdHistoryIdx--;
+        }
+        _cmdInput.value = _cmdHistory[_cmdHistoryIdx];
+        _cmdHideSuggestions();
+      }
+      e.preventDefault();
+    } else if (e.key === 'ArrowDown') {
+      if (_cmdSuggestArrow(1)) { e.preventDefault(); return; }
+      if (_cmdHistoryIdx !== -1) {
+        _cmdHistoryIdx++;
+        if (_cmdHistoryIdx >= _cmdHistory.length) {
+          _cmdHistoryIdx = -1;
+          _cmdInput.value = _cmdHistoryDraft;
+        } else {
+          _cmdInput.value = _cmdHistory[_cmdHistoryIdx];
+        }
+      }
+      e.preventDefault();
+    } else if (e.key === 'Tab') {
+      if (_cmdSuggestEl && _cmdSuggestEl.style.display !== 'none') {
+        const rows = _cmdSuggestEl.querySelectorAll('._cmd-sug');
+        const idx = _cmdSuggestIdx >= 0 ? _cmdSuggestIdx : 0;
+        if (rows[idx]) { _cmdPickSuggestion(rows[idx].dataset.value); e.preventDefault(); return; }
+      }
+      e.preventDefault();
+    }
+    e.stopPropagation();
+  });
+  _cmdInput.addEventListener('input', () => {
+    _cmdSuggestIdx = -1;
+    _cmdShowSuggestions(_cmdInput.value);
+  });
+  _cmdInput.addEventListener('blur', () => setTimeout(_cmdHideSuggestions, 120));
+  _cmdInput.addEventListener('focus', () => _cmdShowSuggestions(_cmdInput.value));
+  _cmdInput.addEventListener('keyup', e => e.stopPropagation());
+}
+
+// Reset cheat state when playtest ends
+const _origCleanupPlaytest = typeof _cleanupPlaytest === 'function' ? _cleanupPlaytest : null;
+if (typeof _cleanupPlaytest !== 'undefined') {
+  // Monkey-patch is not ideal; instead we hook via a mutation observer on healthHud
+  // We'll use a simpler approach: reset on stopPlaytest button
+}
+// Listen for playtest state changes to reset cheats
+const _cmdPlaytestResetInterval = setInterval(() => {
+  if (!state.isPlaytest && (_godMode || _noclip || _speedMul !== 1)) {
+    _godMode = false;
+    _noclip = false;
+    _speedMul = 1;
+  }
+}, 1000);
+
+} // end Console Command System block
+
+// ─── Performance Monitor ─────────────────────────────────────────────────────
+const _perfBufSize = 120; // 60 seconds at 2 Hz
+const _perfBuf = {
+  fps:   new Float32Array(_perfBufSize),
+  draws: new Float32Array(_perfBufSize),
+  tris:  new Float32Array(_perfBufSize),
+  objs:  new Float32Array(_perfBufSize),
+};
+let _perfBufIdx = 0;
+let _perfBufFilled = 0;
+let _perfPaused = false;
+
+const _perfGraphFps   = document.getElementById('perf-graph-fps');
+const _perfGraphDraws = document.getElementById('perf-graph-draws');
+const _perfGraphTris  = document.getElementById('perf-graph-tris');
+const _perfGraphObjs  = document.getElementById('perf-graph-objs');
+const _perfValFps   = document.getElementById('perf-val-fps');
+const _perfValDraws = document.getElementById('perf-val-draws');
+const _perfValTris  = document.getElementById('perf-val-tris');
+const _perfValObjs  = document.getElementById('perf-val-objs');
+const _perfPauseBtn = document.getElementById('perf-pause');
+
+function _pushPerfSample(fps, draws, tris, objs) {
+  if (_perfPaused) return;
+  _perfBuf.fps[_perfBufIdx]   = fps;
+  _perfBuf.draws[_perfBufIdx] = draws;
+  _perfBuf.tris[_perfBufIdx]  = tris;
+  _perfBuf.objs[_perfBufIdx]  = objs;
+  _perfBufIdx = (_perfBufIdx + 1) % _perfBufSize;
+  if (_perfBufFilled < _perfBufSize) _perfBufFilled++;
+
+  // Update value labels
+  if (_perfValFps) _perfValFps.textContent = String(Math.round(fps));
+  if (_perfValDraws) _perfValDraws.textContent = String(Math.round(draws));
+  if (_perfValTris) _perfValTris.textContent = (tris / 1000).toFixed(1) + 'k';
+  if (_perfValObjs) _perfValObjs.textContent = String(Math.round(objs));
+
+  // Only redraw graphs when performance tab is visible
+  if (_activeBpPane === 'performance' && !bottomPanelState.collapsed) {
+    _drawPerfGraph(_perfGraphFps, _perfBuf.fps, _perfBufIdx, _perfBufFilled, [0, 120], _fpsColor);
+    _drawPerfGraph(_perfGraphDraws, _perfBuf.draws, _perfBufIdx, _perfBufFilled, null, '#58a6ff');
+    _drawPerfGraph(_perfGraphTris, _perfBuf.tris, _perfBufIdx, _perfBufFilled, null, '#bc8cff');
+    _drawPerfGraph(_perfGraphObjs, _perfBuf.objs, _perfBufIdx, _perfBufFilled, null, '#3fb950');
+  }
+}
+
+function _fpsColor(value) {
+  if (value >= 50) return '#3fb950';
+  if (value >= 30) return '#d29922';
+  return '#f85149';
+}
+
+function _drawPerfGraph(canvas, buf, idx, filled, range, colorOrFn) {
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  if (w === 0 || h === 0) return;
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  ctx.clearRect(0, 0, w, h);
+
+  if (filled === 0) return;
+
+  // Determine Y range
+  let yMin = 0, yMax = 1;
+  if (range) {
+    yMin = range[0]; yMax = range[1];
+  } else {
+    for (let i = 0; i < filled; i++) {
+      const v = buf[(idx - filled + i + _perfBufSize) % _perfBufSize];
+      if (v > yMax) yMax = v;
+    }
+    yMax = yMax * 1.15 || 1; // 15% headroom
+  }
+
+  const stepX = w / (_perfBufSize - 1);
+
+  ctx.lineWidth = 1.5;
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  for (let i = 0; i < filled; i++) {
+    const v = buf[(idx - filled + i + _perfBufSize) % _perfBufSize];
+    const x = (i / (filled - 1 || 1)) * w;
+    const y = h - ((v - yMin) / (yMax - yMin)) * h;
+    if (typeof colorOrFn === 'function') ctx.strokeStyle = colorOrFn(v);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  if (typeof colorOrFn === 'string') ctx.strokeStyle = colorOrFn;
+  ctx.stroke();
+
+  // Fill under the line
+  const lastX = w;
+  const lastY = h - ((buf[(idx - 1 + _perfBufSize) % _perfBufSize] - yMin) / (yMax - yMin)) * h;
+  ctx.lineTo(lastX, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  ctx.globalAlpha = 0.08;
+  ctx.fillStyle = typeof colorOrFn === 'function' ? '#3fb950' : colorOrFn;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+if (_perfPauseBtn) {
+  _perfPauseBtn.addEventListener('click', () => {
+    _perfPaused = !_perfPaused;
+    _perfPauseBtn.textContent = _perfPaused ? '▶ Resume' : '⏸ Pause';
+  });
+}
+
+// ─── Bottom Panel: Asset Browser ─────────────────────────────────────────────
+const _bpAssetGrid   = document.getElementById('bp-asset-grid');
+const _bpAssetSearch = document.getElementById('bp-asset-search');
+const _bpAssetCatPrev = document.getElementById('bp-asset-cat-prev');
+const _bpAssetCatNext = document.getElementById('bp-asset-cat-next');
+const _bpAssetCatLabel = document.getElementById('bp-asset-cat-label');
+const _bpAssetSort   = document.getElementById('bp-asset-sort');
+const _bpAssetTypeFilter = document.getElementById('bp-asset-type-filter');
+const _bpAssetView   = document.getElementById('bp-asset-view');
+
+const _BP_ASSET_CATEGORIES = [
+  { value: '',          label: 'All' },
+  { value: 'structure', label: 'Structure' },
+  { value: 'shapes',    label: 'Shapes' },
+  { value: 'flat',      label: 'Flat / 2D' },
+  { value: 'gameplay',  label: 'Gameplay' },
+  { value: 'media',     label: 'Media' },
+  { value: 'templates', label: 'Templates' },
+  { value: 'audio',     label: 'Audio' },
+  { value: 'imported',  label: 'Imported' },
+];
+let _bpAssetCatIdx = 0;
+
+const _BP_BUILTIN_ASSETS = [
+  { id: 'wall',       cat: 'structure', icon: '🧱', label: 'Wall' },
+  { id: 'floor',      cat: 'structure', icon: '⬜', label: 'Floor' },
+  { id: 'terrain',    cat: 'structure', icon: '🏔️', label: 'Terrain' },
+  { id: 'cube',       cat: 'shapes',    icon: '📦', label: 'Cube' },
+  { id: 'sphere',     cat: 'shapes',    icon: '🔮', label: 'Sphere' },
+  { id: 'cylinder',   cat: 'shapes',    icon: '🛢️', label: 'Cylinder' },
+  { id: 'cone',       cat: 'shapes',    icon: '🔺', label: 'Cone' },
+  { id: 'pyramid',    cat: 'shapes',    icon: '🔻', label: 'Pyramid' },
+  { id: 'prism',      cat: 'shapes',    icon: '⬡',  label: 'Prism' },
+  { id: 'torus',      cat: 'shapes',    icon: '⭕', label: 'Torus' },
+  { id: 'plane2d',    cat: 'flat',      icon: '▬',  label: 'Plane 2D' },
+  { id: 'triangle2d', cat: 'flat',      icon: '◺',  label: 'Triangle 2D' },
+  { id: 'circle2d',   cat: 'flat',      icon: '●',  label: 'Circle 2D' },
+  { id: 'polygon2d',  cat: 'flat',      icon: '⬠',  label: 'Polygon 2D' },
+  { id: 'light',      cat: 'gameplay',  icon: '💡', label: 'Light' },
+  { id: 'target',     cat: 'gameplay',  icon: '🎯', label: 'Target' },
+  { id: 'checkpoint', cat: 'gameplay',  icon: '🔵', label: 'Checkpoint' },
+  { id: 'spawn',      cat: 'gameplay',  icon: '🟢', label: 'Spawn' },
+  { id: 'joint',      cat: 'gameplay',  icon: '🔗', label: 'Joint' },
+  { id: 'pivot',      cat: 'gameplay',  icon: '🔶', label: 'Pivot' },
+  { id: 'teleport',   cat: 'gameplay',  icon: '🌀', label: 'Teleport' },
+  { id: 'trigger',    cat: 'gameplay',  icon: '⚡', label: 'Trigger' },
+  { id: 'soundzone',  cat: 'gameplay',  icon: '🔊', label: 'Sound Zone' },
+  { id: 'keypad',     cat: 'gameplay',  icon: '🔢', label: 'Keypad' },
+  { id: 'npc',        cat: 'gameplay',  icon: '🧑', label: 'NPC' },
+  { id: 'text',       cat: 'media',     icon: '📝', label: 'Text' },
+  { id: 'text3d',     cat: 'media',     icon: '🔤', label: 'Text 3D' },
+  { id: 'screen',     cat: 'media',     icon: '🖥️', label: 'Screen' },
+  { id: 'camera',     cat: 'media',     icon: '🎥', label: 'Camera' },
+];
+
+function refreshBpAssets() {
+  if (!_bpAssetGrid) return;
+  const search = (_bpAssetSearch?.value || '').trim().toLowerCase();
+  const filter = _BP_ASSET_CATEGORIES[_bpAssetCatIdx]?.value || '';
+  if (_bpAssetCatLabel) _bpAssetCatLabel.textContent = _BP_ASSET_CATEGORIES[_bpAssetCatIdx]?.label || 'All';
+  const isListView = _bpAssetView?.value === 'list';
+  _bpAssetGrid.classList.toggle('list-view', isListView);
+
+  const items = [];
+
+  // Built-in types
+  if (!filter || (filter !== 'templates' && filter !== 'audio' && filter !== 'imported')) {
+    for (const a of _BP_BUILTIN_ASSETS) {
+      if (filter && a.cat !== filter) continue;
+      if (search && !a.label.toLowerCase().includes(search) && !a.id.includes(search)) continue;
+      items.push({ type: 'builtin', id: a.id, icon: a.icon, label: a.label, badge: a.cat });
+    }
+  }
+
+  // Custom templates
+  if (!filter || filter === 'templates') {
+    for (const t of customObjectTemplates) {
+      if (t._isImported) continue;
+      if (search && !t.name.toLowerCase().includes(search)) continue;
+      items.push({ type: 'template', id: t.id, icon: '📁', label: t.name, badge: 'template' });
+    }
+  }
+
+  // Imported models
+  if (!filter || filter === 'imported') {
+    for (const t of customObjectTemplates) {
+      if (!t._isImported) continue;
+      if (search && !t.name.toLowerCase().includes(search)) continue;
+      items.push({ type: 'imported', id: t.id, icon: '📦', label: t.name, badge: 'imported' });
+    }
+  }
+
+  // Audio files
+  if (!filter || filter === 'audio') {
+    for (const a of audioLibrary) {
+      if (search && !a.name.toLowerCase().includes(search)) continue;
+      items.push({ type: 'audio', id: a.id, icon: '🔊', label: a.name, badge: 'audio' });
+    }
+  }
+
+  // Apply type filter
+  const typeFilter = _bpAssetTypeFilter?.value || '';
+  const filtered = typeFilter ? items.filter(it => it.type === typeFilter) : items;
+
+  // Apply sort
+  const sortMode = _bpAssetSort?.value || 'default';
+  if (sortMode === 'name-asc') filtered.sort((a, b) => a.label.localeCompare(b.label));
+  else if (sortMode === 'name-desc') filtered.sort((a, b) => b.label.localeCompare(a.label));
+  else if (sortMode === 'category') filtered.sort((a, b) => a.badge.localeCompare(b.badge) || a.label.localeCompare(b.label));
+
+  if (!filtered.length) {
+    _bpAssetGrid.innerHTML = '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:11px">No assets match</div>';
+    return;
+  }
+
+  _bpAssetGrid.innerHTML = filtered.map(item =>
+    '<div class="bp-asset-card" data-asset-type="' + item.type + '" data-asset-id="' + escapeHtml(item.id) + '">' +
+      '<span class="asset-icon">' + item.icon + '</span>' +
+      '<span class="asset-label" title="' + escapeHtml(item.label) + '">' + escapeHtml(item.label) + '</span>' +
+      '<span class="asset-badge">' + escapeHtml(item.badge) + '</span>' +
+    '</div>'
+  ).join('');
+
+  // Click to place / select
+  _bpAssetGrid.querySelectorAll('.bp-asset-card').forEach(card => {
+    card.addEventListener('click', () => {
+      const aType = card.dataset.assetType;
+      const aId = card.dataset.assetId;
+      if (aType === 'builtin') {
+        state.placingType = aId;
+        setMode('place');
+      } else if (aType === 'template') {
+        state._placingCustomTemplate = aId;
+        setMode('place');
+      } else if (aType === 'imported') {
+        const target = new THREE.Vector3(0, 0, -5)
+          .applyQuaternion(editorCam.quaternion)
+          .add(editorCam.position);
+        placeImportedTemplate(aId, target);
+      } else if (aType === 'audio') {
+        // Preview audio on click
+        const audio = audioLibrary.find(a => a.id === aId);
+        if (audio && audio.objectUrl) {
+          if (libraryPreviewAudioId === aId) {
+            stopLibraryPreviewAudio();
+          } else {
+            stopLibraryPreviewAudio();
+            const player = new Audio(audio.objectUrl);
+            player.volume = 0.3;
+            player.play().catch(() => {});
+            libraryPreviewAudio = player;
+            libraryPreviewAudioId = aId;
+          }
+        }
+      }
+    });
+  });
+  // Right-click on builtin shape cards → voxel/sculpt context menu
+  _bpAssetGrid.querySelectorAll('[data-asset-type="builtin"]').forEach(card => {
+    card.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      showLibraryContextMenu(card.dataset.assetId, e.clientX, e.clientY);
+    });
+  });
+}
+
+
+if (_bpAssetSearch) _bpAssetSearch.addEventListener('input', refreshBpAssets);
+if (_bpAssetCatPrev) _bpAssetCatPrev.addEventListener('click', () => {
+  _bpAssetCatIdx = (_bpAssetCatIdx - 1 + _BP_ASSET_CATEGORIES.length) % _BP_ASSET_CATEGORIES.length;
+  refreshBpAssets();
+});
+if (_bpAssetCatNext) _bpAssetCatNext.addEventListener('click', () => {
+  _bpAssetCatIdx = (_bpAssetCatIdx + 1) % _BP_ASSET_CATEGORIES.length;
+  refreshBpAssets();
+});
+if (_bpAssetSort) _bpAssetSort.addEventListener('change', refreshBpAssets);
+if (_bpAssetTypeFilter) _bpAssetTypeFilter.addEventListener('change', refreshBpAssets);
+if (_bpAssetView) _bpAssetView.addEventListener('change', refreshBpAssets);
+
+// ─── Bottom Panel: Script Editor ─────────────────────────────────────────────
+const _bpScriptSelect = document.getElementById('bp-script-select');
+const _bpScriptAdd    = document.getElementById('bp-script-add');
+const _bpScriptDel    = document.getElementById('bp-script-delete');
+const _bpScriptSim    = document.getElementById('bp-script-sim');
+const _bpScriptEmpty  = document.getElementById('bp-script-empty');
+const _bpScriptContent = document.getElementById('bp-script-content');
+let _bpScriptIdx = -1;
+
+function _refreshBpScriptSelect() {
+  if (!_bpScriptSelect) return;
+  const prev = _bpScriptSelect.value;
+  _bpScriptSelect.innerHTML = '<option value="">— Select FN Group —</option>' +
+    controlFunctions.map((fn, i) =>
+      '<option value="' + i + '">' + escapeHtml(fn.name || 'FN Group ' + (i + 1)) + '</option>'
+    ).join('');
+  if (prev !== '' && parseInt(prev, 10) < controlFunctions.length) {
+    _bpScriptSelect.value = prev;
+  }
+}
+
+function _renderBpScriptEditor(fnIdx) {
+  _bpScriptIdx = fnIdx;
+  if (!_bpScriptContent || !_bpScriptEmpty) return;
+
+  if (fnIdx < 0 || fnIdx >= controlFunctions.length) {
+    _bpScriptEmpty.style.display = 'flex';
+    _bpScriptContent.style.display = 'none';
+    return;
+  }
+
+  _bpScriptEmpty.style.display = 'none';
+  _bpScriptContent.style.display = 'flex';
+
+  const fn = controlFunctions[fnIdx];
+  const groupName = controlFunctionGroups.find(g => g.id === fn.groupId)?.name || 'No group';
+
+  let html = '<div style="padding:4px 0 6px 0;font-size:11px;color:var(--text);font-weight:600">' +
+    escapeHtml(fn.name || 'Unnamed') +
+    '<span style="font-size:9px;color:var(--muted);margin-left:8px">Group: ' + escapeHtml(groupName) + '</span>' +
+    (fn.alwaysActive ? '<span style="font-size:8px;color:var(--success);margin-left:6px">● Always Active</span>' : '') +
+    '</div>';
+
+  if (!fn.actions || !fn.actions.length) {
+    html += '<div style="font-size:10px;color:var(--muted);padding:8px 0">No actions defined. Add actions in the Functions panel →</div>';
+  } else {
+    fn.actions.forEach((action, actIdx) => {
+      const norm = normalizeFunctionAction(action);
+      const typeLabel = norm.actionType.charAt(0).toUpperCase() + norm.actionType.slice(1);
+      let details = '';
+      if (norm.actionType === 'move') {
+        details = 'Target: ' + (norm.refValue || '—') + ' | Offset: [' +
+          (norm.offset || [0,0,0]).map(v => v.toFixed(1)).join(', ') + '] | Duration: ' + norm.duration + 's | Style: ' + norm.style;
+      } else if (norm.actionType === 'rotate') {
+        details = 'Target: ' + (norm.refValue || '—') + ' | Angle: ' +
+          (norm.offset || [0,0,0]).map(v => v.toFixed(0) + '°').join(', ') + ' | Duration: ' + norm.duration + 's';
+      } else if (norm.actionType === 'light') {
+        details = 'Target: ' + (norm.refValue || '—') + ' | Intensity: ' + (norm.lightIntensity ?? '—') +
+          ' | Color: ' + (norm.lightColor || '—');
+      } else if (norm.actionType === 'audio') {
+        details = 'Sound: ' + (norm.audioName || '—') + ' | Volume: ' + (norm.audioVolume ?? 1) +
+          (norm.audioLoop ? ' | Loop' : '');
+      } else if (norm.actionType === 'functionControl') {
+        details = 'Command: ' + (norm.functionControlCommand || '—') + ' | Target: ' + (norm.functionControlTarget || '—');
+      } else if (norm.actionType === 'setVar') {
+        details = (norm.setVarName || '?') + ' ' + (norm.setVarOp || '=') + ' ' + (norm.setVarValue ?? '?');
+      } else if (norm.actionType === 'setBool') {
+        details = (norm.setBoolName || '?') + ' → ' + norm.setBoolValue;
+      } else if (norm.actionType === 'teleport') {
+        details = 'Target: ' + (norm.teleportTarget || '—') + ' | Dest: ' + (norm.teleportDestination || '—');
+      } else if (norm.actionType === 'path') {
+        details = 'Command: ' + (norm.pathCommand || '—');
+      } else if (norm.actionType === 'playerGroup') {
+        details = 'Mode: ' + (norm.playerGroupMode || '—') + ' | Groups: ' + (norm.playerGroupValue || '—');
+      } else if (norm.actionType === 'playerStats') {
+        details = (norm.playerStatKey || '?') + ' ' + (norm.playerStatOp || '=') + ' ' + (norm.playerStatValue ?? '?');
+      } else if (norm.actionType === 'skeleton') {
+        details = 'Target: ' + (norm.refValue || '—');
+      }
+
+      html += '<div class="bp-script-action">' +
+        '<div class="sa-header"><span class="sa-type-badge">' + escapeHtml(typeLabel) + '</span> Action ' + (actIdx + 1) + '</div>' +
+        '<div class="sa-details">' + escapeHtml(details) + '</div>' +
+      '</div>';
+    });
+  }
+
+  _bpScriptContent.innerHTML = html;
+}
+
+if (_bpScriptSelect) {
+  _bpScriptSelect.addEventListener('change', () => {
+    const idx = parseInt(_bpScriptSelect.value, 10);
+    _renderBpScriptEditor(isNaN(idx) ? -1 : idx);
+  });
+}
+
+if (_bpScriptAdd) {
+  _bpScriptAdd.addEventListener('click', () => {
+    const name = 'Function ' + (controlFunctions.length + 1);
+    controlFunctions.push({ name, groupId: '', alwaysActive: false, actions: [] });
+    _refreshBpScriptSelect();
+    refreshControlFunctionsUI();
+    _bpScriptSelect.value = String(controlFunctions.length - 1);
+    _renderBpScriptEditor(controlFunctions.length - 1);
+  });
+}
+
+if (_bpScriptDel) {
+  _bpScriptDel.addEventListener('click', () => {
+    if (_bpScriptIdx < 0 || _bpScriptIdx >= controlFunctions.length) return;
+    if (!confirm('Delete FN Group "' + (controlFunctions[_bpScriptIdx].name || 'Unnamed') + '"?')) return;
+    controlFunctions.splice(_bpScriptIdx, 1);
+    _bpScriptIdx = -1;
+    _refreshBpScriptSelect();
+    refreshControlFunctionsUI();
+    _renderBpScriptEditor(-1);
+  });
+}
+
+if (_bpScriptSim) {
+  _bpScriptSim.addEventListener('click', () => {
+    if (_bpScriptIdx < 0 || _bpScriptIdx >= controlFunctions.length) return;
+    simulateFunction(_bpScriptIdx);
+  });
+}
+
+// ─── Bottom Panel: Timeline ──────────────────────────────────────────────────
+const _tlCanvas   = document.getElementById('tl-canvas');
+const _tlCanvasWrap = document.getElementById('bp-timeline-canvas-wrap');
+const _tlObjSelect = document.getElementById('tl-object-select');
+const _tlPropSelect = document.getElementById('tl-prop-select');
+const _tlAddKfBtn  = document.getElementById('tl-add-kf');
+const _tlPlayBtn   = document.getElementById('tl-play');
+const _tlStopBtn   = document.getElementById('tl-stop');
+const _tlTimeEl    = document.getElementById('tl-time');
+const _tlKfList    = document.getElementById('tl-keyframe-list');
+
+let _tlKeyframes = []; // [{time, prop, value:[...], objectId}]
+let _tlPlaying = false;
+let _tlPlayStart = 0;
+let _tlCurrentTime = 0;
+let _tlDuration = 5; // default 5 seconds
+let _tlSelectedObj = null;
+let _tlAnimFrame = null;
+
+function _refreshTlObjectSelect() {
+  if (!_tlObjSelect) return;
+  const prev = _tlObjSelect.value;
+  let html = '<option value="">— Select —</option>';
+  for (const m of sceneObjects) {
+    const name = m.userData.name || m.userData.type || m.uuid.slice(0, 8);
+    html += '<option value="' + m.uuid + '">' + escapeHtml(name) + '</option>';
+  }
+  _tlObjSelect.innerHTML = html;
+  if (prev) _tlObjSelect.value = prev;
+}
+
+function _getTlObject() {
+  if (!_tlObjSelect) return null;
+  const uuid = _tlObjSelect.value;
+  if (!uuid) return null;
+  return sceneObjects.find(m => m.uuid === uuid) || null;
+}
+
+function _addTlKeyframe() {
+  const mesh = _getTlObject();
+  if (!mesh) return;
+  const prop = _tlPropSelect?.value || 'position';
+  let value;
+  if (prop === 'position') value = [mesh.position.x, mesh.position.y, mesh.position.z];
+  else if (prop === 'rotation') value = [
+    THREE.MathUtils.radToDeg(mesh.rotation.x),
+    THREE.MathUtils.radToDeg(mesh.rotation.y),
+    THREE.MathUtils.radToDeg(mesh.rotation.z)
+  ];
+  else if (prop === 'scale') value = [mesh.scale.x, mesh.scale.y, mesh.scale.z];
+  else if (prop === 'opacity') value = [mesh.material?.opacity ?? 1];
+  else if (prop === 'color') {
+    const c = mesh.material?.color;
+    value = c ? [c.r, c.g, c.b] : [1, 1, 1];
+  }
+  else return;
+
+  _tlKeyframes.push({
+    time: _tlCurrentTime,
+    prop,
+    value,
+    objectId: mesh.uuid,
+  });
+  _tlKeyframes.sort((a, b) => a.time - b.time);
+  const maxT = Math.max(..._tlKeyframes.map(k => k.time), 5);
+  _tlDuration = maxT + 1;
+  _renderTlCanvas();
+  _renderTlKeyframeList();
+}
+
+function _removeTlKeyframe(idx) {
+  _tlKeyframes.splice(idx, 1);
+  _renderTlCanvas();
+  _renderTlKeyframeList();
+}
+
+function _renderTlKeyframeList() {
+  if (!_tlKfList) return;
+  const mesh = _getTlObject();
+  const objId = mesh?.uuid;
+  const prop = _tlPropSelect?.value || 'position';
+  const relevant = _tlKeyframes
+    .map((kf, i) => ({ kf, i }))
+    .filter(({ kf }) => kf.objectId === objId && kf.prop === prop);
+
+  if (!relevant.length) {
+    _tlKfList.innerHTML = '<div style="padding:4px;color:var(--muted)">No keyframes. Select an object and click "+ Key".</div>';
+    return;
+  }
+
+  _tlKfList.innerHTML = relevant.map(({ kf, i }) =>
+    '<div class="tl-kf-row">' +
+      '<span class="kf-time">' + kf.time.toFixed(2) + 's</span>' +
+      '<span class="kf-val">' + kf.value.map(v => (typeof v === 'number' ? v.toFixed(2) : v)).join(', ') + '</span>' +
+      '<button data-kf-idx="' + i + '">✕</button>' +
+    '</div>'
+  ).join('');
+
+  _tlKfList.querySelectorAll('button[data-kf-idx]').forEach(btn => {
+    btn.addEventListener('click', () => _removeTlKeyframe(parseInt(btn.dataset.kfIdx, 10)));
+  });
+}
+
+function _renderTlCanvas() {
+  if (!_tlCanvas || !_tlCanvasWrap) return;
+  const ctx = _tlCanvas.getContext('2d');
+  const w = _tlCanvasWrap.clientWidth;
+  const h = _tlCanvasWrap.clientHeight;
+  if (w === 0 || h === 0) return;
+  if (_tlCanvas.width !== w || _tlCanvas.height !== h) { _tlCanvas.width = w; _tlCanvas.height = h; }
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Background grid
+  ctx.strokeStyle = 'rgba(255,255,255,.05)';
+  ctx.lineWidth = 1;
+  const secPx = w / _tlDuration;
+  for (let t = 0; t <= _tlDuration; t += 0.5) {
+    const x = t * secPx;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+    if (t === Math.floor(t)) {
+      ctx.fillStyle = 'rgba(255,255,255,.2)';
+      ctx.font = '9px sans-serif';
+      ctx.fillText(t + 's', x + 2, 10);
+    }
+  }
+
+  // Draw keyframe diamonds
+  const mesh = _getTlObject();
+  const objId = mesh?.uuid;
+  const prop = _tlPropSelect?.value || 'position';
+  const propColors = { position: '#58a6ff', rotation: '#d29922', scale: '#3fb950', opacity: '#bc8cff', color: '#f97583' };
+  const color = propColors[prop] || '#58a6ff';
+
+  const relevant = _tlKeyframes.filter(kf => kf.objectId === objId && kf.prop === prop);
+  for (const kf of relevant) {
+    const x = (kf.time / _tlDuration) * w;
+    const y = h / 2;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x, y - 6); ctx.lineTo(x + 5, y); ctx.lineTo(x, y + 6); ctx.lineTo(x - 5, y);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Connect keyframes with lines
+  if (relevant.length > 1) {
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.3;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < relevant.length; i++) {
+      const x = (relevant[i].time / _tlDuration) * w;
+      if (i === 0) ctx.moveTo(x, h / 2); else ctx.lineTo(x, h / 2);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Playhead
+  const phx = (_tlCurrentTime / _tlDuration) * w;
+  ctx.strokeStyle = '#f85149';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(phx, 0); ctx.lineTo(phx, h); ctx.stroke();
+
+  // Playhead triangle
+  ctx.fillStyle = '#f85149';
+  ctx.beginPath(); ctx.moveTo(phx - 5, 0); ctx.lineTo(phx + 5, 0); ctx.lineTo(phx, 7); ctx.closePath(); ctx.fill();
+}
+
+function _tlScrub(e) {
+  if (!_tlCanvasWrap || _tlPlaying) return;
+  const rect = _tlCanvasWrap.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  _tlCurrentTime = frac * _tlDuration;
+  if (_tlTimeEl) _tlTimeEl.textContent = _tlCurrentTime.toFixed(2) + 's';
+  _renderTlCanvas();
+}
+
+if (_tlCanvasWrap) {
+  let scrubbing = false;
+  _tlCanvasWrap.addEventListener('pointerdown', e => {
+    if (_tlPlaying) return;
+    scrubbing = true; _tlScrub(e);
+    _tlCanvasWrap.setPointerCapture(e.pointerId);
+  });
+  _tlCanvasWrap.addEventListener('pointermove', e => { if (scrubbing) _tlScrub(e); });
+  _tlCanvasWrap.addEventListener('pointerup', () => { scrubbing = false; });
+  _tlCanvasWrap.addEventListener('pointercancel', () => { scrubbing = false; });
+}
+
+function _lerpValue(a, b, t) {
+  return a.map((v, i) => v + (b[i] - v) * t);
+}
+
+function _applyTlKeyframeValue(mesh, prop, value) {
+  if (!mesh) return;
+  if (prop === 'position') mesh.position.set(value[0], value[1], value[2]);
+  else if (prop === 'rotation') mesh.rotation.set(
+    THREE.MathUtils.degToRad(value[0]), THREE.MathUtils.degToRad(value[1]), THREE.MathUtils.degToRad(value[2])
+  );
+  else if (prop === 'scale') mesh.scale.set(value[0], value[1], value[2]);
+  else if (prop === 'opacity' && mesh.material) {
+    mesh.material.opacity = value[0];
+    mesh.material.transparent = value[0] < 1;
+  }
+  else if (prop === 'color' && mesh.material?.color) {
+    mesh.material.color.setRGB(value[0], value[1], value[2]);
+  }
+}
+
+function _tlPlayFrame() {
+  if (!_tlPlaying) return;
+  const elapsed = (performance.now() - _tlPlayStart) / 1000;
+  _tlCurrentTime = elapsed % _tlDuration;
+  if (_tlTimeEl) _tlTimeEl.textContent = _tlCurrentTime.toFixed(2) + 's';
+
+  // Interpolate all keyframed properties for the selected object
+  const mesh = _getTlObject();
+  if (mesh) {
+    const props = [...new Set(_tlKeyframes.filter(kf => kf.objectId === mesh.uuid).map(kf => kf.prop))];
+    for (const prop of props) {
+      const kfs = _tlKeyframes.filter(kf => kf.objectId === mesh.uuid && kf.prop === prop);
+      if (!kfs.length) continue;
+      // Find surrounding keyframes
+      let before = null, after = null;
+      for (const kf of kfs) {
+        if (kf.time <= _tlCurrentTime) before = kf;
+        if (kf.time > _tlCurrentTime && !after) after = kf;
+      }
+      if (before && after) {
+        const t = (after.time - before.time) > 0 ? (_tlCurrentTime - before.time) / (after.time - before.time) : 0;
+        _applyTlKeyframeValue(mesh, prop, _lerpValue(before.value, after.value, t));
+      } else if (before) {
+        _applyTlKeyframeValue(mesh, prop, before.value);
+      } else if (after) {
+        _applyTlKeyframeValue(mesh, prop, after.value);
+      }
+    }
+  }
+
+  _renderTlCanvas();
+  _tlAnimFrame = requestAnimationFrame(_tlPlayFrame);
+}
+
+function _tlPlay() {
+  if (_tlPlaying) return;
+  _tlPlaying = true;
+  _tlPlayStart = performance.now() - _tlCurrentTime * 1000;
+  if (_tlPlayBtn) _tlPlayBtn.textContent = '⏸';
+  _tlAnimFrame = requestAnimationFrame(_tlPlayFrame);
+}
+
+function _tlStop() {
+  _tlPlaying = false;
+  if (_tlAnimFrame) cancelAnimationFrame(_tlAnimFrame);
+  _tlAnimFrame = null;
+  _tlCurrentTime = 0;
+  if (_tlTimeEl) _tlTimeEl.textContent = '0.00s';
+  if (_tlPlayBtn) _tlPlayBtn.textContent = '▶';
+  _renderTlCanvas();
+}
+
+if (_tlPlayBtn) _tlPlayBtn.addEventListener('click', () => { _tlPlaying ? _tlStop() : _tlPlay(); });
+if (_tlStopBtn) _tlStopBtn.addEventListener('click', _tlStop);
+if (_tlAddKfBtn) _tlAddKfBtn.addEventListener('click', _addTlKeyframe);
+if (_tlObjSelect) _tlObjSelect.addEventListener('change', () => { _renderTlCanvas(); _renderTlKeyframeList(); });
+if (_tlPropSelect) _tlPropSelect.addEventListener('change', () => { _renderTlCanvas(); _renderTlKeyframeList(); });
+
+// ─── Bottom Panel tab activation hooks ───────────────────────────────────────
+// Refresh data when tabs become visible
+const _origSetBpPane = setBpPane;
+setBpPane = function(name) {
+  _origSetBpPane(name);
+  if (name === 'assets') refreshBpAssets();
+  else if (name === 'script') { _refreshBpScriptSelect(); _renderBpScriptEditor(_bpScriptIdx); }
+  else if (name === 'timeline') { _refreshTlObjectSelect(); _renderTlCanvas(); _renderTlKeyframeList(); }
+};
+
 // ─── Objects Library ─────────────────────────────────────────────────────────
 const _objlibList      = document.getElementById('objlib-list');
 const _objlibSearch    = document.getElementById('objlib-search');
@@ -20425,19 +27846,21 @@ const _objlibCount     = document.getElementById('objlib-count');
 
 const OBJLIB_CATEGORIES = {
   structure: { label: 'Structure', types: ['wall', 'floor', 'terrain'] },
-  shapes:    { label: 'Shapes',    types: ['cube', 'sphere', 'cylinder', 'cone', 'pyramid', 'prism', 'torus'] },
+  shapes:    { label: 'Shapes',    types: ['cube', 'sphere', 'cylinder', 'cone', 'pyramid', 'prism', 'torus', 'hollowbox'] },
   flat:      { label: 'Flat / 2D', types: ['plane2d', 'triangle2d', 'circle2d', 'polygon2d'] },
   gameplay:  { label: 'Gameplay',  types: ['spawn', 'checkpoint', 'target', 'trigger', 'teleport', 'keypad', 'light', 'pivot', 'joint', 'skeleton'] },
   characters: { label: 'Characters', types: ['npc'] },
   media:     { label: 'Media',     types: ['text', 'text3d', 'screen', 'camera'] },
+  imported:  { label: 'Imported',  types: ['imported_model'] },
 };
 
 const OBJLIB_TYPE_ICONS = {
   wall: '🧱', floor: '⬜', target: '🎯', light: '💡', spawn: '🟢', checkpoint: '🔵',
   trigger: '⚡', teleport: '🌀', keypad: '🔢', cube: '📦', sphere: '🔮', cylinder: '🛢️', cone: '🔺',
-  pyramid: '🔻', prism: '⬡', torus: '⭕', plane2d: '▬', triangle2d: '◺', circle2d: '●',
+  pyramid: '🔻', prism: '⬡', torus: '⭕', hollowbox: '▣', plane2d: '▬', triangle2d: '◺', circle2d: '●',
   polygon2d: '⬠', pivot: '🔶', joint: '🔗', skeleton: '🦴', terrain: '🏔️',
   text: '📝', text3d: '🔤', screen: '🖥️', camera: '🎥', npc: '🧑',
+  imported_model: '📦',
 };
 
 function _objlibCategoryOf(type) {
@@ -20663,12 +28086,14 @@ _objlibPopulateTypeFilter();
 // ─── Init ─────────────────────────────────────────────────────────────────────
 new ResizeObserver(onResize).observe(canvasContainer);
 onResize();
-setTopMenu(topMenuSelect.value);
+setTopMenu(topMenuSelect ? topMenuSelect.value : 'block');
 loadEditorSettings();
 applySidebarState({ save: false, reflow: true });
 applyFunctionsPanelState({ save: false, reflow: true });
-setLibraryPane(activeLibraryPane, { save: false });
+applyBottomPanelState({ save: false, reflow: true });
+setBpPane(_activeBpPane);
 refreshAudioLibraryUI();
+setMode(state.mode);   // apply context-sensitive settings visibility
 setSnap(snapSelect.value);
 setDefaultLightIntensity(lightIntensityInput.value);
 setPlacementSides(state.placeSides);
@@ -20677,7 +28102,6 @@ setPlacementOpacity(state.placeOpacity);
 setBrushColor(colorHexToCss(state.brushColor));
 setEraserShape(state.eraserShape);
 setEraserSize(state.eraserSize);
-applySunUI();
 setChunkRange(chunkRangeSelect.value);
 refreshCondTriggerUI();
 ensureControlFunctionGroups();
@@ -20685,7 +28109,6 @@ refreshVarPanel();
 refreshBoolPanel();
 refreshPlayerProfileUI();
 refreshControlFunctionsUI();
-syncFogUI();
 syncFovUI();
 refreshWorldUI();
 refreshCustomObjectUI();
@@ -20723,5 +28146,7 @@ _bootStorage().then(async () => {
 });
 requestAnimationFrame(animate);
 
+// Save restore data when leaving the page
+window.addEventListener('beforeunload', () => { if (_restoreDirty) _flushRestore(); });
 // Save restore data when leaving the page
 window.addEventListener('beforeunload', () => { if (_restoreDirty) _flushRestore(); });

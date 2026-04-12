@@ -3,7 +3,7 @@
 
 const { chromium } = require('playwright');
 
-const BASE_URL = process.env.FLAME3D_BASE_URL || 'http://127.0.0.1:8765';
+const BASE_URL = process.env.FLAME3D_BASE_URL || 'http://127.0.0.1:8000';
 
 async function main() {
   const browser = await chromium.launch({ headless: true });

@@ -8,4 +8,13 @@ if ! command -v npx >/dev/null 2>&1; then
   exit 1
 fi
 
+echo "=== smoke-runtime-export ==="
 FLAME3D_BASE_URL="$BASE_URL" npx --yes -p playwright node qa/smoke-runtime-export.js
+
+echo "=== test-playtest-movement ==="
+FLAME3D_BASE_URL="$BASE_URL" npx -p playwright node qa/test-playtest-movement.js
+
+echo "=== test-skin-fix ==="
+FLAME3D_BASE_URL="$BASE_URL" npx -p playwright node qa/test-skin-fix.js
+
+echo "All smoke tests passed."
